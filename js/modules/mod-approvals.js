@@ -1,6 +1,11 @@
 /* ============================================================================
  * MODULE: QUY TRÌNH PHÊ DUYỆT (APPROVALS)
  * ----------------------------------------------------------------------------
+ * File này là một module CỘNG THÊM (additive) — không sửa app.core.js/app.js/
+ * data.js hiện có. Chỉ cần thêm 1 dòng <script> để nạp file này SAU
+ * js/core/app.core.js và js/app.js đã tồn tại (đặt ngay trước app.js là an
+ * toàn nhất — xem hướng dẫn cuối file).
+ *
  * Cung cấp:
  *  - Quy trình phê duyệt nhiều cấp cho 9 loại chứng từ:
  *    Đề nghị mua hàng, Đơn đặt hàng, Thanh toán, Chi tiền, Giảm giá,
@@ -134,6 +139,16 @@ function approvalDocTypeChip(docType) {
  * 4. ENGINE PHÊ DUYỆT
  * -------------------------------------------------------------------------*/
 const ApprovalEngine = {
+  /* Đăng ký nghiệp vụ thật sự cần thực thi khi một yêu cầu duyệt xong hết cấp
+   * (onApproved) hoặc bị từ chối ở bất kỳ cấp nào (onRejected). Đây là điểm
+   * nối để PR/PO/Thanh toán (hoặc bất kỳ chứng từ nào khác) áp dụng thay đổi
+   * thật vào DB chỉ SAU KHI đã đi hết quy trình phê duyệt — xem mục 8 cuối
+   * file để biết cách đăng ký cho PR/PO/Thanh toán. */
+  handlers: {},
+  registerHandler(docType, { onApproved, onRejected } = {}) {
+    this.handlers[docType] = { onApproved, onRejected };
+  },
+
   create({ docType, docId, title, amount, note }) {
     const workflow = approvalWorkflowOf(docType);
     if (!workflow) {
@@ -168,12 +183,18 @@ const ApprovalEngine = {
 
   currentLevelOf(req) { return (req.levels || []).find((l) => l.level === req.currentLevel); },
 
+  /** Tìm yêu cầu đang chờ duyệt (nếu có) gắn với một chứng từ cụ thể — dùng
+   * để không tạo trùng yêu cầu khi người dùng bấm "Duyệt" nhiều lần. */
+  pendingFor(docType, docId) {
+    return DB.approvalRequests.find((r) => r.docType === docType && r.docId === docId && r.status === 'PENDING');
+  },
+
   canAct(req) {
     const lvl = this.currentLevelOf(req);
     if (!lvl) return false;
     const role = Auth.currentRole();
     if (!role) return false;
-    return role.id === lvl.role || role.id === 'R01';
+    return role.id === lvl.role || role.id === 'ROLE_ADMIN';
   },
 
   approve(requestId, { note = '', signature = '' } = {}) {
@@ -197,6 +218,8 @@ const ApprovalEngine = {
       req.completedAt = new Date().toISOString();
       approvalLog(req.id, req.docType, req.docId, lvl.level, 'FINALIZE', 'Hoàn tất tất cả các cấp phê duyệt');
       Toast.ok('Đã phê duyệt hoàn tất', req.title);
+      try { this.handlers[req.docType]?.onApproved?.(req); }
+      catch (err) { console.error('[ApprovalEngine] onApproved lỗi:', err); Toast.err('Duyệt xong nhưng áp dụng thất bại', String(err?.message || err)); }
     }
     return true;
   },
@@ -216,6 +239,8 @@ const ApprovalEngine = {
     req.completedAt = new Date().toISOString();
     approvalLog(req.id, req.docType, req.docId, lvl.level, 'REJECT', reason);
     Toast.warn('Đã từ chối yêu cầu', req.title);
+    try { this.handlers[req.docType]?.onRejected?.(req); }
+    catch (err) { console.error('[ApprovalEngine] onRejected lỗi:', err); }
     return true;
   },
 
@@ -669,3 +694,232 @@ Object.assign(Actions, {
     Toast.ok('Đã lưu chữ ký điện tử', fullName);
   },
 });
+
+/* ---------------------------------------------------------------------------
+ * 8. NỐI PR / PO / THANH TOÁN VÀO QUY TRÌNH PHÊ DUYỆT NHIỀU CẤP
+ * ----------------------------------------------------------------------------
+ * Nguyên tắc: nút "Duyệt" gốc KHÔNG còn đổi trạng thái ngay — nó chỉ TẠO
+ * (hoặc mở lại) một yêu cầu trong ApprovalEngine. Việc đổi trạng thái thật
+ * (PR -> mh_da_duyet, PO -> APPROVED, ghi nhận thanh toán vào
+ * DB.supplierPayments…) chỉ chạy trong onApproved — tức là SAU KHI đã đi hết
+ * mọi cấp duyệt đã cấu hình. Nếu bị từ chối ở bất kỳ cấp nào, onRejected sẽ
+ * đưa chứng từ về đúng trạng thái "đã từ chối" như luồng cũ.
+ *
+ * File này ghi đè (override) 3 action đã có sẵn trong app.js:
+ *   Actions['pr-approve-action'], Actions['po-approve-action'],
+ *   Actions['supplier-pay-save']
+ * Việc override chỉ có tác dụng nếu mod-approvals.js được nạp SAU app.js
+ * (xem mục 9 — hướng dẫn thứ tự nạp — ngay bên dưới).
+ *
+ * Muốn TẮT phần tích hợp này (chỉ giữ quy trình phê duyệt độc lập ở mục
+ * "Tạo yêu cầu phê duyệt" như trước, không đụng vào PR/PO/Thanh toán) thì
+ * đổi APPROVAL_INTEGRATE_PURCHASE_FLOW thành false.
+ * -------------------------------------------------------------------------*/
+const APPROVAL_INTEGRATE_PURCHASE_FLOW = true;
+
+if (APPROVAL_INTEGRATE_PURCHASE_FLOW) {
+
+  /* ---- 8.1 Đề nghị mua hàng (PR) ------------------------------------- */
+  ApprovalEngine.registerHandler('PR', {
+    onApproved(req) {
+      const p = Q.purchase(req.docId);
+      if (!p || p.status !== 'mh_cho_duyet') return; // đã bị xử lý bằng cách khác trong lúc chờ duyệt
+      const lastLvl = req.levels[req.levels.length - 1];
+      p.status = 'mh_da_duyet';
+      p.approvedBy = lastLvl.approverId;
+      p.approvedByUserId = lastLvl.approverId;
+      p.approvedByName = lastLvl.approverName;
+      p.approvedAt = lastLvl.time;
+      p.approvalRequestId = req.id;
+      if (typeof SystemAPI !== 'undefined') {
+        SystemAPI.audit({ module: 'PURCHASE', entityType: 'PURCHASE_REQUEST', entityId: p.id, action: 'APPROVE', description: `${lastLvl.approverName} phê duyệt ${p.id} qua quy trình ${req.levels.length} cấp`, newData: { status: p.status } });
+      }
+      DB.purchaseApprovals.unshift({ id: nextCode('PA-', DB.purchaseApprovals), prId: p.id, approverId: lastLvl.approverId, time: DB.today + ' 09:00', action: 'approve', prevStatus: 'mh_cho_duyet', nextStatus: 'mh_da_duyet', note: 'Đã phê duyệt qua quy trình phê duyệt nhiều cấp' });
+      F('purchases').prId = p.id;
+      render();
+    },
+    onRejected(req) {
+      const p = Q.purchase(req.docId);
+      if (!p || p.status !== 'mh_cho_duyet') return;
+      const rejectedLvl = req.levels.find((l) => l.status === 'REJECTED');
+      p.status = 'mh_tu_choi';
+      p.rejectedByUserId = rejectedLvl?.approverId || '';
+      p.rejectedByName = rejectedLvl?.approverName || '';
+      p.rejectedAt = rejectedLvl?.time || new Date().toISOString();
+      DB.purchaseApprovals.unshift({ id: nextCode('PA-', DB.purchaseApprovals), prId: p.id, approverId: rejectedLvl?.approverId || '', time: DB.today + ' 09:00', action: 'reject', prevStatus: 'mh_cho_duyet', nextStatus: 'mh_tu_choi', note: rejectedLvl?.note || '' });
+      if (typeof SystemAPI !== 'undefined') SystemAPI.audit({ module: 'PURCHASE', entityType: 'PURCHASE_REQUEST', entityId: p.id, action: 'REJECT', description: `${rejectedLvl?.approverName || ''} từ chối ${p.id}: ${rejectedLvl?.note || ''}`, newData: { status: p.status } });
+      render();
+    },
+  });
+
+  (function overridePrApprove() {
+    const originalPrApprove = Actions['pr-approve-action'];
+    Actions['pr-approve-action'] = function (d, el, e) {
+      const p = Q.purchase(d.id);
+      if (!p) return;
+      // Nhánh chuyển báo giá NCC đã chọn thành PO (trạng thái PENDING_APPROVAL cũ) giữ nguyên hành vi gốc.
+      if (p.status === 'PENDING_APPROVAL') { return originalPrApprove.call(this, d, el, e); }
+      if (p.status !== 'mh_cho_duyet') { Toast.err('Không thể duyệt', 'Đề nghị mua hàng không ở trạng thái Chờ duyệt.'); return; }
+      let req = ApprovalEngine.pendingFor('PR', p.id);
+      if (!req) {
+        req = ApprovalEngine.create({ docType: 'PR', docId: p.id, title: `Đề nghị mua hàng ${p.id}`, amount: p.total, note: p.reason });
+        if (!req) return;
+        p.approvalRequestId = req.id;
+      }
+      Modal.close();
+      go('approvals', { tab: 'pending' });
+      const lvl = ApprovalEngine.currentLevelOf(req);
+      Toast.info('Đã chuyển sang quy trình phê duyệt', `${req.id} · Đang chờ: ${approvalRoleName(lvl.role)}`);
+    };
+  })();
+
+  /* Nút "Từ chối" cũ của PR vẫn thao tác trực tiếp trên PR — nếu PR đó đang
+   * có một yêu cầu phê duyệt PENDING thì hủy luôn yêu cầu đó để tránh treo
+   * một yêu cầu không còn ý nghĩa trong danh sách "Việc cần duyệt". */
+  (function overridePrRejectSave() {
+    const originalPrRejectSave = Actions['pr-reject-save'];
+    Actions['pr-reject-save'] = function (d, el, e) {
+      const before = Q.purchase(d.id)?.status;
+      const result = originalPrRejectSave.call(this, d, el, e);
+      const p = Q.purchase(d.id);
+      if (p && before === 'mh_cho_duyet' && p.status === 'mh_tu_choi') {
+        const req = ApprovalEngine.pendingFor('PR', p.id);
+        if (req) ApprovalEngine.cancel(req.id, 'PR bị từ chối trực tiếp ngoài quy trình nhiều cấp');
+      }
+      return result;
+    };
+  })();
+
+  /* ---- 8.2 Đơn đặt hàng (PO) ------------------------------------------ */
+  ApprovalEngine.registerHandler('PO', {
+    onApproved(req) {
+      const po = Q.purchaseOrder(req.docId);
+      if (!po || po.status !== 'PENDING_APPROVAL') return;
+      po.status = 'APPROVED';
+      const pr = Q.purchase(po.prId);
+      if (pr) pr.status = 'mh_da_dat_hang';
+      render();
+    },
+    onRejected(req) {
+      const po = Q.purchaseOrder(req.docId);
+      if (!po || po.status !== 'PENDING_APPROVAL') return;
+      const rejectedLvl = req.levels.find((l) => l.status === 'REJECTED');
+      po.status = 'CANCELLED';
+      po.cancelledAt = DB.today;
+      po.cancelledBy = rejectedLvl?.approverId || '';
+      po.cancelReason = `Từ chối tại quy trình phê duyệt nhiều cấp: ${rejectedLvl?.note || ''}`;
+      render();
+    },
+  });
+
+  (function overridePoApprove() {
+    const originalPoApprove = Actions['po-approve-action'];
+    Actions['po-approve-action'] = function (d, el, e) {
+      const po = Q.purchaseOrder(d.id);
+      if (!po || po.status !== 'PENDING_APPROVAL') return;
+      let req = ApprovalEngine.pendingFor('PO', po.id);
+      if (!req) {
+        req = ApprovalEngine.create({ docType: 'PO', docId: po.id, title: `Đơn đặt hàng ${po.id} — ${Q.supplierName(po.supplierId)}`, amount: po.total, note: po.note });
+        if (!req) return;
+      }
+      Modal.close();
+      go('approvals', { tab: 'pending' });
+      const lvl = ApprovalEngine.currentLevelOf(req);
+      Toast.info('Đã chuyển sang quy trình phê duyệt', `${req.id} · Đang chờ: ${approvalRoleName(lvl.role)}`);
+    };
+  })();
+
+  /* ---- 8.3 Thanh toán nhà cung cấp ------------------------------------ */
+  ApprovalEngine.registerHandler('PAYMENT', {
+    onApproved(req) {
+      const payload = req.payload || {};
+      const po = Q.purchaseOrder(payload.poId);
+      if (!po) { Toast.err('Không tìm thấy đơn mua', payload.poId); return; }
+      const remain = po.total - po.paid;
+      const amount = Math.max(0, Math.min(payload.amount, remain));
+      if (amount <= 0) { Toast.warn('Đơn hàng đã hết công nợ', `${po.id} không còn dư nợ để ghi nhận thanh toán.`); return; }
+      po.paid = Math.round(po.paid + amount);
+      const id = nextCode('TT-2026-', DB.supplierPayments);
+      DB.supplierPayments.unshift({
+        id, poId: po.id, supplierId: po.supplierId, date: DB.today, amount,
+        method: payload.method, bankRef: payload.bankRef, note: payload.note,
+        createdBy: payload.createdBy, approvalRequestId: req.id,
+      });
+      render();
+      Toast.ok('Đã ghi nhận thanh toán sau khi duyệt xong', `${id} — ${fmtVND(amount)}`);
+    },
+    onRejected(req) {
+      Toast.warn('Yêu cầu thanh toán bị từ chối', req.title);
+    },
+  });
+
+  (function overrideSupplierPaySave() {
+    const originalSupplierPaySave = Actions['supplier-pay-save'];
+    Actions['supplier-pay-save'] = function (d, el, e) {
+      const po = Q.purchaseOrder(d.poid);
+      if (!po) return;
+      const amount = Number($('#payAmount')?.value) || 0;
+      const remain = po.total - po.paid;
+      if (amount <= 0) { Toast.err('Số tiền không hợp lệ', 'Vui lòng nhập số tiền lớn hơn 0.'); return; }
+      if (amount > remain) { Toast.err('Vượt quá dư nợ', `Số tiền nhập (${fmtVND(amount)}) vượt quá nợ còn lại (${fmtVND(remain)}).`); return; }
+      const method = $('#payMethod')?.value || '';
+      const bankRef = $('#payRef')?.value || '';
+      const note = $('#payNote')?.value.trim() || '';
+      const req = ApprovalEngine.create({ docType: 'PAYMENT', docId: po.id, title: `Thanh toán cho ${po.id} — ${Q.supplierName(po.supplierId)}`, amount, note });
+      if (!req) return;
+      req.payload = { poId: po.id, amount, method, bankRef, note, createdBy: DB.currentUser.id };
+      Modal.close();
+      go('approvals', { tab: 'pending' });
+      const lvl = ApprovalEngine.currentLevelOf(req);
+      Toast.info('Đã gửi yêu cầu duyệt thanh toán', `${req.id} · ${fmtVND(amount)} sẽ được ghi vào công nợ sau khi ${approvalRoleName(lvl.role)} duyệt xong.`);
+    };
+  })();
+}
+
+/* ============================================================================
+ * 9. HƯỚNG DẪN TÍCH HỢP VÀO DỰ ÁN (THỨ TỰ NẠP SCRIPT LÀ ĐIỂM QUAN TRỌNG NHẤT)
+ * ----------------------------------------------------------------------------
+ * QUAN TRỌNG — SỬA LẠI so với hướng dẫn trước: file này PHẢI được nạp SAU
+ * js/app.js, KHÔNG phải trước. Lý do: biến `Actions` được khai báo bằng
+ * `const Actions = {...}` bên trong app.js; các dòng `Object.assign(Actions,
+ * ...)` và việc override Actions['pr-approve-action'] / ['po-approve-action']
+ * / ['supplier-pay-save'] ở mục 7 và mục 8 phía trên chỉ chạy được khi
+ * `Actions` đã tồn tại. Nếu nạp trước app.js sẽ bị lỗi
+ * "Cannot access 'Actions' before initialization" và toàn bộ app không chạy.
+ *
+ * 1) Lưu file này vào: js/modules/mod-approvals.js
+ * 2) Trong index.html, thêm đúng MỘT dòng — đặt SAU dòng nạp js/app.js
+ *    (đặt cạnh các file cùng kiểu "gắn thêm sau app.js" đã có sẵn trong dự án
+ *    là js/modules/mod-accounting.js, mod-logistics.js, mod-rnd-actions.js):
+ *
+ *      <script src="js/app.js?v=20260915-lg46"></script>
+ *
+ *      <script src="js/modules/mod-approvals.js?v=20260915-approvals1"></script>
+ *      <script src="js/modules/mod-accounting.js?v=20260915-bomflow1"></script>
+ *      <script src="js/modules/mod-logistics.js?v=20260915-lg46"></script>
+ *      <script src="js/modules/mod-rnd-actions.js?v=20260915-rnd1"></script>
+ *
+ *    (Thứ tự giữa mod-approvals.js và 3 file mod-accounting/mod-logistics/
+ *    mod-rnd-actions không quan trọng — chúng độc lập với nhau. Chỉ cần cả 4
+ *    file này nằm SAU app.js.)
+ * 3) Không cần sửa gì thêm ở app.core.js — mục "Phê duyệt" đã có sẵn trong
+ *    NAV với đúng 6 tab con: Tổng quan / Việc cần duyệt / Quy trình phê
+ *    duyệt / Nhật ký phê duyệt / Cảnh báo quá hạn / Chữ ký điện tử.
+ * 4) Phạm vi đã nối sẵn (mục 8, bật bằng APPROVAL_INTEGRATE_PURCHASE_FLOW):
+ *      - Nút "Duyệt" của Đề nghị mua hàng (PR) → tạo/mở yêu cầu phê duyệt
+ *        thay vì đổi trạng thái ngay; PR chỉ chuyển "Đã duyệt" sau khi xong
+ *        hết các cấp. Từ chối ở PR module cũ cũng tự hủy yêu cầu đang treo.
+ *      - Nút "Duyệt" của Đơn đặt hàng (PO) → tương tự PR.
+ *      - Nút lưu Thanh toán NCC (modal "Ghi nhận thanh toán" ở PO) → không
+ *        ghi thẳng vào DB.supplierPayments nữa mà tạo yêu cầu duyệt; số
+ *        tiền/PO/hình thức thanh toán được lưu tạm trong `req.payload` và
+ *        chỉ thực sự cộng vào công nợ NCC khi duyệt xong tất cả các cấp.
+ *    Các luồng khác (Giảm giá, Chi tiền, Hủy đơn hàng, Xuất kho đặc biệt,
+ *    Sản xuất ngoài định mức, Đổi trả hàng) chưa có nút bấm riêng trong các
+ *    module tương ứng của dự án hiện tại, nên vẫn dùng qua nút chung "Tạo
+ *    yêu cầu phê duyệt" ở màn Phê duyệt. Muốn nối trực tiếp vào một nút cụ
+ *    thể (ví dụ nút "Hủy đơn hàng" trong CRM), làm đúng khuôn mẫu ở mục 8:
+ *    lưu action gốc lại, viết action mới gọi ApprovalEngine.create(...) thay
+ *    vì đổi trạng thái ngay, rồi ApprovalEngine.registerHandler(docType, {
+ *    onApproved, onRejected }) để thực thi thay đổi thật khi duyệt xong.
+ * ==========================================================================*/
