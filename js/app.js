@@ -354,6 +354,16 @@ const Actions = {
     o.paid = SalesCRM.paidOfOrder(o.id);
     o.receivable = SalesCRM.receivableOfOrder(o);
 
+    // Ghi thêm giao dịch vào sổ ngân hàng để tài khoản được chọn cộng đúng số dư.
+    // AccFin.bankBalance() (mod-accounting.js) chỉ tính từ DB.bankTransactions,
+    // nên nếu thiếu bước này thì chọn ngân hàng nào cũng không thấy số dư đổi.
+    let bankTx = null;
+    if (bankId) {
+      DB.bankTransactions = DB.bankTransactions || [];
+      bankTx = { id: nextCode('BTX-2026-', DB.bankTransactions), bankId, type: 'IN', date, amount, note: `Thu công nợ ${o.id} · ${Q.customerName(o.customerId)}` };
+      DB.bankTransactions.unshift(bankTx);
+    }
+
     if (el) el.disabled = true;
     try {
       if (typeof CRMAPI !== 'undefined') {
@@ -367,6 +377,7 @@ const Actions = {
     } catch (err) {
       // Rollback state/cache giao diện nếu server không lưu được.
       DB.customerPayments = (DB.customerPayments || []).filter(p => p !== payment && p.id !== id);
+      if (bankTx) DB.bankTransactions = (DB.bankTransactions || []).filter(t => t !== bankTx);
       if (oldPaid === undefined) delete o.paid; else o.paid = oldPaid;
       if (oldReceivable === undefined) delete o.receivable; else o.receivable = oldReceivable;
       SalesCRM.saveLocal(['customerPayments','orders'], { sync:false });
@@ -3120,7 +3131,7 @@ const Actions = {
         return;
       }
       const priceInput = document.querySelector(`input.quote-supplier-price[data-material-id="${item.materialId}"][data-supplier-id="${choice.dataset.supplierId}"]`);
-      const price = parseMoney(priceInput?.value) || 0;
+      const price = Number(priceInput?.value) || 0;
       if (price <= 0) {
         Toast.err('Thiếu giá báo', `Vui lòng nhập giá NCC cho ${item.name}.`);
         return;
@@ -3128,7 +3139,7 @@ const Actions = {
       selectedItems.push({ materialId: item.materialId, name: item.name, unit: item.unit, qty: Number(item.qty) || 0, price, amount: price * (Number(item.qty) || 0), supplierId: choice.dataset.supplierId });
       (item.supplierIds || (item.supplierId ? [item.supplierId] : [])).forEach((supplierId) => {
         const input = document.querySelector(`input.quote-supplier-price[data-material-id="${item.materialId}"][data-supplier-id="${supplierId}"]`);
-        const supplierPrice = parseMoney(input?.value) || 0;
+        const supplierPrice = Number(input?.value) || 0;
         if (supplierPrice > 0) quotedItems.push({ materialId: item.materialId, name: item.name, unit: item.unit, qty: Number(item.qty) || 0, price: supplierPrice, amount: supplierPrice * (Number(item.qty) || 0), supplierId, selected: supplierId === choice.dataset.supplierId });
       });
     }
