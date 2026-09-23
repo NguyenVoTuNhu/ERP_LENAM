@@ -1462,7 +1462,6 @@ Views.accounting.after = function () { if ((State.tab || 'dashboard') === 'dashb
 Object.assign(Actions, {
   'acc-cash-add': (d) => openCashTxForm(d.type),
   'acc-cash-save': async (d) => {
-  'acc-cash-save': async (d) => {
     const date = $('#ctxDate')?.value || currentDateYMD();
     const amount = parseMoney($('#ctxAmount')?.value) || 0;
     if (amount <= 0) { Toast.err('Số tiền không hợp lệ', 'Vui lòng nhập số tiền lớn hơn 0.'); return; }
@@ -1518,7 +1517,6 @@ Object.assign(Actions, {
     }
   },
   'acc-bank-tx-add': (d) => openBankTxForm(d.id),
-  'acc-bank-tx-save': async (d) => {
   'acc-bank-tx-save': async (d) => {
     const amount = parseMoney($('#bkTxAmount')?.value) || 0;
     if (amount <= 0) { Toast.err('Số tiền không hợp lệ', 'Vui lòng nhập số tiền lớn hơn 0.'); return; }
