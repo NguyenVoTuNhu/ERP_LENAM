@@ -15,41 +15,47 @@ const SystemAPI = (() => {
   const SESSION_KEY = KIO_CONFIG.storageKeys.authSession;
 
   const ROLE_DEFS = [
+    // Quyền theo nguyên tắc tối thiểu: mỗi tài khoản nghiệp vụ chỉ thấy đúng
+    // phân hệ cần làm việc. Admin/Giám đốc là hai vai trò duy nhất có phạm vi rộng.
     { id:'ROLE_ADMIN', name:'Quản trị hệ thống', permissions:['*'], modules:{'*':'*'} },
-    { id:'ROLE_DIRECTOR', name:'Ban giám đốc', permissions:['VIEW_ALL','PURCHASE_VIEW','INVENTORY_VIEW','QC_VIEW','PRODUCTION_VIEW','CRM_VIEW','ACCOUNTING_VIEW','HR_VIEW','MAINTENANCE_VIEW','APPROVE_HIGH_LEVEL','PURCHASE_PR_APPROVE','PURCHASE_PO_APPROVE','PAYMENT_APPROVE','VIEW_AUDIT'], modules:{dashboard:'*',purchases:'*',warehouse:'*',production:'*',subcontracting:'*',restaurant:'*',accounting:'*',hr:'*',quality:'*',maintenance:'*',crm:'*',logistics:'*',rnd:'*',approvals:'*',bi:'*'} },
-    { id:'ROLE_PURCHASE_MANAGER', name:'Trưởng bộ phận Mua hàng', permissions:['PURCHASE_VIEW','PURCHASE_PR_CREATE','PURCHASE_PR_APPROVE','PURCHASE_PO_CREATE','PURCHASE_PO_APPROVE','PURCHASE_SUPPLIER_MANAGE','PURCHASE_REPORT'], modules:{purchases:'*',warehouse:['inventory','receipts']} },
-    { id:'ROLE_PURCHASE_STAFF', name:'Nhân viên Mua hàng', permissions:['PURCHASE_VIEW','PURCHASE_PR_CREATE','PURCHASE_PO_CREATE','PURCHASE_SUPPLIER_MANAGE','PURCHASE_REPORT'], modules:{purchases:['dashboard','pr','quotes','po','price_history','stock_control','suppliers'],warehouse:['inventory']} },
-    { id:'ROLE_WAREHOUSE_MANAGER', name:'Trưởng/Thủ kho', permissions:['INVENTORY_VIEW','INVENTORY_OPERATE','INVENTORY_ADJUST','PURCHASE_PR_CREATE'], modules:{warehouse:'*',purchases:['pr']} },
-    { id:'ROLE_QC_MANAGER', name:'Trưởng QC/ATTP', permissions:['QC_VIEW','QC_INSPECT','QC_APPROVE','INVENTORY_VIEW'], modules:{quality:'*',warehouse:['inventory','batches','defects','receipts']} },
-    { id:'ROLE_QC_STAFF', name:'Nhân viên QC/ATTP', permissions:['QC_VIEW','QC_INSPECT','INVENTORY_VIEW'], modules:{quality:['dashboard','iqc','pqc','fqc','coa','traceability','defects'],warehouse:['inventory','batches','receipts']} },
-    { id:'ROLE_PRODUCTION_MANAGER', name:'Quản đốc/Trưởng Sản xuất', permissions:['PRODUCTION_VIEW','PRODUCTION_OPERATE','PRODUCTION_APPROVE','INVENTORY_VIEW','PURCHASE_PR_CREATE'], modules:{production:'*',warehouse:['inventory'],purchases:['pr']} },
-    { id:'ROLE_PRODUCTION_STAFF', name:'Nhân viên/Kế hoạch Sản xuất', permissions:['PRODUCTION_VIEW','PRODUCTION_OPERATE','INVENTORY_VIEW','PURCHASE_PR_CREATE'], modules:{production:['dashboard','orders','bom','routing','plan','progress','issue_nvl','receipt_tp','wip','scrap'],warehouse:['inventory'],purchases:['pr']} },
-    { id:'ROLE_SALES_MANAGER', name:'Trưởng Kinh doanh', permissions:['CRM_VIEW','CRM_OPERATE','CRM_DELETE_CUSTOMER','SALES_ORDER_OPERATE','SALES_APPROVE'], modules:{crm:'*'} },
-    { id:'ROLE_SALES_STAFF', name:'Nhân viên Kinh doanh', permissions:['CRM_VIEW','CRM_OPERATE','SALES_ORDER_OPERATE'], modules:{crm:['dashboard','customers','transactions','orders']} },
-    { id:'ROLE_CHIEF_ACCOUNTANT', name:'Kế toán trưởng', permissions:['ACCOUNTING_VIEW','ACCOUNTING_OPERATE','PAYMENT_APPROVE','PURCHASE_VIEW'], modules:{accounting:'*',purchases:['dashboard','po','debts']} },
-    { id:'ROLE_ACCOUNTANT', name:'Kế toán viên', permissions:['ACCOUNTING_VIEW','ACCOUNTING_OPERATE','PURCHASE_VIEW'], modules:{accounting:['dashboard','general_ledger','ar','ap','cashflow_inout','banking','costing','tax','reports'],purchases:['debts','po']} },
-    { id:'ROLE_HR_MANAGER', name:'Trưởng Hành chính - Nhân sự', permissions:['HR_VIEW','HR_OPERATE'], modules:{hr:'*'} },
-    { id:'ROLE_MAINTENANCE_MANAGER', name:'Trưởng Bảo trì', permissions:['MAINTENANCE_VIEW','MAINTENANCE_OPERATE'], modules:{maintenance:'*'} },
+    { id:'ROLE_DIRECTOR', name:'Ban giám đốc', permissions:['VIEW_ALL','PURCHASE_VIEW','INVENTORY_VIEW','QC_VIEW','PRODUCTION_VIEW','CRM_VIEW','ACCOUNTING_VIEW','HR_VIEW','MAINTENANCE_VIEW','APPROVE_HIGH_LEVEL','PAYMENT_APPROVE','VIEW_AUDIT'], modules:{dashboard:'*',purchases:'*',warehouse:'*',production:'*',subcontracting:'*',restaurant:'*',accounting:'*',hr:'*',quality:'*',maintenance:'*',crm:'*',logistics:'*',rnd:'*',approvals:'*',bi:'*'} },
+
+    { id:'ROLE_PURCHASE', name:'Mua hàng', permissions:['PURCHASE_VIEW','PURCHASE_PR_CREATE','PURCHASE_PO_CREATE','PURCHASE_PO_SEND','PURCHASE_SUPPLIER_MANAGE','PURCHASE_REPORT','INVENTORY_VIEW'], modules:{purchases:'*',warehouse:['inventory']} },
+    // Trưởng phòng Mua hàng KẾ THỪA toàn bộ quyền nghiệp vụ của Mua hàng và
+    // có thêm quyền duyệt PR. Trưởng phòng vẫn có thể nhập báo giá, chọn NCC,
+    // tạo/gửi/hủy PO khi cần; nhân viên Mua hàng cũng làm các bước này bình thường.
+    { id:'ROLE_PURCHASE_MANAGER', name:'Trưởng phòng Mua hàng', permissions:['PURCHASE_VIEW','PURCHASE_PR_CREATE','PURCHASE_PO_CREATE','PURCHASE_PO_SEND','PURCHASE_SUPPLIER_MANAGE','PURCHASE_REPORT','INVENTORY_VIEW','PURCHASE_PR_APPROVE'], modules:{purchases:'*',warehouse:['inventory'],approvals:'*'} },
+    { id:'ROLE_WAREHOUSE', name:'Kho', permissions:['INVENTORY_VIEW','INVENTORY_OPERATE','INVENTORY_ADJUST','PURCHASE_PR_CREATE'], modules:{warehouse:'*',purchases:['pr']} },
+    { id:'ROLE_PRODUCTION', name:'Sản xuất', permissions:['PRODUCTION_VIEW','PRODUCTION_OPERATE','PRODUCTION_APPROVE','INVENTORY_VIEW','PURCHASE_PR_CREATE'], modules:{production:'*',warehouse:['inventory'],purchases:['pr']} },
+    { id:'ROLE_QC', name:'QC / QA', permissions:['QC_VIEW','QC_INSPECT','QC_APPROVE','INVENTORY_VIEW'], modules:{quality:'*',warehouse:['inventory','batches','defects','receipts']} },
+    { id:'ROLE_SALES', name:'Kinh doanh', permissions:['CRM_VIEW','CRM_OPERATE','CRM_DELETE_CUSTOMER','SALES_ORDER_OPERATE','SALES_APPROVE'], modules:{crm:'*'} },
+    { id:'ROLE_ACCOUNTING', name:'Kế toán', permissions:['ACCOUNTING_VIEW','ACCOUNTING_OPERATE','PAYMENT_APPROVE','PURCHASE_VIEW'], modules:{accounting:'*',purchases:['po','debts'],crm:['debts']} },
+    { id:'ROLE_HR', name:'Nhân sự', permissions:['HR_VIEW','HR_OPERATE'], modules:{hr:'*'} },
+    { id:'ROLE_MAINTENANCE', name:'Bảo trì', permissions:['MAINTENANCE_VIEW','MAINTENANCE_OPERATE'], modules:{maintenance:'*'} },
+    { id:'ROLE_LOGISTICS', name:'Logistics', permissions:['LOGISTICS_VIEW','LOGISTICS_OPERATE','CRM_VIEW'], modules:{logistics:'*',crm:['orders']} },
+    { id:'ROLE_RESTAURANT', name:'Nhà hàng / Cửa hàng', permissions:['RESTAURANT_VIEW','RESTAURANT_OPERATE','INVENTORY_VIEW'], modules:{restaurant:'*'} },
+    { id:'ROLE_SUBCONTRACT', name:'Gia công', permissions:['SUBCONTRACT_VIEW','SUBCONTRACT_OPERATE','INVENTORY_VIEW','QC_VIEW'], modules:{subcontracting:'*',warehouse:['inventory','issues'],quality:['subcontracting_qc']} },
+    { id:'ROLE_RND', name:'R&D', permissions:['RND_VIEW','RND_OPERATE','INVENTORY_VIEW'], modules:{rnd:'*',warehouse:['inventory']} },
   ];
 
-  // Chỉ các actor thực sự tạo/duyệt/kiểm soát chứng từ mới có tài khoản.
-  // Công nhân sản xuất vẫn nằm trong DB.employees để truy xuất ca/năng suất nhưng KHÔNG có user ERP.
+  // Tài khoản demo cố ý đặt theo PHÒNG BAN thay vì tên cá nhân để dễ nhớ,
+  // dễ trình bày và dễ kiểm tra phân quyền. Tất cả dùng mật khẩu demo 123456.
   const ACTORS = [
-    { id:'USR-DIR-001', empId:'NV-001', username:'tu.ha',       fullName:'Hà Minh Tú',          dept:'Ban giám đốc',          roleId:'ROLE_DIRECTOR' },
-    { id:'USR-SALES-MGR',empId:'NV-002',username:'anh.nd',      fullName:'Nguyễn Đức Anh',      dept:'Kinh doanh',             roleId:'ROLE_SALES_MANAGER' },
-    { id:'USR-SALES-001',empId:'NV-003',username:'ha.tt',       fullName:'Trần Thu Hà',         dept:'Kinh doanh',             roleId:'ROLE_SALES_STAFF' },
-    { id:'USR-PROD-MGR', empId:'NV-005',username:'bao.pq',      fullName:'Phạm Quốc Bảo',       dept:'Sản xuất',               roleId:'ROLE_PRODUCTION_MANAGER' },
-    { id:'USR-PROD-001', empId:'NV-006',username:'xay.vv',      fullName:'Vũ Văn Xay',          dept:'Sản xuất',               roleId:'ROLE_PRODUCTION_STAFF' },
-    { id:'USR-QC-MGR',   empId:'NV-015',username:'lan.nt',      fullName:'Ngô Thị Lan',         dept:'QC/ATTP',                roleId:'ROLE_QC_MANAGER' },
-    { id:'USR-QC-001',   empId:'NV-016',username:'kiem.tv',     fullName:'Trịnh Văn Kiểm',      dept:'QC/ATTP',                roleId:'ROLE_QC_STAFF' },
-    { id:'USR-WH-MGR',   empId:'NV-018',username:'thang.cv',    fullName:'Cao Văn Thắng',       dept:'Kho vận',                roleId:'ROLE_WAREHOUSE_MANAGER' },
-    { id:'USR-PUR-MGR',  empId:'NV-020',username:'loi.tv',      fullName:'Tạ Văn Lợi',          dept:'Mua hàng',               roleId:'ROLE_PURCHASE_MANAGER' },
-    { id:'USR-PUR-001',  empId:'NV-021',username:'ngan.vtk',    fullName:'Võ Thị Kim Ngân',     dept:'Mua hàng',               roleId:'ROLE_PURCHASE_STAFF' },
-    { id:'USR-ACC-MGR',  empId:'NV-022',username:'thao.ctt',    fullName:'Chu Thị Thanh Thảo',  dept:'Kế toán',                roleId:'ROLE_CHIEF_ACCOUNTANT' },
-    { id:'USR-ACC-001',  empId:'NV-023',username:'ngoc.dt',     fullName:'Dương Thị Ngọc',      dept:'Kế toán',                roleId:'ROLE_ACCOUNTANT' },
-    { id:'USR-HR-MGR',   empId:'NV-024',username:'nhung.mth',   fullName:'Mai Thị Hồng Nhung',  dept:'Hành chính - Nhân sự',   roleId:'ROLE_HR_MANAGER' },
-    { id:'USR-MAINT-MGR',empId:'NV-025',username:'tri.lv',      fullName:'Lâm Văn Trí',         dept:'Bảo trì - Vệ sinh',      roleId:'ROLE_MAINTENANCE_MANAGER' },
-    { id:'USR-ADMIN',    empId:'',      username:'admin',       fullName:'Admin ERP',            dept:'Hệ thống',               roleId:'ROLE_ADMIN' },
+    { id:'USR-ADMIN',       empId:'',       username:'admin',      fullName:'Quản trị hệ thống',      dept:'Hệ thống',              roleId:'ROLE_ADMIN' },
+    { id:'USR-DIRECTOR',    empId:'NV-001', username:'giamdoc',    fullName:'Hà Minh Tú',             dept:'Ban giám đốc',          roleId:'ROLE_DIRECTOR' },
+    { id:'USR-PURCHASE',    empId:'NV-020', username:'muahang',    fullName:'Tạ Văn Lợi',             dept:'Mua hàng',               roleId:'ROLE_PURCHASE' },
+    { id:'USR-PURCHASE-MGR',empId:'NV-021', username:'truongmuahang',fullName:'Võ Thị Kim Ngân',          dept:'Mua hàng',               roleId:'ROLE_PURCHASE_MANAGER' },
+    { id:'USR-WAREHOUSE',   empId:'NV-018', username:'kho',        fullName:'Cao Văn Thắng',          dept:'Kho vận',                roleId:'ROLE_WAREHOUSE' },
+    { id:'USR-PRODUCTION',  empId:'NV-005', username:'sanxuat',    fullName:'Phạm Quốc Bảo',          dept:'Sản xuất',               roleId:'ROLE_PRODUCTION' },
+    { id:'USR-QC',          empId:'NV-015', username:'qc',         fullName:'Ngô Thị Lan',            dept:'QC/ATTP',                roleId:'ROLE_QC' },
+    { id:'USR-SALES',       empId:'NV-002', username:'kinhdoanh',  fullName:'Nguyễn Đức Anh',         dept:'Kinh doanh',             roleId:'ROLE_SALES' },
+    { id:'USR-ACCOUNTING',  empId:'NV-022', username:'ketoan',     fullName:'Chu Thị Thanh Thảo',     dept:'Kế toán',                roleId:'ROLE_ACCOUNTING' },
+    { id:'USR-HR',          empId:'NV-024', username:'nhansu',     fullName:'Mai Thị Hồng Nhung',     dept:'Hành chính - Nhân sự',   roleId:'ROLE_HR' },
+    { id:'USR-MAINTENANCE', empId:'NV-025', username:'baotri',     fullName:'Lâm Văn Trí',            dept:'Bảo trì - Vệ sinh',      roleId:'ROLE_MAINTENANCE' },
+    { id:'USR-LOGISTICS',   empId:'NV-019', username:'logistics',  fullName:'Đinh Thị Hương',         dept:'Kho vận',                roleId:'ROLE_LOGISTICS' },
+    { id:'USR-RESTAURANT',  empId:'',       username:'cuahang',    fullName:'Nhân viên cửa hàng',     dept:'Nhà hàng & Cửa hàng',    roleId:'ROLE_RESTAURANT' },
+    { id:'USR-SUBCONTRACT', empId:'',       username:'giacong',    fullName:'Điều phối gia công',     dept:'Gia công',               roleId:'ROLE_SUBCONTRACT' },
+    { id:'USR-RND',         empId:'',       username:'rnd',        fullName:'Nhân viên R&D',           dept:'R&D',                    roleId:'ROLE_RND' },
   ];
 
   const PERMISSIONS = [...new Set(ROLE_DEFS.flatMap(r => r.permissions).filter(p => p !== '*'))]
@@ -86,8 +92,14 @@ const SystemAPI = (() => {
     // [PERFORMANCE] Auth dùng cache/actor mặc định để login tức thì. Không đọc
     // 5 bảng KIO ở boot vì các bảng quyền rất ít thay đổi và việc đó từng chặn
     // queue LIST của Purchase/Kho/CRM trong hàng chục giây.
-    const users = cache?.users?.length ? cache.users : defaults;
-    const roles = cache?.roles?.length ? cache.roles : ROLE_DEFS;
+    const cachedById = new Map((cache?.users || []).map(u => [u.id, u]));
+    const users = defaults.map(d => {
+      const old = cachedById.get(d.id) || {};
+      // Không cho cache cũ ghi đè username/role/dept của bộ phân quyền mới.
+      // Chỉ giữ các dữ liệu vận hành thực sự cần bảo toàn.
+      return { ...d, state: old.state || d.state, lastLogin: old.lastLogin || '', passwordHash: old.passwordHash || d.passwordHash };
+    });
+    const roles = ROLE_DEFS;
     const auditLogs = Array.isArray(cache?.auditLogs) ? cache.auditLogs : [];
 
     DB.users = users;
@@ -105,9 +117,11 @@ const SystemAPI = (() => {
     ]);
 
     const byUser = new Map((remoteUsers || []).map(x => [x.id, x]));
-    const mergedUsers = defaults.map(d => ({ ...d, ...(byUser.get(d.id) || {}) }));
-    const byRole = new Map((remoteRoles || []).map(x => [x.id, x]));
-    const mergedRoles = ROLE_DEFS.map(d => ({ ...d, ...(byRole.get(d.id) || {}), permissions:d.permissions, modules:d.modules }));
+    const mergedUsers = defaults.map(d => {
+      const old = byUser.get(d.id) || {};
+      return { ...d, state: old.state || d.state, lastLogin: old.lastLogin || '', passwordHash: old.passwordHash || d.passwordHash };
+    });
+    const mergedRoles = ROLE_DEFS.map(d => ({ ...d }));
     const mergedAudit = Array.isArray(remoteAudit) ? remoteAudit : [];
 
     DB.users = mergedUsers;
@@ -169,10 +183,35 @@ const SystemAPI = (() => {
     return {ok:true,user:u};
   }
 
+  async function flushBusinessDataBeforeRoleSwitch() {
+    // Chỉ flush những API có cơ chế pending/changed thực sự. Chạy song song để
+    // đăng xuất không bị chặn tuần tự bởi nhiều request không liên quan.
+    // Restaurant/Quality lưu trực tiếp ở action nên không ép sync toàn bộ bảng lúc logout.
+    const jobs = [];
+    if (typeof PurchaseAPI !== 'undefined' && PurchaseAPI.flushPending) jobs.push(['Mua hàng', PurchaseAPI.flushPending()]);
+    if (typeof InventoryAPI !== 'undefined' && InventoryAPI.flushPending) jobs.push(['Kho', InventoryAPI.flushPending()]);
+    if (typeof CRMAPI !== 'undefined' && CRMAPI.flushPending) jobs.push(['CRM/Bán hàng', CRMAPI.flushPending()]);
+    if (typeof ProductionAPI !== 'undefined' && ProductionAPI.syncNow) jobs.push(['Sản xuất', ProductionAPI.syncNow()]);
+    if (typeof LogisticsFleet !== 'undefined' && LogisticsFleet.flush) jobs.push(['Logistics', LogisticsFleet.flush()]);
+
+    if (!jobs.length) return true;
+    const results = await Promise.allSettled(jobs.map(([, promise]) => Promise.resolve(promise)));
+    const failed = results
+      .map((r, i) => r.status === 'rejected' ? `${jobs[i][0]}: ${r.reason?.message || r.reason}` : '')
+      .filter(Boolean);
+    if (failed.length) throw new Error(failed.join(' | '));
+    return true;
+  }
+
   async function logout() {
+    // Logout chỉ xử lý phiên đăng nhập. Dữ liệu nghiệp vụ phải được lưu ngay
+    // tại action tạo/sửa/duyệt/thanh toán, không dồn việc đồng bộ tới lúc logout.
     const user = currentUser();
-    if (user) audit({module:'AUTH',entityType:'USER',entityId:user.id,action:'LOGOUT',description:`${user.fullName} đăng xuất hệ thống`}).catch(() => {});
+    if (user) {
+      audit({module:'AUTH',entityType:'USER',entityId:user.id,action:'LOGOUT',description:`${user.fullName} đăng xuất hệ thống`}).catch(() => {});
+    }
     sessionClear();
+    DB.currentUser = null;
     return true;
   }
 
@@ -214,18 +253,27 @@ const SystemAPI = (() => {
       host.innerHTML=`<div class="auth-screen"><form class="auth-card" id="authLoginForm">
         <div class="auth-logo"><i class="fa-solid fa-shield-halved"></i></div>
         <h2>Lê Nam ERP</h2><p>Đăng nhập bằng tài khoản actor được cấp để mọi thao tác có dấu vết.</p>
-        <label>Tên đăng nhập</label><input class="inp" id="authUsername" autocomplete="username" required placeholder="Ví dụ: ngan.vtk">
+        <label>Tên đăng nhập</label><input class="inp" id="authUsername" autocomplete="username" required placeholder="Ví dụ: kho, sanxuat, ketoan">
         <label>Mật khẩu</label><input class="inp" id="authPassword" type="password" autocomplete="current-password" required placeholder="123456">
         <div class="auth-error" id="authError"></div>
         <button class="btn btn-primary" style="width:100%;justify-content:center" type="submit"><i class="fa-solid fa-right-to-bracket"></i> Đăng nhập</button>
         <div class="cell-sub" style="margin-top:12px;text-align:center">Tài khoản demo dùng mật khẩu <b>123456</b></div>
+        <div class="auth-quick-title">Tài khoản dễ nhớ</div>
+        <div class="auth-quick">
+          ${['admin','giamdoc','muahang','truongmuahang','kho','sanxuat','qc','kinhdoanh','ketoan','nhansu','baotri','logistics','cuahang','giacong','rnd'].map(u=>`<button type="button" class="auth-account" data-user="${u}">${u}</button>`).join('')}
+        </div>
       </form></div>`;
       const style=document.createElement('style'); style.id='authStyle'; style.textContent=`
         .auth-screen{position:fixed;inset:0;z-index:99999;background:linear-gradient(135deg,var(--surface-2),var(--bg));display:flex;align-items:center;justify-content:center;padding:20px}
         .auth-card{width:min(420px,100%);background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:30px;box-shadow:0 24px 60px rgba(0,0,0,.16)}
-        .auth-card h2{text-align:center;margin:8px 0}.auth-card>p{text-align:center;color:var(--text-3);font-size:13px;line-height:1.5;margin-bottom:22px}.auth-card label{display:block;font-size:12px;font-weight:700;margin:12px 0 6px}.auth-logo{width:56px;height:56px;margin:auto;border-radius:16px;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:24px}.auth-error{min-height:30px;color:var(--red);font-size:12px;padding-top:7px}`;
+        .auth-card h2{text-align:center;margin:8px 0}.auth-card>p{text-align:center;color:var(--text-3);font-size:13px;line-height:1.5;margin-bottom:22px}.auth-card label{display:block;font-size:12px;font-weight:700;margin:12px 0 6px}.auth-logo{width:56px;height:56px;margin:auto;border-radius:16px;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:24px}.auth-error{min-height:30px;color:var(--red);font-size:12px;padding-top:7px}.auth-quick-title{margin-top:16px;font-size:12px;font-weight:700;color:var(--text-2);text-align:center}.auth-quick{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-top:8px}.auth-account{border:1px solid var(--border);background:var(--surface-2);color:var(--text);border-radius:999px;padding:5px 9px;font-size:11px;cursor:pointer}.auth-account:hover{border-color:var(--primary);color:var(--primary)}`;
       if (!document.getElementById('authStyle')) document.head.appendChild(style);
       const form=document.getElementById('authLoginForm');
+      form.querySelectorAll('.auth-account').forEach(btn => btn.addEventListener('click', () => {
+        document.getElementById('authUsername').value = btn.dataset.user || '';
+        document.getElementById('authPassword').value = '123456';
+        document.getElementById('authPassword').focus();
+      }));
       form.addEventListener('submit', async e => {
         e.preventDefault(); const btn=form.querySelector('button'); btn.disabled=true;
         const res=await login(document.getElementById('authUsername').value,document.getElementById('authPassword').value);
@@ -239,5 +287,5 @@ const SystemAPI = (() => {
 
   async function saveUsers() { await syncTable('users', DB.users || []); cacheWrite({users:DB.users||[],roles:DB.roles||[],auditLogs:DB.auditLogs||[],syncedAt:Date.now()}); return true; }
 
-  return {bootstrap,refreshFromServer,restoreSession,showLogin,login,logout,audit,auditFor,currentUser,saveUsers,ROLE_DEFS,ACTORS,SESSION_KEY};
+  return {bootstrap,refreshFromServer,restoreSession,showLogin,login,logout,flushBusinessDataBeforeRoleSwitch,audit,auditFor,currentUser,saveUsers,ROLE_DEFS,ACTORS,SESSION_KEY};
 })();

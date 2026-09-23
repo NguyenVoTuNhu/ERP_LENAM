@@ -521,7 +521,7 @@ const STATUS = {
   dh_hoan_tat:      { label: 'Hoàn thành',     tone: 'green'  },
   dh_da_huy:       { label: 'Đã hủy',        tone: 'red'    },
   // Lệnh sản xuất
-  lsx_cho_duyet:   { label: 'Chờ duyệt',     tone: 'orange' },
+  lsx_cho_duyet:   { label: 'Chờ sản xuất',  tone: 'slate' },
   lsx_cho_san_xuat:{ label: 'Chờ sản xuất',  tone: 'slate'  },
   lsx_dang_san_xuat:{label: 'Đang sản xuất', tone: 'blue'   },
   lsx_dang_qc:     { label: 'Đang QC',       tone: 'orange' },
@@ -554,6 +554,7 @@ const STATUS = {
   po_partial_received: { label: 'Nhận 1 phần',        tone: 'orange' },
   po_received:         { label: 'Đã nhận đủ',         tone: 'green'  },
   po_cancelled:        { label: 'Đã hủy PO',          tone: 'red'    },
+  READY_TO_SEND:       { label: 'Chờ gửi NCC',         tone: 'orange' },
   SENT_TO_SUPPLIER:    { label: 'Đã gửi NCC',          tone: 'blue'   },
   SHIPPING:            { label: 'Đang giao hàng',     tone: 'teal'   },
   PARTIAL_RECEIVED:    { label: 'Nhận 1 phần',        tone: 'orange' },

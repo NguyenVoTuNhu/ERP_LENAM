@@ -13,6 +13,7 @@ const PurchaseAPI = (() => {
   const TABLES = KIO_CONFIG.purchaseTables;
   const CACHE_KEY = KIO_CONFIG.storageKeys.purchaseCache;
   const DEMO_SEED_KEY = KIO_CONFIG.storageKeys.purchaseDemoSeed;
+  const PENDING_KEY = `${CACHE_KEY}:pending`; // outbox chống mất dữ liệu khi F5
 
   // Snapshot demo lấy đúng một lần sau data.js. Đây chỉ là nguồn seed ban đầu.
   const DEMO_DATA = KioDataUtils.snapshotCollections(TABLES);
@@ -20,6 +21,9 @@ const PurchaseAPI = (() => {
   let syncTimer = null;
   let syncChain = Promise.resolve();
   const pendingKeys = new Set();
+  // dirty/syncing giúp không cho refresh server cũ ghi đè thay đổi vừa thao tác.
+  const dirtyKeys = new Set();
+  const syncingKeys = new Set();
   const localVersion = new Map();
   const lastRefresh = new Map();
   const REFRESH_TTL = 2 * 60 * 1000;
@@ -27,7 +31,10 @@ const PurchaseAPI = (() => {
 
   function versionOf(key) { return Number(localVersion.get(key) || 0); }
   function markLocalChange(keys) {
-    normalizeKeys(keys).forEach(key => localVersion.set(key, versionOf(key) + 1));
+    normalizeKeys(keys).forEach(key => {
+      localVersion.set(key, versionOf(key) + 1);
+      dirtyKeys.add(key);
+    });
   }
 
   function hasData(result) {
@@ -100,12 +107,26 @@ const PurchaseAPI = (() => {
 
     syncChain = syncChain.catch(() => {}).then(async () => {
       for (const key of wanted) {
-        await KioStore.syncCollection(TABLES[key], Array.isArray(DB[key]) ? DB[key] : []);
+        const startedVersion = versionOf(key);
+        syncingKeys.add(key);
+        try {
+          await KioStore.syncCollection(TABLES[key], Array.isArray(DB[key]) ? DB[key] : []);
+          // Chỉ đánh dấu sạch nếu trong lúc sync không phát sinh chỉnh sửa mới.
+          if (versionOf(key) === startedVersion) { dirtyKeys.delete(key); pendingKeys.delete(key); }
+        } finally {
+          syncingKeys.delete(key);
+        }
       }
       writeCache(snapshotCurrentDb());
+      try {
+        if (pendingKeys.size) KioDataUtils.writeJson(PENDING_KEY, {keys:[...pendingKeys], at:Date.now()});
+        else localStorage.removeItem(PENDING_KEY);
+      } catch (_) {}
       if (wanted.length) console.info(`[PurchaseAPI] Đã đồng bộ: ${wanted.join(', ')}`);
       return true;
     }).catch(err => {
+      wanted.forEach(key => { pendingKeys.add(key); dirtyKeys.add(key); });
+      try { KioDataUtils.writeJson(PENDING_KEY,{keys:[...pendingKeys],at:Date.now()}); } catch (_) {}
       console.error('[PurchaseAPI] Đồng bộ KIO thất bại:', err);
       if (typeof Toast !== 'undefined') Toast.err('Không lưu được dữ liệu Purchase', err.message);
       throw err;
@@ -118,16 +139,41 @@ const PurchaseAPI = (() => {
     return syncCollections(Object.keys(TABLES));
   }
 
+  // Xóa thật theo khóa nghiệp vụ trên KIO. syncCollection() cố ý không suy luận
+  // record bị xóa, nên các thao tác Delete phải gọi helper này để F5 không hồi lại.
+  async function deleteCollectionKey(key, ids) {
+    const table = TABLES[key];
+    if (!table) throw new Error(`Purchase collection không hợp lệ: ${key}`);
+    await KioStore.deleteKeys(table, Array.isArray(ids) ? ids : [ids]);
+    writeCache(snapshotCurrentDb());
+    return true;
+  }
+
+  // Ghi ngay các collection đang chờ đồng bộ. Dùng khi đổi tài khoản/đăng xuất
+  // để không mất dữ liệu do timer chưa kịp chạy trước khi reload trang.
+  async function flushPending() {
+    clearTimeout(syncTimer);
+    const keys = [...new Set([...pendingKeys, ...dirtyKeys])];
+    pendingKeys.clear();
+    if (keys.length) await syncCollections(keys);
+    else await syncChain.catch(() => {});
+    return true;
+  }
+
   function scheduleCollections(keys, delay = 120) {
     const normalized = normalizeKeys(keys);
     normalized.forEach(key => pendingKeys.add(key));
     markLocalChange(normalized);
+    // Ghi snapshot + outbox ngay trước request server để F5 không làm mất thao tác.
+    writeCache(snapshotCurrentDb());
+    try { KioDataUtils.writeJson(PENDING_KEY, {keys:[...pendingKeys], at:Date.now()}); } catch (_) {}
+    // Ghi server gần như ngay sau thao tác. Vẫn gom các thay đổi cùng tick để
+    // tránh spam KRUD, nhưng không để timer 80-250ms khiến F5/đổi role mất dữ liệu.
     clearTimeout(syncTimer);
     syncTimer = setTimeout(() => {
       const keysToSync = [...pendingKeys];
-      pendingKeys.clear();
       syncCollections(keysToSync).catch(() => {});
-    }, delay);
+    }, 0);
   }
 
   function scheduleSync(delay = 120) {
@@ -135,23 +181,15 @@ const PurchaseAPI = (() => {
   }
 
   async function loadServerAndSeedIfNeeded() {
-    const serverData = await readAll();
-    const alreadySeeded = KioDataUtils.storageGet(DEMO_SEED_KEY) === '1';
-
-    // [PERFORMANCE] Demo chỉ seed đúng một lần. Sau khi đã seed thành công,
-    // KIO server là nguồn chuẩn và bootstrap chỉ đọc dữ liệu, không so/ghi lại
-    // toàn bộ Purchase ở mỗi lần mở trang. Business logic Purchase không đổi.
-    if (alreadySeeded && hasData(serverData)) return serverData;
-
-    const merged = await seedMissingDemo(serverData);
-    KioDataUtils.storageSet(DEMO_SEED_KEY, '1');
-    return merged;
+    // REAL DATA: không seed/merge data.js. Server lenam_* là nguồn duy nhất.
+    return readAll();
   }
 
   async function bootstrap() {
     if (booted) return true;
     booted = true;
     const cached = readCache();
+    const pendingState = KioDataUtils.readJson(PENDING_KEY);
 
     // [PERFORMANCE] Bootstrap chỉ nạp cache/data.js. Không tự đọc toàn bộ 8 bảng
     // Purchase ngay khi đăng nhập. Server sẽ refresh đúng bảng của tab người dùng
@@ -160,8 +198,13 @@ const PurchaseAPI = (() => {
       apply(cached);
       console.info('[PurchaseAPI] Đã nạp cache local; chờ refresh theo màn hình đang mở.');
     } else {
-      console.info('[PurchaseAPI] Chưa có cache; dùng dữ liệu hiện tại.');
+      Object.keys(TABLES).forEach(key => { DB[key] = []; });
+      console.info('[PurchaseAPI] Chưa có cache server; chờ tải dữ liệu thật từ KIO.');
     }
+    // Replay thay đổi chưa kịp lên server ở lần chạy trước trước khi refresh.
+    const replay = normalizeKeys(pendingState?.keys || []);
+    replay.forEach(key => { pendingKeys.add(key); dirtyKeys.add(key); });
+    if (replay.length) await syncCollections(replay);
     return true;
   }
 
@@ -173,7 +216,7 @@ const PurchaseAPI = (() => {
     for (const key of wanted) {
       const startedVersion = versionOf(key);
       try {
-        const rows = await KioStore.listCollection(TABLES[key]);
+        const rows = await KioStore.listCollection(TABLES[key], { force });
         // Nếu user vừa sửa dữ liệu trong lúc request đang chạy thì không cho
         // server snapshot cũ ghi đè DB.* vừa thay đổi.
         if (versionOf(key) !== startedVersion) continue;
@@ -190,6 +233,9 @@ const PurchaseAPI = (() => {
 
   async function ensureFresh(keys, { force = false } = {}) {
     const wanted = normalizeKeys(keys).filter(key => {
+      // Không đọc snapshot server khi collection vừa thay đổi hoặc đang ghi;
+      // nếu không PO vừa tạo có thể biến mất trước khi KIO sync xong.
+      if (dirtyKeys.has(key) || syncingKeys.has(key) || pendingKeys.has(key)) return false;
       if (force) return true;
       return (Date.now() - Number(lastRefresh.get(key) || 0)) >= REFRESH_TTL;
     });
@@ -209,9 +255,7 @@ const PurchaseAPI = (() => {
   // logic nghiệp vụ trong action gốc.
   const ACTION_KEYS = {
     'supplier-save': () => ['suppliers'],
-    'supplier-delete': () => ['suppliers'],
     'pr-save': () => ['purchases'],
-    'pr-delete': () => ['purchases', 'supplierQuotations'],
     'pr-add-supplier': () => ['purchases'],
     'pr-select-supplier': () => ['purchases'],
     'pr-approve-action': () => ['purchases'],
@@ -250,5 +294,5 @@ const PurchaseAPI = (() => {
     Object.defineProperty(actions, '__purchaseApiWrapped', { value: true });
   }
 
-  return { bootstrap, refreshFromServer, refreshKeys, ensureFresh, syncAll, syncCollections, scheduleSync, scheduleCollections, wrapActions };
+  return { bootstrap, refreshFromServer, refreshKeys, ensureFresh, syncAll, syncCollections, deleteCollectionKey, flushPending, scheduleSync, scheduleCollections, wrapActions };
 })();

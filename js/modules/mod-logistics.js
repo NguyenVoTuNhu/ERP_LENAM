@@ -9,6 +9,7 @@
 
   const KEY = (typeof KIO_CONFIG !== 'undefined' && KIO_CONFIG.storageKeys?.logisticsCache) || 'lenam_logistics_v2';
   const LEGACY_KEY = 'lenam_logistics_v1';
+  const PENDING_KEY = `${KEY}:pending`; // outbox chống mất dữ liệu khi F5
   const TABLES = (typeof KIO_CONFIG !== 'undefined' && KIO_CONFIG.logisticsTables) || {
     vehicleTypes:'lenam_logistics_vehicle_types', vehicles:'lenam_logistics_vehicles', drivers:'lenam_logistics_drivers', deliveries:'lenam_logistics_deliveries', maintenance:'lenam_logistics_maintenance'
   };
@@ -84,13 +85,18 @@
   function rememberBaseline() { COLLECTIONS.forEach(k => lastSerialized.set(k, JSON.stringify(L?.[k] || []))); }
   function load() {
     if (L) return L;
-    try { L = JSON.parse(localStorage.getItem(KEY) || localStorage.getItem(LEGACY_KEY) || 'null'); } catch (_) { L = null; }
-    const s = seed();
-    if (!L || typeof L !== 'object') L = s;
-    COLLECTIONS.forEach(k => { if (!Array.isArray(L[k])) L[k] = clone(s[k]); });
-    normalizeStatuses();
-    rememberBaseline();
-    if (!serverRefreshStarted) { serverRefreshStarted = true; setTimeout(() => refreshFromServer(), 0); }
+    try { L = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (_) { L = null; }
+    if (!L || typeof L !== 'object') L = {};
+    COLLECTIONS.forEach(k => { if (!Array.isArray(L[k])) L[k] = []; });
+    normalizeStatuses(); rememberBaseline();
+    if (!serverRefreshStarted) {
+      serverRefreshStarted = true;
+      let hasPending=false; try { hasPending=localStorage.getItem(PENDING_KEY)==='1'; } catch (_) {}
+      setTimeout(async()=>{
+        if(hasPending){ try{ await syncChanged(); localStorage.removeItem(PENDING_KEY); }catch(_){ return; } }
+        await refreshFromServer();
+      },0);
+    }
     return L;
   }
   async function syncChanged() {
@@ -102,12 +108,13 @@
       lastSerialized.set(key, JSON.stringify(L[key] || []));
     }
     serverReady = true;
+    try { localStorage.removeItem(PENDING_KEY); } catch (_) {}
     console.info(`[LogisticsAPI] Đã đồng bộ KIO: ${changed.join(', ')}`);
     return true;
   }
   function scheduleServerSync(delay = 180) {
     clearTimeout(syncTimer);
-    syncTimer = setTimeout(() => syncChanged().catch(err => console.warn('[LogisticsAPI] Không đồng bộ được KIO; giữ cache local:', err)), delay);
+    syncTimer = setTimeout(() => syncChanged().catch(err => console.warn('[LogisticsAPI] Không đồng bộ được KIO; giữ cache local:', err)), 0);
   }
   async function ensureInitialFleetDataOnServer(incoming) {
     if (typeof KioStore === 'undefined') return incoming;
@@ -143,39 +150,19 @@
     const versionAtStart = localVersion;
     try {
       const incoming = {};
-      const missing = [];
-      for (const key of COLLECTIONS) {
-        incoming[key] = await KioStore.listCollection(TABLES[key]);
-        if (!incoming[key].length) missing.push(key);
-      }
-      await ensureInitialFleetDataOnServer(incoming);
+      for (const key of COLLECTIONS) incoming[key] = await KioStore.listCollection(TABLES[key]);
       if (localVersion !== versionAtStart) return false;
-
-      // Đồng bộ theo từng collection. Nếu một bảng Logistics riêng lẻ trên KIO
-      // chưa có dữ liệu (thường gặp khi nâng cấp từ bản cũ), giữ collection
-      // local/seed hiện tại và migrate riêng collection đó lên server. Không để
-      // một bảng rỗng làm mất Danh sách xe / Danh sách tài xế trên máy mới.
-      for (const key of COLLECTIONS) {
-        if (incoming[key].length) {
-          L[key] = incoming[key];
-          continue;
-        }
-        const localRows = Array.isArray(L[key]) ? L[key] : [];
-        if (localRows.length) {
-          await KioStore.syncCollection(TABLES[key], clone(localRows));
-          console.info(`[LogisticsAPI] KIO chưa có ${key}; đã migrate ${localRows.length} bản ghi lên server.`);
-        }
-      }
+      COLLECTIONS.forEach(key => { L[key] = Array.isArray(incoming[key]) ? incoming[key] : []; });
       normalizeStatuses(); rememberBaseline(); writeCache(); serverReady = true;
       if (typeof State !== 'undefined' && State.module === 'logistics' && typeof render === 'function') render();
-      console.info('[LogisticsAPI] Đã nạp dữ liệu Logistics từ KIO.');
+      console.info('[LogisticsAPI] Đã nạp dữ liệu Logistics thật từ KIO.');
       return true;
     } catch (err) {
-      console.warn('[LogisticsAPI] Không refresh được KIO; tiếp tục dùng cache local:', err);
+      console.warn('[LogisticsAPI] Không refresh được KIO; giữ snapshot gần nhất:', err);
       return false;
     }
   }
-  function save() { localVersion += 1; writeCache(); scheduleServerSync(); }
+  function save() { localVersion += 1; writeCache(); try{localStorage.setItem(PENDING_KEY,'1');}catch(_){} scheduleServerSync(); }
   function normalizeStatuses() {
     const activeVehicle = new Set((L.deliveries || []).filter(d => ['DISPATCHED','READY','IN_TRANSIT'].includes(d.status)).map(d => d.vehicleId));
     const activeDriver = new Set((L.deliveries || []).filter(d => ['DISPATCHED','READY','IN_TRANSIT'].includes(d.status)).map(d => d.driverId));
@@ -787,5 +774,5 @@
     return id;
   }
 
-  window.LogisticsFleet = { load, save, data:()=>L, createFromSalesOrder };
+  window.LogisticsFleet = { load, save, data:()=>L, createFromSalesOrder, flush:syncChanged, refreshFromServer };
 })();

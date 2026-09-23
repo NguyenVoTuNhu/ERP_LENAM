@@ -13,6 +13,7 @@ const CRMAPI = (() => {
   const TABLES = KIO_CONFIG.crmTables;
   const CACHE_KEY = KIO_CONFIG.storageKeys.crmCache;
   const DEMO_SEED_KEY = KIO_CONFIG.storageKeys.crmDemoSeed;
+  const PENDING_KEY = `${CACHE_KEY}:pending`; // outbox chống mất dữ liệu khi F5
 
   // Chỉ dùng để migrate dữ liệu từ bản CRM trước đây; sau migrate không còn
   // ghi CRM vào lenam_inventory_settings nữa.
@@ -134,17 +135,8 @@ const CRMAPI = (() => {
   }
 
   async function loadServerAndMigrateIfNeeded() {
-    let data = await readAll();
-    const migrated = KioDataUtils.storageGet(DEMO_SEED_KEY) === '1';
-
-    // Migration chỉ chạy một lần. Một bảng CRM rỗng sau đó có thể là trạng thái
-    // hợp lệ (ví dụ chưa có khiếu nại), nên tuyệt đối không tự seed lại demo chỉ
-    // vì collection đang rỗng.
-    if (!migrated) {
-      data = await seedMissingCollections(data);
-    }
-
-    return data;
+    // REAL DATA: chỉ đọc các bảng CRM lenam_*; không tự seed/migrate local demo.
+    return readAll();
   }
 
   function syncCollections(keys) {
@@ -156,12 +148,19 @@ const CRMAPI = (() => {
           Array.isArray(DB[key]) ? DB[key] : []
         );
       }
+      wanted.forEach(key => pendingKeys.delete(key));
       writeCache(snapshotCurrentDb());
+      try {
+        if (pendingKeys.size) KioDataUtils.writeJson(PENDING_KEY,{keys:[...pendingKeys],at:Date.now()});
+        else localStorage.removeItem(PENDING_KEY);
+      } catch (_) {}
       if (wanted.length) {
         console.info(`[CRMAPI] Đã đồng bộ lên KIO: ${wanted.join(', ')}`);
       }
       return true;
     }).catch(err => {
+      wanted.forEach(key => pendingKeys.add(key));
+      try { KioDataUtils.writeJson(PENDING_KEY,{keys:[...pendingKeys],at:Date.now()}); } catch (_) {}
       console.error('[CRMAPI] Đồng bộ KIO thất bại:', err);
       if (typeof Toast !== 'undefined') {
         Toast.err('Không lưu được dữ liệu CRM/Bán hàng', err.message);
@@ -175,16 +174,27 @@ const CRMAPI = (() => {
     return syncCollections(Object.keys(TABLES));
   }
 
+  async function flushPending() {
+    clearTimeout(syncTimer);
+    const keys = [...pendingKeys];
+    if (keys.length) await syncCollections(keys);
+    else await syncChain.catch(() => {});
+    return true;
+  }
+
   function scheduleCollections(keys, delay = 180) {
     const normalized = normalizeKeys(keys);
     normalized.forEach(key => pendingKeys.add(key));
     markLocalChange(normalized);
+    writeCache(snapshotCurrentDb());
+    try { KioDataUtils.writeJson(PENDING_KEY,{keys:[...pendingKeys],at:Date.now()}); } catch (_) {}
+    // Ghi server gần như ngay sau thao tác. Vẫn gom các thay đổi cùng tick để
+    // tránh spam KRUD, nhưng không để timer 80-250ms khiến F5/đổi role mất dữ liệu.
     clearTimeout(syncTimer);
     syncTimer = setTimeout(() => {
       const keysToSync = [...pendingKeys];
-      pendingKeys.clear();
       syncCollections(keysToSync).catch(() => {});
-    }, delay);
+    }, 0);
   }
 
   function scheduleSync(delay = 180) {
@@ -204,14 +214,17 @@ const CRMAPI = (() => {
     if (booted) return true;
     booted = true;
     const cached = readCache();
+    const pendingState = KioDataUtils.readJson(PENDING_KEY);
     if (cached && hasAnyData(cached)) {
       apply(cached);
       console.info('[CRMAPI] Đã nạp cache CRM; chờ refresh theo màn hình đang mở.');
     } else {
-      const legacy = readLegacyLocalState();
-      if (legacy) apply(legacy);
-      console.info('[CRMAPI] Chưa có cache CRM; dùng dữ liệu hiện tại.');
+      // Không tự lấy dữ liệu legacy/demo làm nguồn nghiệp vụ. Route sẽ đọc lenam_* từ server.
+      Object.keys(TABLES).forEach(key => { DB[key] = []; });
+      console.info('[CRMAPI] Chưa có cache server; chờ tải dữ liệu thật từ KIO.');
     }
+    const replay=normalizeKeys(pendingState?.keys||[]); replay.forEach(k=>pendingKeys.add(k));
+    if(replay.length) await syncCollections(replay);
     return true;
   }
 
@@ -221,7 +234,7 @@ const CRMAPI = (() => {
     for (const key of wanted) {
       const startedVersion = versionOf(key);
       try {
-        const rows = await KioStore.listCollection(TABLES[key]);
+        const rows = await KioStore.listCollection(TABLES[key], { force });
         if (versionOf(key) !== startedVersion) continue;
         out[key] = rows;
         DB[key] = rows;
@@ -236,6 +249,7 @@ const CRMAPI = (() => {
 
   async function ensureFresh(keys, { force = false } = {}) {
     const wanted = normalizeKeys(keys).filter(key => {
+      if (pendingKeys.has(key)) return false;
       if (force) return true;
       return (Date.now() - Number(lastRefresh.get(key) || 0)) >= REFRESH_TTL;
     });
@@ -258,6 +272,7 @@ const CRMAPI = (() => {
     ensureFresh,
     syncAll,
     syncCollections,
+    flushPending,
     scheduleSync,
     scheduleCollections,
     deleteKeys,

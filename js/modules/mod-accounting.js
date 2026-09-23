@@ -29,6 +29,84 @@ DB.bankAccounts = DB.bankAccounts || [
   { id: 'BANK-02', name: 'ACB – TK thu hộ đại lý', bankName: 'ACB', accountNumber: '9988776655', accountName: 'CÔNG TY LÊ NAM', openingBalance: 120000000, scopeType: 'COMPANY', storeId: '', active: true, isDefault: false },
 ];
 DB.bankTransactions = DB.bankTransactions || [];
+
+/* ---------------------------------------------------------------------------
+ * BANK LEDGER PERSISTENCE
+ * ---------------------------------------------------------------------------
+ * Không tạo sổ ngân hàng chỉ sống trong RAM. Mỗi tài khoản ngân hàng đã được
+ * lưu thật trên KIO (lenam_restaurant_bank_accounts) mang theo mảng
+ * `transactions`. DB.bankTransactions chỉ là mirror runtime để các màn hình
+ * cũ tiếp tục hoạt động. Nhờ vậy đổi tài khoản/F5 vẫn giữ đúng số dư.
+ */
+const AccountingBank = (() => {
+  function hydrate() {
+    const rows = [];
+    for (const bank of (DB.bankAccounts || [])) {
+      for (const tx of (Array.isArray(bank.transactions) ? bank.transactions : [])) {
+        rows.push({ ...tx, bankId: bank.id });
+      }
+    }
+    DB.bankTransactions = rows;
+    return rows;
+  }
+
+  function findBank(bankId) {
+    return (DB.bankAccounts || []).find(b => String(b.id) === String(bankId));
+  }
+
+  function makeId() {
+    hydrate();
+    return nextCode('BTX-2026-', DB.bankTransactions || []);
+  }
+
+  async function persist() {
+    if (typeof RestaurantQualityAPI !== 'undefined') {
+      await RestaurantQualityAPI.syncRestaurant(['bankAccounts']);
+    }
+    hydrate();
+    return true;
+  }
+
+  async function record({ bankId, type, date, amount, note, sourceType = '', sourceId = '', createdBy = '' }) {
+    const bank = findBank(bankId);
+    const value = Math.round(Number(amount || 0));
+    if (!bank || !bankId || value <= 0) return null;
+    bank.transactions = Array.isArray(bank.transactions) ? bank.transactions : [];
+
+    // Một chứng từ chỉ được cộng/trừ ngân hàng một lần dù user bấm lại hoặc
+    // dữ liệu được hydrate lại từ server.
+    if (sourceType && sourceId) {
+      const existed = bank.transactions.find(t => String(t.sourceType||'') === String(sourceType) && String(t.sourceId||'') === String(sourceId));
+      if (existed) { hydrate(); return existed; }
+    }
+
+    const tx = {
+      id: makeId(), type: type === 'OUT' ? 'OUT' : 'IN',
+      date: date || currentDateYMD(), amount: value, note: note || '',
+      sourceType, sourceId, createdBy: createdBy || DB.currentUser?.id || '',
+      createdAt: new Date().toISOString(),
+    };
+    bank.transactions.unshift(tx);
+    hydrate();
+    await persist();
+    return tx;
+  }
+
+  async function removeBySource(sourceType, sourceId) {
+    let changed = false;
+    for (const bank of (DB.bankAccounts || [])) {
+      const before = Array.isArray(bank.transactions) ? bank.transactions : [];
+      const after = before.filter(t => !(String(t.sourceType||'') === String(sourceType) && String(t.sourceId||'') === String(sourceId)));
+      if (after.length !== before.length) { bank.transactions = after; changed = true; }
+    }
+    if (changed) await persist(); else hydrate();
+    return changed;
+  }
+
+  return { hydrate, record, persist, removeBySource };
+})();
+window.AccountingBank = AccountingBank;
+AccountingBank.hydrate();
 DB.fixedAssets = DB.fixedAssets || [
   { id: 'TS-001', name: 'Kho lạnh 0-4°C KL-01', dept: 'Kho vận', purchaseDate: '2021-03-10', cost: 480000000, usefulYears: 10, status: 'active' },
   { id: 'TS-002', name: 'Máy xay công nghiệp XD-200', dept: 'Sản xuất', purchaseDate: '2020-06-01', cost: 260000000, usefulYears: 8, status: 'active' },
@@ -101,9 +179,12 @@ const AccFin = {
   totalAP() { return AccFin.activePOs().reduce((s, po) => s + (typeof purchasePayableRemaining==='function' ? purchasePayableRemaining(po) : Math.max(0, Number(po.total||0) - Number(po.paid||0))), 0); },
 
   bankBalance(bankId) {
-    const acc = (DB.bankAccounts || []).find((b) => b.id === bankId);
+    const acc = (DB.bankAccounts || []).find((b) => String(b.id) === String(bankId));
     if (!acc) return 0;
-    const moved = (DB.bankTransactions || []).filter((t) => t.bankId === bankId).reduce((s, t) => s + (t.type === 'IN' ? t.amount : -t.amount), 0);
+    const source = Array.isArray(acc.transactions)
+      ? acc.transactions
+      : (DB.bankTransactions || []).filter((t) => String(t.bankId) === String(bankId));
+    const moved = source.reduce((s, t) => s + (t.type === 'IN' ? Number(t.amount||0) : -Number(t.amount||0)), 0);
     return Number(acc.openingBalance || 0) + moved;
   },
   totalBankBalance() { return (DB.bankAccounts || []).reduce((s, b) => s + AccFin.bankBalance(b.id), 0); },
@@ -394,15 +475,21 @@ function openCashTxForm(type) {
     body: `<div class="form-grid">
         <div class="field"><label>Ngày <span class="req">*</span></label><input class="inp" id="ctxDate" type="date" value="${currentDateYMD()}"></div>
         <div class="field"><label>Số tiền <span class="req">*</span></label><input class="inp right num" id="ctxAmount" data-money="1" type="text" inputmode="numeric" min="0" step="1000"></div>
+        <div class="field"><label>Hình thức</label><select class="inp" id="ctxMethod" onchange="accountingCashMethodChanged()"><option value="CASH">Tiền mặt</option><option value="BANK_TRANSFER">Chuyển khoản ngân hàng</option></select></div>
+        <div class="field" id="ctxBankWrap" style="display:none"><label>Tài khoản ngân hàng</label><select class="inp" id="ctxBank"><option value="">-- Chọn tài khoản --</option>${(DB.bankAccounts||[]).filter(b=>b.active!==false).map(b=>`<option value="${esc(b.id)}">${esc(b.name)} · ${esc(b.accountNumber||'')}</option>`).join('')}</select></div>
         <div class="field" style="grid-column:1/-1"><label>Khoản mục</label><select class="inp" id="ctxCategory">${DB.accountingSettings.opexCategories.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}</select></div>
         <div class="field" style="grid-column:1/-1"><label>Diễn giải</label><textarea class="inp" id="ctxNote" rows="2" placeholder="Nội dung khoản thu/chi"></textarea></div>
       </div>`,
     foot: `<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="acc-cash-save" data-type="${type}"><i class="fa-solid fa-floppy-disk"></i>Lưu</button>`,
   });
 }
+function accountingCashMethodChanged(){
+  const wrap=$('#ctxBankWrap'); if(wrap) wrap.style.display=$('#ctxMethod')?.value==='BANK_TRANSFER'?'':'none';
+}
 
 /* ---- 2.3 Ngân hàng ---- */
 function accBankingView() {
+  AccountingBank.hydrate();
   const accRows = (DB.bankAccounts || []).map((b) => {
     const store = (DB.stores || []).find(s => String(s.id) === String(b.storeId));
     const scope = b.scopeType === 'STORE' ? (store?.name || b.storeId || 'Chi nhánh / Cửa hàng') : 'Công ty';
@@ -504,7 +591,41 @@ function accArView() {
 }
 
 /* ---- 2.5 Phải chi — dùng chung dữ liệu Mua hàng ---- */
+// Công nợ phải chi là màn tài chính nhạy với số liệu, vì vậy không được hiển thị
+// snapshot cũ rồi vài giây sau mới nhảy sang dữ liệu KIO. Khi user điều hướng
+// trực tiếp tới tab này, hydrate đúng 4 collection nguồn trước rồi render.
+let __accApHydrated = false;
+let __accApHydrating = false;
+
+function accApEnsureFreshOnce() {
+  if (__accApHydrated || __accApHydrating || typeof PurchaseAPI === 'undefined') return;
+  __accApHydrating = true;
+  Promise.resolve()
+    .then(() => PurchaseAPI.bootstrap?.())
+    .then(() => PurchaseAPI.ensureFresh?.(
+      ['purchaseOrders', 'supplierPayments', 'supplierRefunds', 'suppliers'],
+      { force: true }
+    ))
+    .catch((err) => {
+      console.warn('[Accounting/AP] Không tải được dữ liệu KIO; giữ snapshot hiện tại:', err);
+    })
+    .finally(() => {
+      __accApHydrated = true;
+      __accApHydrating = false;
+      if (State.module === 'accounting' && (State.tab || 'dashboard') === 'ap' && typeof render === 'function') render();
+    });
+}
+
 function accApView() {
+  if (!__accApHydrated && typeof PurchaseAPI !== 'undefined') {
+    accApEnsureFreshOnce();
+    return `${pageHead('Công nợ phải chi','Nguồn duy nhất từ Đơn đặt hàng mua + lịch sử thanh toán nhà cung cấp','')}
+      <div class="card" style="padding:28px;text-align:center">
+        <div style="font-size:28px;margin-bottom:10px"><i class="fa-solid fa-spinner fa-spin"></i></div>
+        <b>Đang tải công nợ phải chi từ server...</b>
+        <div class="muted" style="margin-top:6px">Đang đồng bộ PO, thanh toán và hoàn tiền nhà cung cấp.</div>
+      </div>`;
+  }
   const f=F('acc-ap',{q:'',supplierId:'',status:'',from:'',to:''});
   const q=String(f.q||'').trim().toLowerCase();
   const supplierOpts=(DB.suppliers||[]).map(x=>[x.id,`${x.id} · ${x.name}`]);
@@ -1339,15 +1460,25 @@ Views.accounting.after = function () { if ((State.tab || 'dashboard') === 'dashb
  * chạy — xem hướng dẫn nạp script cuối file). */
 Object.assign(Actions, {
   'acc-cash-add': (d) => openCashTxForm(d.type),
-  'acc-cash-save': (d) => {
+  'acc-cash-save': async (d) => {
     const date = $('#ctxDate')?.value || currentDateYMD();
     const amount = parseMoney($('#ctxAmount')?.value) || 0;
     if (amount <= 0) { Toast.err('Số tiền không hợp lệ', 'Vui lòng nhập số tiền lớn hơn 0.'); return; }
     const category = $('#ctxCategory')?.value || '';
     const note = $('#ctxNote')?.value.trim() || category;
-    DB.cashTransactions.unshift({ id: nextCode('SQ-2026-', DB.cashTransactions), type: d.type, date, amount, category, note, createdBy: DB.currentUser?.id || '' });
-    Modal.close(); render();
-    Toast.ok('Đã ghi nhận', `${d.type === 'THU' ? 'Thu' : 'Chi'} ${fmtVND(amount)} · ${note}`);
+    const method = $('#ctxMethod')?.value || 'CASH';
+    const bankId = method === 'BANK_TRANSFER' ? ($('#ctxBank')?.value || '') : '';
+    if (method === 'BANK_TRANSFER' && !bankId) { Toast.err('Chưa chọn ngân hàng','Vui lòng chọn tài khoản ngân hàng cho khoản chuyển khoản.'); return; }
+    const row = { id: nextCode('SQ-2026-', DB.cashTransactions), type: d.type, date, amount, category, note, method: method==='BANK_TRANSFER'?'Chuyển khoản':'Tiền mặt', bankId, createdBy: DB.currentUser?.id || '' };
+    DB.cashTransactions.unshift(row);
+    try {
+      if (bankId) await AccountingBank.record({ bankId, type:d.type==='THU'?'IN':'OUT', date, amount, note, sourceType:'CASH_TX', sourceId:row.id });
+      Modal.close(); render();
+      Toast.ok('Đã ghi nhận', `${d.type === 'THU' ? 'Thu' : 'Chi'} ${fmtVND(amount)} · ${note}`);
+    } catch(err) {
+      DB.cashTransactions = (DB.cashTransactions||[]).filter(x=>x.id!==row.id);
+      Toast.err('Không lưu được giao dịch ngân hàng', err?.message || 'Vui lòng thử lại.');
+    }
   },
   'acc-cash-delete': (d) => {
     DB.cashTransactions = DB.cashTransactions.filter((t) => t.id !== d.id);
@@ -1385,11 +1516,13 @@ Object.assign(Actions, {
     }
   },
   'acc-bank-tx-add': (d) => openBankTxForm(d.id),
-  'acc-bank-tx-save': (d) => {
+  'acc-bank-tx-save': async (d) => {
     const amount = parseMoney($('#bkTxAmount')?.value) || 0;
     if (amount <= 0) { Toast.err('Số tiền không hợp lệ', 'Vui lòng nhập số tiền lớn hơn 0.'); return; }
-    DB.bankTransactions.unshift({ id: nextCode('BTX-2026-', DB.bankTransactions), bankId: d.id, type: $('#bkTxType')?.value || 'IN', date: $('#bkTxDate')?.value || currentDateYMD(), amount, note: $('#bkTxNote')?.value.trim() || '' });
-    Modal.close(); render(); Toast.ok('Đã ghi nhận giao dịch ngân hàng');
+    try {
+      await AccountingBank.record({ bankId:d.id, type:$('#bkTxType')?.value || 'IN', date:$('#bkTxDate')?.value || currentDateYMD(), amount, note:$('#bkTxNote')?.value.trim() || '', sourceType:'MANUAL_BANK', sourceId:`${d.id}-${Date.now()}` });
+      Modal.close(); render(); Toast.ok('Đã ghi nhận giao dịch ngân hàng');
+    } catch(err) { Toast.err('Không lưu được giao dịch ngân hàng', err?.message || 'Vui lòng thử lại.'); }
   },
 
   'acc-ar-collect': (d) => { const o=AccFin.recognizedOrders().find(x=>x.customerId===d.id && (typeof SalesCRM==='undefined'||SalesCRM.receivableOfOrder(x)>0)); if(o) openCustomerPaymentModal(o.id); },

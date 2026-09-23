@@ -35,7 +35,7 @@ const KioStore = (() => {
   // [PERFORMANCE] Cache kết quả đọc vật lý theo bảng trong một khoảng ngắn.
   // Nhiều màn hình có thể cần cùng một bảng (ví dụ inventory/products/customers);
   // không gọi lại list.php nếu vừa đọc xong. Cache bị vô hiệu ngay khi có ghi/xóa.
-  const ROW_CACHE_TTL = 5 * 60 * 1000;
+  const ROW_CACHE_TTL = 30 * 1000;
   const rowCache = new Map();
   const rowInflight = new Map();
 
@@ -120,7 +120,9 @@ const KioStore = (() => {
 
     // Nếu cùng bảng đang được đọc, các nơi khác dùng chung Promise thay vì tạo
     // thêm một list.php mới. Điều này giảm request trùng và tránh KIO tự abort.
-    if (!force && rowInflight.has(table)) {
+    // Dedupe cả request force: nếu đúng bảng đang có một list.php chạy thì
+    // mọi caller dùng chung Promise đó. Tránh nhiều route/badge cùng F5 tạo request trùng.
+    if (rowInflight.has(table)) {
       return (await rowInflight.get(table)).slice();
     }
 

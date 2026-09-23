@@ -14,6 +14,7 @@ const InventoryAPI = (() => {
   const SETTINGS_TABLE = KIO_CONFIG.inventorySettingsTable;
   const CACHE_KEY = KIO_CONFIG.storageKeys.inventoryCache;
   const DEMO_SEED_KEY = KIO_CONFIG.storageKeys.inventoryDemoSeed;
+  const PENDING_KEY = `${CACHE_KEY}:pending`; // outbox chống mất dữ liệu khi F5
   const DELIVERY_TEST_SEED_VERSION = '20260916-finished-1000-v1';
 
   const DEMO_DATA = KioDataUtils.snapshotCollections(TABLES);
@@ -469,9 +470,16 @@ const InventoryAPI = (() => {
       }
 
       writeCache(snapshotCurrentDb());
+      wanted.forEach(key => pendingKeys.delete(key));
+      try {
+        if (pendingKeys.size) KioDataUtils.writeJson(PENDING_KEY,{keys:[...pendingKeys],at:Date.now()});
+        else localStorage.removeItem(PENDING_KEY);
+      } catch (_) {}
       if (wanted.length) console.info(`[InventoryAPI] Đã đồng bộ: ${wanted.join(', ')}`);
       return true;
     }).catch(err => {
+      wanted.forEach(key => pendingKeys.add(key));
+      try { KioDataUtils.writeJson(PENDING_KEY,{keys:[...pendingKeys],at:Date.now()}); } catch (_) {}
       console.error('[InventoryAPI] Đồng bộ KIO thất bại:', err);
       if (typeof Toast !== 'undefined') Toast.err('Không lưu được dữ liệu Kho', err.message);
       throw err;
@@ -480,21 +488,40 @@ const InventoryAPI = (() => {
     return syncChain;
   }
 
+  async function deleteCollectionKey(key, recordId) {
+    const table = TABLES[key];
+    if (!table || !recordId) throw new Error(`Không xác định được dữ liệu cần xóa: ${key || ''}`);
+    await KioStore.deleteKeys(table, [recordId]);
+    lastRefresh.delete(key);
+    return true;
+  }
+
   function syncAll() {
     return syncCollections([...Object.keys(TABLES), 'settings']);
+  }
+
+  async function flushPending() {
+    clearTimeout(syncTimer);
+    const keys = [...pendingKeys];
+    if (keys.length) await syncCollections(keys);
+    else await syncChain.catch(() => {});
+    return true;
   }
 
   function scheduleCollections(keys, delay = 180) {
     const normalized = normalizeKeys(keys);
     normalized.forEach(key => pendingKeys.add(key));
     markLocalChange(normalized);
+    writeCache(snapshotCurrentDb());
+    try { KioDataUtils.writeJson(PENDING_KEY,{keys:[...pendingKeys],at:Date.now()}); } catch (_) {}
     clearTimeout(syncTimer);
 
+    // Bắt đầu ghi server ở tick kế tiếp. Các thay đổi cùng thao tác vẫn được gom
+    // chung, nhưng không còn cửa sổ 80-250ms có thể bị F5/đổi màn cắt mất.
     syncTimer = setTimeout(() => {
       const keysToSync = [...pendingKeys];
-      pendingKeys.clear();
       syncCollections(keysToSync).catch(() => {});
-    }, delay);
+    }, 0);
   }
 
   function scheduleSync(delay = 180) {
@@ -509,17 +536,10 @@ const InventoryAPI = (() => {
   }
 
   async function loadServerAndSeedIfNeeded() {
+    // REAL DATA: chỉ đọc dữ liệu thật trên lenam_*. Không seed/merge data.js.
     let serverData = await readAll();
     serverData = await cleanupDuplicateCategories(serverData);
     serverData = await cleanupCompletedSupplierReturns(serverData);
-    const alreadySeeded = KioDataUtils.storageGet(DEMO_SEED_KEY) === '1';
-
-    if (!alreadySeeded || !hasData(serverData)) {
-      const merged = await seedMissingDemo(serverData);
-      KioDataUtils.storageSet(DEMO_SEED_KEY, '1');
-      return merged;
-    }
-
     return serverData;
   }
 
@@ -668,6 +688,7 @@ const InventoryAPI = (() => {
     // Đây là tác vụ ghi server khá nặng và không thuộc luồng tải dữ liệu thực tế.
     // Dữ liệu test chỉ được tạo khi người dùng gọi chức năng test tương ứng.
     const cached = readCache();
+    const pendingState = KioDataUtils.readJson(PENDING_KEY);
 
     // [PERFORMANCE] Chỉ nạp cache/data.js ở lúc boot. Không đọc toàn bộ bảng
     // Kho/Master ngay sau đăng nhập. Tab nào được mở thì tab đó mới refresh các
@@ -676,9 +697,13 @@ const InventoryAPI = (() => {
       apply(cached);
       console.info('[InventoryAPI] Đã nạp cache local; chờ refresh theo màn hình đang mở.');
     } else {
-      console.info('[InventoryAPI] Chưa có cache; dùng dữ liệu hiện tại.');
+      Object.keys(TABLES).forEach(key => { DB[key] = []; });
+      console.info('[InventoryAPI] Chưa có cache server; chờ tải dữ liệu thật từ KIO.');
     }
 
+    const replay = normalizeKeys(pendingState?.keys || []).filter(k => k==='settings' || TABLES[k]);
+    replay.forEach(k => pendingKeys.add(k));
+    if (replay.length) await syncCollections(replay);
     return true;
   }
 
@@ -689,17 +714,14 @@ const InventoryAPI = (() => {
     for (const key of wanted) {
       const startedVersion = versionOf(key);
       try {
-        const rows = await KioStore.listCollection(TABLES[key]);
+        const rows = await KioStore.listCollection(TABLES[key], { force });
         if (versionOf(key) !== startedVersion) continue;
         let normalizedRows = rows;
         if (key === 'inventory') {
-          const normalized = uniqueInventoryBalances(rows);
-          normalizedRows = normalized.rows;
-          if (normalized.duplicates > 0) {
-            console.warn(`[InventoryAPI] Phát hiện ${normalized.duplicates} balance tồn kho bị trùng; đang dọn dữ liệu KIO.`);
-            await KioStore.replaceCollection(TABLES.inventory, normalizedRows);
-            console.info('[InventoryAPI] Đã dọn balance tồn kho trùng trên KIO.');
-          }
+          // Chỉ chuẩn hóa để hiển thị; không tự ghi/xóa server trong lúc READ.
+          // Cleanup dữ liệu phải là thao tác quản trị chủ động, tránh mở màn hình
+          // mà phát sinh hàng trăm KRUD và làm chậm toàn hệ thống.
+          normalizedRows = uniqueInventoryBalances(rows).rows;
         }
         out[key] = normalizedRows;
         DB[key] = key === 'materials'
@@ -714,7 +736,7 @@ const InventoryAPI = (() => {
     }
 
     if (wanted.includes('inventory') || wanted.includes('goodsIssues')) {
-      try { await reconcileSalesReservations({ persist: wanted.includes('inventory') && wanted.includes('goodsIssues') }); }
+      try { await reconcileSalesReservations({ persist: false }); }
       catch (err) { console.warn('[InventoryAPI] Không đối soát được giữ chỗ bán:', err); }
     }
     if (Object.keys(out).length) writeCache(snapshotCurrentDb());
@@ -732,17 +754,12 @@ const InventoryAPI = (() => {
   }
 
   async function refreshFromServer() {
-    let data = await cleanupDuplicateCategories(await readAll());
-    data = await cleanupCompletedSupplierReturns(data);
-    const normalizedInventory = uniqueInventoryBalances(data.inventory);
-    if (normalizedInventory.duplicates > 0) {
-      data.inventory = normalizedInventory.rows;
-      await KioStore.replaceCollection(TABLES.inventory, normalizedInventory.rows);
-      console.info(`[InventoryAPI] Đã dọn ${normalizedInventory.duplicates} balance tồn kho trùng khi refresh toàn bộ.`);
-    }
-    if (hasData(data)) {
+    const data = await readAll();
+    if (data && typeof data === 'object') {
+      if (Array.isArray(data.inventory)) data.inventory = uniqueInventoryBalances(data.inventory).rows;
       apply(data);
-      await reconcileSalesReservations({ persist: true });
+      // READ không được tự ghi DB. Chỉ đối soát state hiển thị trong RAM.
+      try { await reconcileSalesReservations({ persist: false }); } catch (_) {}
       Object.keys(TABLES).forEach(key => lastRefresh.set(key, Date.now()));
       writeCache(snapshotCurrentDb());
     }
@@ -751,10 +768,6 @@ const InventoryAPI = (() => {
 
   // Chỉ các action thật sự thay đổi dữ liệu mới được persistence wrapper xử lý.
   const ACTION_KEYS = {
-    'inventory-item-delete': d => [
-      d?.type === 'RAW_MATERIAL' ? 'materials' : d?.type === 'SEMI_FINISHED' ? 'semiFinishedProducts' : 'products',
-      ...(d?.type === 'FINISHED_GOODS' ? ['settings'] : []),
-    ],
     'stock-move-save': () => ['materials', 'inventory', 'inventoryTransactions', 'stockMoves'],
     'inv-count-save': () => ['inventoryCounts'],
     'inv-receipt-save-new': () => ['materials', 'inventoryLots', 'inventory', 'inventoryTransactions'],
@@ -816,6 +829,8 @@ const InventoryAPI = (() => {
     ensureFresh,
     syncAll,
     syncCollections,
+    deleteCollectionKey,
+    flushPending,
     scheduleSync,
     scheduleCollections,
     cacheCurrent,

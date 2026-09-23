@@ -147,10 +147,17 @@ const Auth = {
     if (typeof Toast !== 'undefined') Toast.err('Không có quyền', message);
     return false;
   },
-  canApprovePurchase() { return this.hasPermission('PURCHASE_PR_APPROVE') || this.hasPermission('APPROVE_HIGH_LEVEL'); },
+  canApprovePurchase() { return this.hasPermission('PURCHASE_PR_APPROVE'); },
   canAccess(module, tab=null) {
     // Mỗi actor luôn được xem màn Thông tin phân quyền của chính mình.
     if (module === 'my-access') return !!this.currentAccount();
+
+    // Route chi tiết LSX là màn con của phân hệ Sản xuất, không phải một
+    // module phân quyền độc lập. Vì vậy quyền xem chi tiết kế thừa từ
+    // module `production`. Điều này chỉ cho phép truy cập màn chi tiết;
+    // các nút thao tác bên trong vẫn kiểm tra permission riêng như cũ.
+    if (module === 'production-detail') module = 'production';
+
     const role=this.currentRole();
     if (!role) return false;
     const modules=role.modules || {};
@@ -161,11 +168,37 @@ const Auth = {
     return Array.isArray(tabs) && tabs.includes(tab);
   },
   firstRoute() {
-    const role=this.currentRole(); const modules=role?.modules || {};
+    const role=this.currentRole();
+    const modules=role?.modules || {};
+
+    // Mỗi lần đăng nhập luôn bắt đầu ở trang TỔNG QUAN của đúng phân hệ
+    // mà vai trò đó phụ trách. Không kế thừa tab/route của tài khoản trước.
+    const roleHome = {
+      ROLE_ADMIN:            { module:'dashboard',      tab:null },
+      ROLE_DIRECTOR:         { module:'dashboard',      tab:null },
+      ROLE_PURCHASE:         { module:'purchases',      tab:'dashboard' },
+      ROLE_PURCHASE_MANAGER: { module:'purchases',      tab:'dashboard' },
+      ROLE_WAREHOUSE:        { module:'warehouse',      tab:'dashboard' },
+      ROLE_PRODUCTION:       { module:'production',     tab:'dashboard' },
+      ROLE_QC:               { module:'quality',        tab:'dashboard' },
+      ROLE_SALES:            { module:'crm',            tab:'dashboard' },
+      ROLE_ACCOUNTING:       { module:'accounting',     tab:'dashboard' },
+      ROLE_HR:               { module:'hr',             tab:'dashboard' },
+      ROLE_MAINTENANCE:      { module:'maintenance',    tab:'dashboard' },
+      ROLE_LOGISTICS:        { module:'logistics',      tab:'dashboard' },
+      ROLE_RESTAURANT:       { module:'restaurant',     tab:'dashboard' },
+      ROLE_SUBCONTRACT:      { module:'subcontracting', tab:'dashboard' },
+      ROLE_RND:              { module:'rnd',            tab:'dashboard' },
+    };
+    const preferred = roleHome[role?.id];
+    if (preferred && this.canAccess(preferred.module, preferred.tab)) return preferred;
+
     if (modules['*'] === '*') return {module:'dashboard',tab:null};
-    const order=['dashboard','purchases','warehouse','production','crm','accounting','quality','hr','maintenance','approvals','bi'];
+    const order=['dashboard','purchases','warehouse','production','subcontracting','restaurant','crm','accounting','quality','hr','maintenance','logistics','rnd','approvals','bi'];
     for (const m of order) if (Object.prototype.hasOwnProperty.call(modules,m)) {
-      const tabs=modules[m]; return {module:m,tab:Array.isArray(tabs)?tabs[0]:null};
+      const tabs=modules[m];
+      if (tabs === '*' || tabs === true) return {module:m,tab:'dashboard'};
+      return {module:m,tab:Array.isArray(tabs)?tabs[0]:null};
     }
     return {module:'dashboard',tab:null};
   },
@@ -173,11 +206,19 @@ const Auth = {
     const map={
       'new-pr':'PURCHASE_PR_CREATE','create-pr':'PURCHASE_PR_CREATE','pr-save':'PURCHASE_PR_CREATE','pr-edit':'PURCHASE_PR_CREATE','pr-delete':'PURCHASE_PR_CREATE',
       'pr-approve-action':'PURCHASE_PR_APPROVE','pr-reject-modal':'PURCHASE_PR_APPROVE','pr-reject-save':'PURCHASE_PR_APPROVE',
-      'pr-convert-po':'PURCHASE_PO_CREATE','po-approve-action':'PURCHASE_PO_APPROVE','po-cancel':'PURCHASE_PO_APPROVE','po-change-status':'PURCHASE_PO_APPROVE',
+      'pr-convert-po':'PURCHASE_PO_CREATE','po-approve-action':'PURCHASE_PO_APPROVE','po-cancel':'PURCHASE_PO_CREATE','po-change-status':'PURCHASE_PO_SEND',
       'supplier-add':'PURCHASE_SUPPLIER_MANAGE','supplier-edit':'PURCHASE_SUPPLIER_MANAGE','supplier-delete':'PURCHASE_SUPPLIER_MANAGE','supplier-save':'PURCHASE_SUPPLIER_MANAGE',
       'inv-new-receipt':'INVENTORY_OPERATE','inv-new-issue':'INVENTORY_OPERATE','inv-new-transfer':'INVENTORY_OPERATE','inv-new-count':'INVENTORY_OPERATE',
-      'inv-receipt-save-new':'INVENTORY_OPERATE','inv-issue-save-new':'INVENTORY_OPERATE','inv-transfer-save-new':'INVENTORY_OPERATE','inv-count-save':'INVENTORY_OPERATE','stock-move-save':'INVENTORY_OPERATE','inv-return-confirm-issue':'INVENTORY_OPERATE',
-      'iqc-save-inspection':'QC_INSPECT','iqc-open-inspection':'QC_VIEW','po-qc':'QC_INSPECT',
+      'inv-receipt-save-new':'INVENTORY_OPERATE','inv-issue-save-new':'INVENTORY_OPERATE','inv-transfer-save-new':'INVENTORY_OPERATE','inv-count-save':'INVENTORY_OPERATE','stock-move':'INVENTORY_OPERATE','stock-move-save':'INVENTORY_OPERATE','inv-return-confirm-issue':'INVENTORY_OPERATE',
+      'inventory-item-add':'INVENTORY_OPERATE','inventory-item-edit':'INVENTORY_OPERATE','inventory-item-save':'INVENTORY_OPERATE','inventory-item-delete':'INVENTORY_OPERATE',
+      'item-category-manager':'INVENTORY_OPERATE','item-category-add':'INVENTORY_OPERATE','item-category-prefix-save':'INVENTORY_OPERATE','item-category-delete':'INVENTORY_OPERATE',
+      'inv-warehouse-new':'INVENTORY_OPERATE','inv-warehouse-edit':'INVENTORY_OPERATE','inv-warehouse-save':'INVENTORY_OPERATE','inv-warehouse-delete':'INVENTORY_OPERATE',
+      'inv-warehouse-zone-new':'INVENTORY_OPERATE','inv-warehouse-zone-edit':'INVENTORY_OPERATE','inv-warehouse-zone-save':'INVENTORY_OPERATE','inv-warehouse-zone-delete':'INVENTORY_OPERATE',
+      'inv-warehouse-rack-new':'INVENTORY_OPERATE','inv-warehouse-rack-edit':'INVENTORY_OPERATE','inv-warehouse-rack-save':'INVENTORY_OPERATE','inv-warehouse-rack-delete':'INVENTORY_OPERATE',
+      'inv-lot-config':'INVENTORY_OPERATE','inv-lot-quarantine':'INVENTORY_OPERATE','inv-save-alert-config':'INVENTORY_OPERATE',
+      'warehouse-receipt-save':'INVENTORY_OPERATE','po-goods-receipt-save':'INVENTORY_OPERATE','subcontracting-warehouse':'INVENTORY_OPERATE',
+      'material-request':'PURCHASE_PR_CREATE',
+      'iqc-save-inspection':'QC_INSPECT','iqc-open-inspection':'QC_VIEW','pqc-open':'QC_VIEW','pqc-save':'QC_INSPECT','po-qc':'QC_INSPECT',
       'new-po':'PRODUCTION_OPERATE','po-edit':'PRODUCTION_OPERATE','po-edit-save':'PRODUCTION_OPERATE','po-delete':'PRODUCTION_OPERATE','po-approve':'PRODUCTION_OPERATE','po-advance':'PRODUCTION_OPERATE','stage-start':'PRODUCTION_OPERATE','stage-update':'PRODUCTION_OPERATE','stage-save':'PRODUCTION_OPERATE',
       'edit-customer':'CRM_OPERATE','save-customer':'CRM_OPERATE','customer-care':'CRM_OPERATE','save-customer-care':'CRM_OPERATE','delete-customer':'CRM_DELETE_CUSTOMER',
       'new-order':'SALES_ORDER_OPERATE','new-order-for':'SALES_ORDER_OPERATE','crm-order-save':'SALES_ORDER_OPERATE','crm-order-edit':'SALES_ORDER_OPERATE','crm-order-edit-save':'SALES_ORDER_OPERATE','crm-order-delete':'SALES_ORDER_OPERATE','crm-customer-pay-modal':'CRM_OPERATE','crm-customer-pay-save':'CRM_OPERATE',
@@ -465,7 +506,15 @@ function mkpi(label, value, icon, tone, onClickAct, note = '') {
 
 /** Nút thao tác cuối dòng bảng */
 function rowActions(acts) {
-  return `<div class="row-actions">${acts.map((a) => `
+  // Chỉ hiển thị thao tác mà tài khoản hiện tại thực sự có quyền thực hiện.
+  // Action chỉ-xem không có mapping quyền vẫn được hiển thị bình thường.
+  const visibleActs = (acts || []).filter((a) => {
+    if (typeof Auth === 'undefined') return true;
+    const required = Auth.permissionForAction(a.act);
+    return !required || Auth.hasPermission(required);
+  });
+  if (!visibleActs.length) return '';
+  return `<div class="row-actions">${visibleActs.map((a) => `
       <button class="btn btn-icon btn-sm" data-act="${a.act}" ${a.data || ''} title="${esc(a.title)}"><i class="fa-solid ${a.icon}"></i></button>`).join('')}</div>`;
 }
 

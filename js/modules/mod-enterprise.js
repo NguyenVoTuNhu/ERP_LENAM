@@ -2416,10 +2416,13 @@ function incomingInspectionView() {
   const f = F('quality-iqc', { q: '', status: '' });
   const q = (f.q || '').toLowerCase().trim();
   const receipts = (DB.goodsReceipts || []).filter(r => {
+    // Phiếu nhập phát sinh từ PO chính là nguồn chờ IQC. Không bắt buộc
+    // purchaseOrders phải hydrate xong mới cho hiển thị, vì khi QC đăng nhập
+    // trực tiếp thì goodsReceipts có thể về server trước metadata PO.
+    if (!r.poId || !(r.items || []).length) return false;
     const po = Q.purchaseOrder(r.poId);
-    if (!po || !['RECEIVED', 'PARTIAL_RECEIVED'].includes(po.status)) return false;
     if (f.status && (r.inspectionStatus || 'PENDING') !== f.status) return false;
-    if (q && ![r.id, r.poId, r.prId, Q.supplierName(po.supplierId), r.note].some(v => String(v || '').toLowerCase().includes(q))) return false;
+    if (q && ![r.id, r.poId, r.prId, Q.supplierName(po?.supplierId || r.supplierId), r.note].some(v => String(v || '').toLowerCase().includes(q))) return false;
     return true;
   }).sort((a,b) => String(b.id).localeCompare(String(a.id)));
   const pg = paged(receipts, 'quality-iqc');
@@ -2478,6 +2481,104 @@ function openIncomingInspectionModal(receiptId) {
 
 
 /* ==========================================================================\n * QC THÀNH PHẨM - nhận trực tiếp từ Lệnh sản xuất\n * Thành phẩm chỉ là tồn chờ QC (qtyPending), chưa được cộng qtyOnHand.\n * ======================================================================= */
+
+/* ============================================================================
+ * QC BÁN THÀNH PHẨM - checkpoint PROCESS_QC trong routing
+ * - Không phát sinh tồn kho / lô thành phẩm.
+ * - Kết quả lưu trong stage của lenam_production_orders trên KIO server.
+ * ========================================================================== */
+function processQcStatusHtml(stage) {
+  const q = stage?.processQc || {};
+  if (stage?.status === 'done' || q.status === 'PASSED') return '<span class="badge green">Đạt</span>';
+  if (q.status === 'FAILED') return '<span class="badge red">Không đạt / chờ xử lý</span>';
+  if (Number(stage?.qtyDone || 0) > 0 || q.status === 'IN_PROGRESS') return '<span class="badge blue">Đang kiểm</span>';
+  return '<span class="badge orange">Chờ kiểm</span>';
+}
+
+function processInspectionRows() {
+  const out = [];
+  (DB.productionOrders || []).forEach(po => {
+    (po.stages || []).forEach((stage, index) => {
+      if (typeof isProcessQcStage !== 'function' || !isProcessQcStage(po, index)) return;
+      const reached = stage.status === 'doing' || stage.status === 'done' || Number(stage.qtyDone || 0) > 0 || (stage.processQcHistory || []).length;
+      if (!reached) return;
+      out.push({ po, stage, index, id:`${po.id}::${index}` });
+    });
+  });
+  return out;
+}
+
+function processInspectionView() {
+  const f = F('quality-pqc', { q:'', status:'' });
+  const q = String(f.q || '').toLowerCase().trim();
+  let list = processInspectionRows().filter(x => {
+    const status = x.stage.status === 'done' ? 'PASSED' : (x.stage.processQc?.status || 'PENDING');
+    if (f.status && status !== f.status) return false;
+    if (q && ![x.po.id,x.po.productName,x.po.productId,x.stage.name,x.stage.operationId,Q.employeeName(x.stage.leadId)].some(v=>String(v||'').toLowerCase().includes(q))) return false;
+    return true;
+  }).sort((a,b)=>String(b.po.id).localeCompare(String(a.po.id),'vi',{numeric:true}) || b.index-a.index);
+  const pg = paged(list,'quality-pqc');
+  const rows = pg.items.map(({po,stage,index}) => {
+    const remaining = Math.max(0, Number(stage.qtyPlan||po.qty||0)-Number(stage.qtyDone||0));
+    const hist = stage.processQcHistory || [];
+    const last = hist.length ? hist[hist.length-1] : null;
+    return `<tr class="clickable" data-act="pqc-open" data-id="${esc(po.id)}" data-i="${index}">
+      <td>${cell2(`<span class="code">${esc(po.id)}</span>`, esc(po.productName||po.productId))}</td>
+      <td>${cell2(`<b>${esc(stage.name)}</b>`, esc(stage.operationId||'PROCESS_QC'))}</td>
+      <td class="right num">${fmtN(stage.qtyDone||0)} / ${fmtN(stage.qtyPlan||po.qty||0)} ${esc(po.unit||'')}</td>
+      <td class="right num">${fmtN(remaining)} ${esc(po.unit||'')}</td>
+      <td>${processQcStatusHtml(stage)}</td>
+      <td>${last ? cell2(esc(last.inspectorName||Q.employeeName(last.inspectorId)||'QC'), fmtDate(String(last.inspectedAt||'').slice(0,10))) : '<span class="muted">—</span>'}</td>
+      <td class="right">${rowActions([{act:'pqc-open',data:`data-id="${esc(po.id)}" data-i="${index}"`,icon:'fa-vial-circle-check',title:'Kiểm tra bán thành phẩm'}])}</td>
+    </tr>`;
+  });
+  return `${pageHead('Kiểm tra bán thành phẩm','QC giữa quy trình sản xuất. Kết quả chỉ quyết định có được đi công đoạn tiếp theo; không nhập kho thành phẩm.','')}
+    <div class="grid g-auto-sm" style="margin-bottom:14px">
+      ${mkpi('Chờ / đang kiểm',list.filter(x=>x.stage.status!=='done' && x.stage.processQc?.status!=='FAILED').length,'fa-clock','orange')}
+      ${mkpi('Đạt',list.filter(x=>x.stage.status==='done').length,'fa-circle-check','green')}
+      ${mkpi('Không đạt',list.filter(x=>x.stage.processQc?.status==='FAILED').length,'fa-circle-xmark','red')}
+    </div>
+    <div class="card"><div class="toolbar">${searchBox('quality-pqc','Tìm LSX, thành phẩm, công đoạn QC…')}${selectFilter('quality-pqc','status',[['PENDING','Chờ kiểm'],['FAILED','Không đạt / chờ xử lý'],['PASSED','Đạt']],'Tất cả kết quả')}${(f.q||f.status)?'<button class="btn btn-sm" data-act="clear-filter" data-key="quality-pqc"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>':''}<span class="spacer"></span><span class="chip">${fmtN(list.length)} checkpoint QC</span></div>
+      ${tableShell([{t:'LSX / Thành phẩm'},{t:'Công đoạn QC'},{t:'Đã đạt / Kế hoạch',cls:'right'},{t:'Còn phải đạt',cls:'right'},{t:'Kết quả'},{t:'Lần kiểm gần nhất'},{t:'',cls:'right'}],rows,{emptyTitle:'Chưa có bán thành phẩm chờ kiểm',emptyDesc:'Khi LSX đi tới một công đoạn PROCESS_QC, checkpoint sẽ tự xuất hiện tại đây.'})}${pagiHTML('quality-pqc',pg,'checkpoint QC')}
+    </div>`;
+}
+
+function openProcessInspectionModal(poId, index) {
+  const po = Q.po(poId); if (!po) return;
+  const stage = (po.stages || [])[Number(index)];
+  if (!stage || typeof isProcessQcStage !== 'function' || !isProcessQcStage(po, Number(index))) return;
+  const readonly = stage.status === 'done' || !Auth.hasPermission('QC_INSPECT');
+  const plan = Number(stage.qtyPlan || po.qty || 0);
+  const passed = Number(stage.qtyDone || 0);
+  const remain = Math.max(0, plan - passed);
+  const history = stage.processQcHistory || [];
+  const historyRows = history.slice().reverse().map(h=>`<tr><td>${typeof fmtDateTime==='function' ? fmtDateTime(h.inspectedAt) : esc(String(h.inspectedAt||'').replace('T',' ').slice(0,16))}</td><td>${esc(h.inspectorName||Q.employeeName(h.inspectorId)||'QC')}</td><td class="right num">${fmtN(h.passQty||0)}</td><td class="right num">${fmtN(h.failQty||0)}</td><td>${Number(h.failQty||0)>0?'<span class="badge red">Có lỗi</span>':'<span class="badge green">Đạt</span>'}</td><td>${esc(h.note||'—')}</td></tr>`).join('');
+  Modal.open({
+    title:`Kiểm tra bán thành phẩm · ${stage.name}`,
+    sub:`${po.id} · ${po.productName} · Kế hoạch ${fmtN(plan)} ${po.unit||''}`,
+    size:'lg',
+    body:`<div class="info-grid" style="margin-bottom:14px">
+      ${infoItem('Lệnh sản xuất',`<span class="code">${esc(po.id)}</span>`)}
+      ${infoItem('Công đoạn',esc(stage.name))}
+      ${infoItem('Đã đạt QC',`<b>${fmtN(passed)} / ${fmtN(plan)} ${esc(po.unit||'')}</b>`)}
+      ${infoItem('Còn phải đạt',`<b>${fmtN(remain)} ${esc(po.unit||'')}</b>`)}
+      ${infoItem('Người phụ trách SX',esc(Q.employeeName(stage.leadId)))}
+      ${infoItem('Trạng thái',processQcStatusHtml(stage))}
+    </div>
+    <div class="note-box" style="margin-bottom:14px"><b>QC bán thành phẩm không nhập kho.</b> Hàng đạt mới được cộng vào sản lượng đạt của checkpoint. Nếu có hàng lỗi, LSX giữ tại công đoạn này để xử lý / tái kiểm; công đoạn tiếp theo chưa được mở.</div>
+    ${readonly ? '' : `<div class="form-grid cols-2">
+      <div class="field"><label>Số lượng đạt lần này *</label><input class="inp right num" id="pqcPass" type="number" min="0" max="${remain}" step="0.0001" value="" placeholder="Tối đa ${fmtN(remain)}"></div>
+      <div class="field"><label>Số lượng không đạt lần này *</label><input class="inp right num" id="pqcFail" type="number" min="0" max="${remain}" step="0.0001" value="0"></div>
+      <div class="field"><label>Người kiểm</label><input class="inp" value="${esc(DB.currentUser?.name||'QC/QA')}" disabled></div>
+      <div class="field"><label>Ngày kiểm</label><input class="inp" value="${esc(currentDateYMD())}" disabled></div>
+      <div class="field" style="grid-column:1/-1"><label>Ghi chú</label><textarea class="inp" id="pqcNote" rows="3" placeholder="Kết quả, nguyên nhân lỗi, hướng xử lý / tái kiểm…"></textarea></div>
+    </div>`}
+    <div class="form-sec-title" style="margin-top:14px">Lịch sử kiểm tra</div>
+    ${tableShell([{t:'Thời gian'},{t:'Người kiểm'},{t:'Đạt',cls:'right'},{t:'Lỗi',cls:'right'},{t:'Kết quả'},{t:'Ghi chú'}],historyRows,{emptyTitle:'Chưa có lần kiểm nào'})}`,
+    foot:`<button class="btn" data-act="modal-close">Đóng</button>${readonly?'':`<button class="btn btn-primary" data-act="pqc-save" data-id="${esc(po.id)}" data-i="${Number(index)}"><i class="fa-solid fa-vial-circle-check"></i>Lưu kết quả QC</button>`}`
+  });
+}
+
 function finalInspectionStatusHtml(status) {
   if (status === 'PASSED') return '<span class="badge green">Đạt</span>';
   if (status === 'PARTIAL_FAILED') return '<span class="badge orange">Đạt một phần</span>';
@@ -2487,12 +2588,11 @@ function finalInspectionStatusHtml(status) {
 
 function finalInspectionView() {
   DB.productionFinalInspections = DB.productionFinalInspections || [];
-  // Tương thích các LSX đang QC được tạo từ phiên bản trước.
-  (DB.productionOrders || []).filter(po => po.status === 'lsx_dang_qc').forEach(po => {
-    if (!(DB.productionFinalInspections || []).some(x => x.productionOrderId === po.id) && typeof ensureFinishedQcPending === 'function') {
-      ensureFinishedQcPending(po, Number(po.qty || 0));
-    }
-  });
+  // [PERFORMANCE] Render FQC chỉ ĐỌC dữ liệu.
+  // Không tự tạo phiếu QC/lô/tồn ở đây, vì render có thể chạy nhiều lần và
+  // mỗi lần ensureFinishedQcPending() sẽ kích hoạt sync Production + Inventory,
+  // gây hàng trăm request list/krud. Phiếu FQC phải được tạo tại đúng thời điểm
+  // LSX chuyển sang công đoạn QC (stage-start / po-qc), không phải khi mở màn hình.
   const f = F('quality-fqc', { q:'', status:'' });
   const q = String(f.q || '').toLowerCase().trim();
   let list = (DB.productionFinalInspections || []).filter(ins => {
@@ -2545,6 +2645,8 @@ function openFinalInspectionModal(id) {
       ${infoItem('Ngày sản xuất', lot?.mfgDate ? fmtDate(lot.mfgDate) : '—')}
       ${infoItem('Hạn sử dụng', lot?.expiryDate ? fmtDate(lot.expiryDate) : '<span class="muted">Chưa quy định</span>')}
       ${infoItem('Trạng thái',finalInspectionStatusHtml(ins.status||'PENDING'))}
+      ${infoItem('Người kiểm tra', esc((ins.status||'PENDING')==='PENDING' ? (DB.currentUser?.name || Q.employeeName(DB.currentUser?.id) || 'QC/QA') : (ins.inspectedByName || Q.employeeName(ins.inspectedBy) || 'QC/QA')))}
+      ${infoItem('Thời gian kiểm', ins.inspectedAt ? new Date(ins.inspectedAt).toLocaleString('vi-VN') : '<span class="muted">Sẽ ghi khi xác nhận</span>')}
     </div>
     <div class="note-box" style="margin-bottom:14px"><b>Nguyên tắc tồn kho:</b> ${fmtN(total)} ${esc(ins.unit||po?.unit||'')} hiện chỉ là <b>tồn chờ QC</b>, chưa được tính vào tồn khả dụng. Khi QC xác nhận, chỉ số lượng đạt mới được cộng vào tồn kho thành phẩm.</div>
     <div class="form-grid cols-2">
@@ -2632,6 +2734,7 @@ function openQualityRecallForm(id=''){qualityOpsHydrate();const x=(DB.qualityRec
   Views[key] = function (params = {}) {
     const tab = State.tab || (params && params.tab) || 'dashboard';
     if (key === 'quality' && tab === 'iqc') return incomingInspectionView();
+    if (key === 'quality' && tab === 'pqc') return processInspectionView();
     if (key === 'quality' && tab === 'fqc') return finalInspectionView();
     if (key === 'quality' && tab === 'subcontracting_qc') return subcontractingInspectionView();
     if (key === 'quality' && tab === 'coa') return qualityCoaView();

@@ -153,6 +153,17 @@ function finalInspectionOfPO(poId) {
 
 function ensureFinishedQcPending(po, qty) {
   if (!po) return null;
+  // Chỉ Final QC (công đoạn áp chót trước Hoàn thành) mới được tạo FQC.
+  // QC nằm giữa routing chỉ là checkpoint nội bộ và tuyệt đối không phát sinh tồn kho.
+  const stages = po.stages || [];
+  const finalQcIndex = stages.findIndex((st, idx) => typeof isFinalQcStage === 'function' ? isFinalQcStage(po, idx) : /QC — ATTP/i.test(String(st?.name || '')));
+  if (finalQcIndex >= 0) {
+    const previousDone = stages.slice(0, finalQcIndex).every(st => st.status === 'done');
+    if (!previousDone) {
+      Toast.warn('Chưa đến QC thành phẩm', 'QC giữa quy trình chỉ kiểm soát công đoạn và không được tạo phiếu QC thành phẩm / nhập kho.');
+      return null;
+    }
+  }
   DB.productionFinalInspections = DB.productionFinalInspections || [];
   const existing = finalInspectionOfPO(po.id);
   if (existing) return existing;
@@ -190,7 +201,9 @@ function ensureFinishedQcPending(po, qty) {
   po.finalInspectionId = inspection.id;
   po.finishedLotId = lotId;
   po.status = 'lsx_dang_qc';
-  if (typeof ProductionAPI !== 'undefined') ProductionAPI.scheduleSync(80);
+  // FQC chỉ tạo phiếu QC + tồn chờ QC. Không ghi lại toàn bộ LSX lớn;
+  // trạng thái công đoạn/LSX được lưu bằng bảng tiến độ compact.
+  if (typeof ProductionAPI !== 'undefined') ProductionAPI.scheduleCollections?.(['productionFinalInspections']);
   if (typeof InventoryAPI !== 'undefined') InventoryAPI.scheduleCollections?.(['inventoryLots','inventory'],80);
   pushNotification({ level:'warning', icon:'fa-clipboard-check', title:`${inspection.id} chờ QC thành phẩm`, desc:`${po.productName} · ${fmtN(safeQty)} ${po.unit}`, go:{ module:'quality', tab:'fqc' } });
   return inspection;
@@ -354,20 +367,16 @@ const Actions = {
     o.paid = SalesCRM.paidOfOrder(o.id);
     o.receivable = SalesCRM.receivableOfOrder(o);
 
-    // Ghi thêm giao dịch vào sổ ngân hàng để tài khoản được chọn cộng đúng số dư.
-    // AccFin.bankBalance() (mod-accounting.js) chỉ tính từ DB.bankTransactions,
-    // nên nếu thiếu bước này thì chọn ngân hàng nào cũng không thấy số dư đổi.
-    let bankTx = null;
-    if (bankId) {
-      DB.bankTransactions = DB.bankTransactions || [];
-      bankTx = { id: nextCode('BTX-2026-', DB.bankTransactions), bankId, type: 'IN', date, amount, note: `Thu công nợ ${o.id} · ${Q.customerName(o.customerId)}` };
-      DB.bankTransactions.unshift(bankTx);
-    }
+    // Chuyển khoản khách hàng là tiền VÀO đúng tài khoản ngân hàng đã chọn.
+    // Giao dịch được persist cùng bankAccounts trên KIO, không chỉ giữ trong RAM.
 
     if (el) el.disabled = true;
     try {
       if (typeof CRMAPI !== 'undefined') {
         await CRMAPI.syncCollections(['customerPayments','orders']);
+      }
+      if (bankId && typeof AccountingBank !== 'undefined') {
+        await AccountingBank.record({ bankId, type:'IN', date, amount, note:`Thu công nợ ${o.id} · ${Q.customerName(o.customerId)}`, sourceType:'CUSTOMER_PAYMENT', sourceId:id, createdBy:payment.createdBy });
       }
       // KIO đã thành công: chỉ cập nhật cache local, không schedule ghi lần 2.
       SalesCRM.saveLocal(['customerPayments','orders'], { sync:false });
@@ -377,7 +386,6 @@ const Actions = {
     } catch (err) {
       // Rollback state/cache giao diện nếu server không lưu được.
       DB.customerPayments = (DB.customerPayments || []).filter(p => p !== payment && p.id !== id);
-      if (bankTx) DB.bankTransactions = (DB.bankTransactions || []).filter(t => t !== bankTx);
       if (oldPaid === undefined) delete o.paid; else o.paid = oldPaid;
       if (oldReceivable === undefined) delete o.receivable; else o.receivable = oldReceivable;
       SalesCRM.saveLocal(['customerPayments','orders'], { sync:false });
@@ -962,7 +970,7 @@ const Actions = {
       startDate,
       deadline,
       managerId: 'NV-008',
-      status: 'lsx_cho_duyet',
+      status: 'lsx_cho_san_xuat',
       stages: buildProductionStagesFromRouting(qty, product.routing || [], startDate),
       qcPass: 0,
       qcFail: 0,
@@ -1000,7 +1008,7 @@ const Actions = {
     for(const row of document.querySelectorAll('.po-mr-line')){const materialId=row.dataset.material;const qty=Number(row.querySelector('[name="qty"]')?.value||0);if(!materialId||!(qty>0)){Toast.err('Số lượng không hợp lệ','Tất cả nguyên liệu phải có số lượng lớn hơn 0.');return;}items.push({productId:po.productId,materialId,qty});}
     if(!items.length){Toast.err('Chưa có nguyên liệu','Không thể lập phiếu yêu cầu NVL khi BOM rỗng.');return;}
     const id=nextCode('YCNVL-2026-',DB.productionMaterialRequests||[]);
-    DB.productionMaterialRequests.unshift({id,productionOrderId:po.id,planId:po.planId||'',date:currentDateYMD(),items,status:'WAITING_WAREHOUSE_APPROVAL',note:$('#poMrNote')?.value.trim()||`Yêu cầu NVL theo BOM của ${po.id}`,createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''),createdAt:new Date().toISOString(),source:'PRODUCTION_ORDER_BOM'});
+    DB.productionMaterialRequests.unshift({id,productionOrderId:po.id,planId:po.planId||'',date:currentDateYMD(),items,status:'APPROVED',note:$('#poMrNote')?.value.trim()||`Yêu cầu NVL theo BOM của ${po.id}`,createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''),createdAt:new Date().toISOString(),source:'PRODUCTION_ORDER_BOM'});
     po.materialRequestId=id;
     po.materialPlan=items.map(i=>({materialId:i.materialId,qty:i.qty}));
     ProductionAPI?.scheduleSync(80);Modal.close();render();Toast.ok('Đã lập phiếu yêu cầu NVL',`${id} · BOM của ${po.productId} đã được đưa vào phiếu và gửi Kho nguyên liệu.`);
@@ -1055,31 +1063,27 @@ const Actions = {
     const p = Q.po(d.id); if (!p) return;
     const i = p.stages.findIndex((s) => s.status === 'doing');
     if (i >= 0) {
-      if (/QC/i.test(String(p.stages[i]?.name||''))) { Actions['po-qc']({ id:p.id }); return; }
+      if (typeof isFinalQcStage === 'function' && isFinalQcStage(p, i)) { Actions['po-qc']({ id:p.id }); return; }
+      // QC nằm giữa routing là QC công đoạn, xử lý như một công đoạn bình thường;
+      // tuyệt đối không mở FQC thành phẩm và không phát sinh tồn kho.
       openStageModal(p.id, i); return;
     }
     const next = p.stages.findIndex((s) => s.status === 'pending');
     if (next >= 0) Actions['stage-start']({ id: p.id, i: String(next) });
     else Toast.info('Lệnh đã hoàn tất', 'Tất cả công đoạn của lệnh này đã xong.');
   },
-  'stage-start': (d) => {
+  'stage-start': async (d) => {
     const p = Q.po(d.id);
     if (!p) return;
     const i = Number(d.i);
     const s = p.stages[i];
     if (!s) return;
-    if (/QC/i.test(String(s.name||''))) {
+    if (typeof isFinalQcStage === 'function' && isFinalQcStage(p, i)) {
       const ins = finalInspectionOfPO(p.id) || ensureFinishedQcPending(p, Number(s.qtyPlan || p.qty || 0));
       if (ins) {
         go('quality', { tab:'fqc' });
         setTimeout(() => { if (typeof openFinalInspectionModal === 'function') openFinalInspectionModal(ins.id); }, 120);
       }
-      return;
-    }
-
-    // Lệnh phải được duyệt trước khi xưởng bắt đầu thực hiện.
-    if (!p.approvedAt) {
-      Toast.warn('Lệnh sản xuất chưa được duyệt', `Hãy duyệt ${p.id} trước khi bắt đầu công đoạn.`);
       return;
     }
 
@@ -1095,7 +1099,7 @@ const Actions = {
           return;
         }
         if (req.status !== 'ISSUED' && !p.materialIssuedAt) {
-          const msg = req.status === 'APPROVED' ? 'Kho đã duyệt nhưng chưa xuất nguyên liệu.' : 'Phiếu đang chờ Kho duyệt/xuất nguyên liệu.';
+          const msg = req.status === 'APPROVED' ? 'Phiếu đang chờ Kho xuất nguyên liệu.' : 'Phiếu chưa được xuất nguyên liệu.';
           Toast.warn('Nguyên liệu chưa được cấp', `${req.id} · ${msg}`);
           return;
         }
@@ -1105,18 +1109,37 @@ const Actions = {
     s.status = 'doing';
     s.start = currentDateYMD();
     s.actualStartedAt = new Date().toISOString();
-    p.status = /QC/i.test(String(s.name||'')) ? 'lsx_dang_qc' : 'lsx_dang_san_xuat';
+    p.status = (typeof isFinalQcStage === 'function' && isFinalQcStage(p, i)) ? 'lsx_dang_qc' : 'lsx_dang_san_xuat';
     syncOrderStatus(p.orderId);
-    if (typeof ProductionAPI !== 'undefined') ProductionAPI.scheduleSync(180);
+    const processQc = typeof isProcessQcStage === 'function' && isProcessQcStage(p, i);
+    try {
+      if (typeof ProductionAPI !== 'undefined') {
+        if (ProductionAPI.persistStageProgress) await ProductionAPI.persistStageProgress(p,[i]);
+        else if (processQc && ProductionAPI.persistCollections) await ProductionAPI.persistCollections(['productionOrders']);
+        else ProductionAPI.scheduleCollections?.(['productionOrders']);
+      }
+    } catch (err) {
+      s.status = 'pending'; s.start = ''; s.actualStartedAt = '';
+      Toast.err('Không lưu được công đoạn lên server', err?.message || 'Vui lòng thử lại.');
+      render(); return;
+    }
+    if (processQc) {
+      pushNotification({ level:'warning', icon:'fa-vial-circle-check', title:`${p.id} chờ QC bán thành phẩm`, desc:`${s.name} · ${p.productName}`, go:{module:'quality',tab:'pqc'} });
+    }
     logActivity('bắt đầu công đoạn ' + s.name, p.id, p.productName, 'fa-play', 'blue');
     Modal.close(); render();
-    Toast.ok('Đã bắt đầu công đoạn ' + s.name, `${p.id} · phụ trách ${Q.employeeName(s.leadId)}`);
+    Toast.ok(processQc ? 'Đã chuyển QC bán thành phẩm' : 'Đã bắt đầu công đoạn ' + s.name, processQc ? `${p.id} · ${s.name}` : `${p.id} · phụ trách ${Q.employeeName(s.leadId)}`);
   },
   'stage-update': (d) => openStageModal(d.id, Number(d.i)),
-  'stage-save': (d) => {
+  'stage-save': async (d) => {
     const p = Q.po(d.id);
     const i = Number(d.i);
     const s = p.stages[i];
+    if (typeof isProcessQcStage === 'function' && isProcessQcStage(p, i)) {
+      Toast.warn('Công đoạn do QC kiểm tra', 'Hãy thực hiện tại QC / QA → Kiểm tra bán thành phẩm. Sản xuất chỉ theo dõi kết quả.');
+      return;
+    }
+    const beforePo = JSON.parse(JSON.stringify(p));
     const full = d.full === '1';
     const qtyInput = Number($('#stQty')?.value || 0);
     const hoursInput = Number($('#stHours')?.value || 0);
@@ -1128,14 +1151,27 @@ const Actions = {
     if (!leadInput) { Toast.err('Thiếu người phụ trách', 'Vui lòng chọn người phụ trách công đoạn.'); return; }
     if (!machineInput) { Toast.err('Thiếu máy / trạm', 'Máy hoặc trạm thực hiện là bắt buộc.'); return; }
     if (!noteInput) { Toast.err('Thiếu ghi chú', 'Vui lòng nhập ghi chú kết quả công đoạn.'); return; }
-    let qty = full ? s.qtyPlan : Math.max(0, Math.min(s.qtyPlan, qtyInput));
+    // Ghi nhận theo từng lần và cộng dồn vào tổng sản lượng của công đoạn.
+    // Không cho nhập vượt phần còn lại của kế hoạch.
+    const qtyPlan = Number(s.qtyPlan || 0);
+    const qtyDoneBefore = Number(s.qtyDone || 0);
+    const qtyRemain = Math.max(0, qtyPlan - qtyDoneBefore);
+    if (!(qtyRemain > 0)) {
+      Toast.warn('Công đoạn đã đủ sản lượng', `Đã ghi nhận đủ ${fmtN(qtyPlan)} ${p.unit || ''}.`);
+      return;
+    }
+    if (qtyInput > qtyRemain) {
+      Toast.err('Sản lượng vượt kế hoạch', `Công đoạn đã hoàn thành ${fmtN(qtyDoneBefore)}/${fmtN(qtyPlan)} ${p.unit || ''}. Chỉ còn được ghi nhận tối đa ${fmtN(qtyRemain)} ${p.unit || ''}.`);
+      return;
+    }
+    const qty = qtyDoneBefore + qtyInput;
     s.qtyDone = qty;
-    s.hours = hoursInput;
+    s.hours = Number(s.hours || 0) + hoursInput;
     s.leadId = leadInput;
     s.machine = machineInput;
     s.note = noteInput;
 
-    if (qty >= s.qtyPlan) {
+    if (qty >= qtyPlan) {
       s.status = 'done';
       s.end = currentDateYMD();
       const next = p.stages[i + 1];
@@ -1143,10 +1179,12 @@ const Actions = {
         next.status = 'doing';
         next.start = currentDateYMD();
         next.actualStartedAt = new Date().toISOString();
-        if (/QC/i.test(String(next.name||''))) {
+        if (typeof isFinalQcStage === 'function' && isFinalQcStage(p, i + 1)) {
           p.status = 'lsx_dang_qc';
           ensureFinishedQcPending(p, qty);
         } else {
+          // Kể cả khi next là QC giữa routing, đây vẫn là luồng sản xuất nội bộ.
+          // QC công đoạn không tạo phiếu FQC và không chạm tồn kho.
           p.status = 'lsx_dang_san_xuat';
         }
       } else {
@@ -1155,17 +1193,123 @@ const Actions = {
       }
     } else {
       s.status = 'doing';
-      p.status = /QC/i.test(String(s.name||'')) ? 'lsx_dang_qc' : 'lsx_dang_san_xuat';
+      p.status = (typeof isFinalQcStage === 'function' && isFinalQcStage(p, i)) ? 'lsx_dang_qc' : 'lsx_dang_san_xuat';
     }
     syncOrderStatus(p.orderId);
-    if (typeof ProductionAPI !== 'undefined') ProductionAPI.scheduleSync(180);
+    try {
+      if (typeof ProductionAPI !== 'undefined' && ProductionAPI.persistCollections) {
+        if (ProductionAPI.persistStageProgress) await ProductionAPI.persistStageProgress(p,[i, i+1]);
+        else await ProductionAPI.persistCollections(['productionOrders']);
+      } else if (typeof ProductionAPI !== 'undefined') ProductionAPI.scheduleCollections?.(['productionOrders']);
+    } catch (err) {
+      const idx=(DB.productionOrders||[]).findIndex(x=>x.id===p.id);
+      if(idx>=0) DB.productionOrders[idx]=beforePo;
+      Toast.err('Không lưu được tiến độ lên server', err?.message || 'Dữ liệu đã được hoàn tác.');
+      render(); return;
+    }
+    if (qty >= s.qtyPlan) {
+      const nextStage = p.stages[i + 1];
+      if (nextStage && typeof isProcessQcStage === 'function' && isProcessQcStage(p, i + 1)) {
+        pushNotification({ level:'warning', icon:'fa-vial-circle-check', title:`${p.id} chờ QC bán thành phẩm`, desc:`${nextStage.name} · ${p.productName}`, go:{module:'quality',tab:'pqc'} });
+      }
+    }
     logActivity('cập nhật tiến độ', p.id, `${s.name}: ${fmtN(s.qtyDone)}/${fmtN(s.qtyPlan)} ${p.unit}`, 'fa-gears', 'indigo');
     Modal.close(); render();
     Toast.ok(qty >= s.qtyPlan ? `Hoàn tất công đoạn ${s.name}` : 'Đã cập nhật sản lượng',
       `${p.id} · tiến độ tổng ${Q.progress(p)}%`);
   },
+  'pqc-open': (d) => {
+    const po = Q.po(d.id); if (!po) return;
+    const i = Number(d.i);
+    const stage = (po.stages || [])[i];
+    if (!stage || typeof isProcessQcStage !== 'function' || !isProcessQcStage(po, i)) return;
+    if (typeof openProcessInspectionModal === 'function') openProcessInspectionModal(po.id, i);
+  },
+  'pqc-save': async (d) => {
+    if (!Auth.require('QC_INSPECT', 'Chỉ QC/QA được ghi nhận kết quả kiểm tra bán thành phẩm.')) return;
+    const po = Q.po(d.id); if (!po) return;
+    const i = Number(d.i);
+    const stage = (po.stages || [])[i];
+    if (!stage || typeof isProcessQcStage !== 'function' || !isProcessQcStage(po, i)) return;
+    if (stage.status === 'done') { Toast.info('Checkpoint đã hoàn tất', 'Kết quả QC đã được khóa.'); return; }
+    const pass = Number($('#pqcPass')?.value || 0);
+    const fail = Number($('#pqcFail')?.value || 0);
+    const note = String($('#pqcNote')?.value || '').trim();
+    const plan = Number(stage.qtyPlan || po.qty || 0);
+    const doneBefore = Number(stage.qtyDone || 0);
+    const remain = Math.max(0, plan - doneBefore);
+    if (!(pass >= 0) || !(fail >= 0) || !(pass + fail > 0)) { Toast.err('Thiếu kết quả kiểm tra', 'Hãy nhập số lượng đạt hoặc không đạt của lần kiểm này.'); return; }
+    if (pass + fail > remain) { Toast.err('Số lượng kiểm vượt phần còn lại', `Chỉ còn tối đa ${fmtN(remain)} ${po.unit || ''} cần đạt QC.`); return; }
+    if (fail > 0 && !note) { Toast.err('Thiếu ghi chú lỗi', 'Khi có bán thành phẩm không đạt, vui lòng ghi rõ lỗi / hướng xử lý.'); return; }
+
+    const beforePo = JSON.parse(JSON.stringify(po));
+    const inspectedAt = new Date().toISOString();
+    const inspectorId = DB.currentUser?.id || DB.currentUser?.userId || '';
+    const inspectorName = DB.currentUser?.name || DB.currentUser?.fullName || 'QC/QA';
+    stage.processQcHistory = Array.isArray(stage.processQcHistory) ? stage.processQcHistory : [];
+    stage.processQcHistory.push({ id:`PQC-${po.id}-${i}-${Date.now()}`, passQty:pass, failQty:fail, note, inspectedAt, inspectorId, inspectorName });
+    stage.qtyDone = doneBefore + pass;
+    stage.processQc = {
+      status: fail > 0 ? 'FAILED' : (stage.qtyDone >= plan ? 'PASSED' : 'IN_PROGRESS'),
+      lastPassQty: pass, lastFailQty: fail, note, inspectedAt, inspectorId, inspectorName,
+      totalPassQty: Number(stage.qtyDone || 0),
+      totalFailQty: stage.processQcHistory.reduce((t,x)=>t+Number(x.failQty||0),0)
+    };
+    stage.note = note || stage.note || '';
+
+    let completed = stage.qtyDone >= plan && fail === 0;
+    if (completed) {
+      stage.qtyDone = plan;
+      stage.status = 'done';
+      stage.end = currentDateYMD();
+      const next = po.stages[i + 1];
+      if (next) {
+        next.status = 'doing';
+        next.start = currentDateYMD();
+        next.actualStartedAt = new Date().toISOString();
+        if (typeof isFinalQcStage === 'function' && isFinalQcStage(po, i + 1)) po.status = 'lsx_dang_qc';
+        else po.status = 'lsx_dang_san_xuat';
+      }
+    } else {
+      stage.status = 'doing';
+      po.status = 'lsx_dang_san_xuat';
+    }
+
+    try {
+      if (typeof ProductionAPI !== 'undefined' && ProductionAPI.persistStageProgress) await ProductionAPI.persistStageProgress(po,[i, i+1]);
+      else if (typeof ProductionAPI !== 'undefined' && ProductionAPI.persistCollections) await ProductionAPI.persistCollections(['productionOrders']);
+      else if (typeof ProductionAPI !== 'undefined') ProductionAPI.scheduleCollections?.(['productionOrders']);
+    } catch (err) {
+      const idx=(DB.productionOrders||[]).findIndex(x=>x.id===po.id); if(idx>=0) DB.productionOrders[idx]=beforePo;
+      Toast.err('Không lưu được QC bán thành phẩm', err?.message || 'Dữ liệu đã được hoàn tác.');
+      render(); return;
+    }
+
+    // Chỉ sau khi QC bán thành phẩm đã được lưu server mới mở bước kế tiếp.
+    if (completed) {
+      const next = po.stages[i + 1];
+      if (next && typeof isFinalQcStage === 'function' && isFinalQcStage(po, i + 1)) {
+        const ins = ensureFinishedQcPending(po, Number(stage.qtyDone || po.qty || 0));
+        try {
+          if (ins && typeof ProductionAPI !== 'undefined' && ProductionAPI.persistCollections) await ProductionAPI.persistCollections(['productionOrders','productionFinalInspections']);
+          if (ins && typeof InventoryAPI !== 'undefined' && InventoryAPI.syncNow) await InventoryAPI.syncNow();
+        } catch (err) { console.warn('[PQC] Final QC pending chưa sync hoàn tất:', err); }
+      }
+      pushNotification({ level:'info', icon:'fa-circle-check', title:`${po.id} đã đạt QC bán thành phẩm`, desc:`${stage.name} · chuyển công đoạn tiếp theo`, go:{module:'production',tab:'orders'} });
+    } else if (fail > 0) {
+      pushNotification({ level:'warning', icon:'fa-triangle-exclamation', title:`${po.id} có bán thành phẩm không đạt`, desc:`${stage.name} · lỗi ${fmtN(fail)} ${po.unit||''} · chờ xử lý/tái kiểm`, go:{module:'production',tab:'orders'} });
+    }
+    logActivity('QC bán thành phẩm', po.id, `${stage.name}: đạt ${fmtN(pass)}, lỗi ${fmtN(fail)}`, 'fa-vial-circle-check', fail>0?'orange':'green');
+    Modal.close(); render();
+    Toast.ok(completed ? 'QC bán thành phẩm đạt' : (fail>0 ? 'Đã ghi nhận bán thành phẩm không đạt' : 'Đã lưu kết quả QC'), completed ? `${po.id} · đã mở công đoạn tiếp theo.` : `${po.id} · đã lưu lên server.`);
+  },
   'po-qc': (d) => {
     const p = Q.po(d.id); if (!p) return;
+    const finalQcIndex = (p.stages || []).findIndex((st, idx) => typeof isFinalQcStage === 'function' ? isFinalQcStage(p, idx) : /QC — ATTP/i.test(String(st?.name || '')));
+    if (finalQcIndex < 0 || !(p.stages || []).slice(0, finalQcIndex).every(st => st.status === 'done')) {
+      Toast.warn('Chưa đến QC thành phẩm', 'Hãy hoàn tất các công đoạn và QC trung gian trước. QC giữa quy trình không nhập kho thành phẩm.');
+      return;
+    }
     const ins = finalInspectionOfPO(p.id) || ensureFinishedQcPending(p, Number(p.qty || 0));
     if (!ins) return;
     go('quality', { tab:'fqc' });
@@ -1173,10 +1317,27 @@ const Actions = {
   },
   'po-qc-save': (d) => {
     const p = Q.po(d.id); if (!p) return;
+    const finalQcIndex = (p.stages || []).findIndex((st, idx) => typeof isFinalQcStage === 'function' ? isFinalQcStage(p, idx) : /QC — ATTP/i.test(String(st?.name || '')));
+    if (finalQcIndex < 0 || !(p.stages || []).slice(0, finalQcIndex).every(st => st.status === 'done')) {
+      Toast.warn('Chưa đến QC thành phẩm', 'QC công đoạn giữa quy trình không phát sinh nhập kho.');
+      return;
+    }
     const ins = finalInspectionOfPO(p.id) || ensureFinishedQcPending(p, Number(p.qty || 0));
     if (ins && typeof openFinalInspectionModal === 'function') openFinalInspectionModal(ins.id);
   },
-  'fqc-open': (d) => { if (typeof openFinalInspectionModal === 'function') openFinalInspectionModal(d.id); },
+  'fqc-open': async (d) => {
+    // Chỉ khi mở chi tiết FQC mới cần thông tin lô/kho/vị trí.
+    // Danh sách FQC vì vậy không còn phải chờ 3-4 request Inventory lớn.
+    try {
+      if (typeof InventoryAPI !== 'undefined') {
+        await InventoryAPI.bootstrap?.();
+        await InventoryAPI.ensureFresh?.(['warehouses','warehouseLocations','inventoryLots'], { force: false });
+      }
+    } catch (err) {
+      console.warn('[FQC] Không tải đủ thông tin kho/lô; mở phiếu bằng dữ liệu hiện có:', err);
+    }
+    if (typeof openFinalInspectionModal === 'function') openFinalInspectionModal(d.id);
+  },
   'fqc-save': (d) => {
     const ins = (DB.productionFinalInspections || []).find(x => x.id === d.id); if (!ins) return;
     if ((ins.status || 'PENDING') !== 'PENDING') { Toast.warn('Phiếu QC đã xử lý', ins.id); return; }
@@ -1229,10 +1390,13 @@ const Actions = {
 
     ins.passQty = pass; ins.failQty = fail; ins.note = $('#fqcNote')?.value.trim() || '';
     ins.status = pass > 0 ? (fail > 0 ? 'PARTIAL_FAILED' : 'PASSED') : 'FAILED';
-    ins.inspectedAt = new Date().toISOString(); ins.inspectedBy = DB.currentUser?.id || '';
+    ins.inspectedAt = new Date().toISOString();
+    ins.inspectedBy = DB.currentUser?.userId || DB.currentUser?.id || '';
+    ins.inspectedByName = DB.currentUser?.name || Q.employeeName(ins.inspectedBy) || 'QC/QA';
 
-    po.qcPass = pass; po.qcFail = fail; po.qcNote = ins.note; po.qcAt = ins.inspectedAt; po.qcBy = ins.inspectedBy;
-    const qcIndex = (po.stages || []).findIndex(st => /QC/i.test(String(st.name || '')));
+    po.qcPass = pass; po.qcFail = fail; po.qcNote = ins.note; po.qcAt = ins.inspectedAt;
+    po.qcBy = ins.inspectedBy; po.qcByName = ins.inspectedByName;
+    const qcIndex = (po.stages || []).findIndex((st, idx) => typeof isFinalQcStage === 'function' ? isFinalQcStage(po, idx) : /QC — ATTP/i.test(String(st.name || '')));
     if (qcIndex >= 0) {
       const qc = po.stages[qcIndex]; qc.qtyDone = total; qc.status = 'done'; qc.end = currentDateYMD(); qc.note = ins.note;
       const doneStage = po.stages[qcIndex + 1];
@@ -1255,11 +1419,31 @@ const Actions = {
       po.status = 'lsx_hoan_thanh';
     }
     syncOrderStatus(po.orderId);
-    ProductionAPI?.scheduleSync(80);
-    InventoryAPI?.scheduleCollections?.(['goodsReceipts','inventoryLots','inventory','inventoryTransactions'],80);
     logActivity('QC thành phẩm', po.id, `Đạt ${fmtN(pass)} · lỗi ${fmtN(fail)} ${po.unit}`, 'fa-clipboard-check', fail ? 'orange' : 'green');
+
+    // Đóng form và cập nhật UI ngay. Các bước ghi KIO chạy sau khi browser đã có
+    // cơ hội paint frame mới, tránh cảm giác bấm Xác nhận rồi giao diện bị đơ.
     Modal.close(); render();
-    Toast.ok('Đã xác nhận QC thành phẩm', pass > 0 ? `${fmtN(pass)} ${po.unit} đã được cộng vào Kho thành phẩm${receiptId ? ` · ${receiptId}` : ''}.` : `Toàn bộ ${fmtN(fail)} ${po.unit} không đạt, không cộng tồn.`);
+    Toast.info('Đang lưu kết quả QC', `${po.id} · đang đồng bộ dữ liệu lên server...`);
+    requestAnimationFrame(() => setTimeout(async () => {
+      try {
+        // Chỉ ghi đúng các collection đã thay đổi; không quét/sync toàn Production.
+        if (typeof ProductionAPI !== 'undefined') {
+          ProductionAPI.scheduleCollections?.(['productionOrders','productionFinalInspections']);
+          const stageIdx = [qcIndex, qcIndex >= 0 ? qcIndex + 1 : -1].filter(i => i >= 0);
+          if (stageIdx.length && ProductionAPI.persistStageProgress) {
+            await ProductionAPI.persistStageProgress(po, stageIdx);
+          }
+        }
+        if (typeof InventoryAPI !== 'undefined') {
+          InventoryAPI.scheduleCollections?.(['goodsReceipts','inventoryLots','inventory','inventoryTransactions'], 0);
+        }
+        Toast.ok('Đã xác nhận QC thành phẩm', pass > 0 ? `${fmtN(pass)} ${po.unit} đã được cộng vào Kho thành phẩm${receiptId ? ` · ${receiptId}` : ''}.` : `Toàn bộ ${fmtN(fail)} ${po.unit} không đạt, không cộng tồn.`);
+      } catch (err) {
+        console.error('[FQC] Không lưu được kết quả QC lên server:', err);
+        Toast.err('Chưa lưu được kết quả QC lên server', err?.message || 'Vui lòng thử lại.');
+      }
+    }, 0));
   },
   'po-fg-receipt': (d) => {
     const p = Q.po(d.id); if (!p) return;
@@ -1468,7 +1652,7 @@ const Actions = {
     inventoryFilter.stockTab = isRaw ? 'raw' : isSemi ? 'semi' : 'finished';
     State.page.inventory = 1;
     // [PERFORMANCE] Lưu state/cache ngay để nút Lưu phản hồi tức thì.
-    // KIO vẫn đồng bộ đúng các collection ở background, không đổi nghiệp vụ.
+    // KIO bắt đầu đồng bộ đúng các collection ngay ở tick kế tiếp; không đổi nghiệp vụ.
     if(typeof InventoryAPI!=='undefined') {
       const syncKeys = isRaw
         ? (openingQty > 0 ? ['materials', 'inventory', 'inventoryTransactions'] : ['materials'])
@@ -1484,17 +1668,25 @@ const Actions = {
     go('warehouse', { tab: 'inventory' });
     Toast.ok(d.id?'Đã cập nhật hàng hóa':'Đã thêm hàng hóa',`${id} · ${name}`);
   },
-  'inventory-item-delete': (d) => {
+  'inventory-item-delete': async (d) => {
     const type=d.type||'RAW_MATERIAL'; const item=inventoryMasterItem(d.id); if(!item)return;
     const hasStock=(DB.inventory||[]).some(r=>r.productId===d.id && Number(r.qtyOnHand||0)!==0);
     const hasLot=(DB.inventoryLots||[]).some(l=>l.productId===d.id);
     const usedBom=type==='RAW_MATERIAL' && (DB.products||[]).some(p=>(p.bom||[]).some(([mid])=>mid===d.id));
     if(hasStock||hasLot||usedBom){Toast.err('Không thể xóa master',`${item.name} đang có tồn/lô hoặc đang được dùng trong BOM. Hãy ngừng sử dụng thay vì xóa.`);return;}
     if(!confirm(`Xóa ${d.id} - ${item.name}?`))return;
-    if(type==='RAW_MATERIAL')DB.materials=DB.materials.filter(x=>x.id!==d.id);
-    else if(type==='SEMI_FINISHED')DB.semiFinishedProducts=(DB.semiFinishedProducts||[]).filter(x=>x.id!==d.id);
-    else {DB.products=DB.products.filter(x=>x.id!==d.id); if(DB.finishedMinStock)delete DB.finishedMinStock[d.id];}
-    Modal.close(); render(); Toast.ok('Đã xóa master hàng hóa',`${d.id} · ${item.name}`);
+    const key=type==='RAW_MATERIAL'?'materials':type==='SEMI_FINISHED'?'semiFinishedProducts':'products';
+    try {
+      if(typeof InventoryAPI==='undefined' || typeof InventoryAPI.deleteCollectionKey!=='function') throw new Error('InventoryAPI chưa sẵn sàng');
+      await InventoryAPI.deleteCollectionKey(key,d.id);
+      if(type==='RAW_MATERIAL')DB.materials=DB.materials.filter(x=>x.id!==d.id);
+      else if(type==='SEMI_FINISHED')DB.semiFinishedProducts=(DB.semiFinishedProducts||[]).filter(x=>x.id!==d.id);
+      else {DB.products=DB.products.filter(x=>x.id!==d.id); if(DB.finishedMinStock)delete DB.finishedMinStock[d.id];}
+      InventoryAPI.cacheCurrent?.();
+      Modal.close(); render(); Toast.ok('Đã xóa master hàng hóa',`${d.id} · ${item.name} · đã xóa trên server`);
+    } catch(err) {
+      Toast.err('Không xóa được trên server',err?.message||'Vui lòng thử lại.');
+    }
   },
   'item-category-manager': (d) => openItemCategoryManager(d.type || 'RAW_MATERIAL'),
   'item-category-add': async (d) => {
@@ -1865,7 +2057,7 @@ const Actions = {
 
   'supplier-add': () => openSupplierForm(),
   'supplier-edit': (d) => openSupplierForm(d.id),
-  'supplier-delete': (d) => {
+  'supplier-delete': async (d) => {
     const supplier = DB.suppliers.find((x) => x.id === d.id);
     if (!supplier) return;
     const refs = [
@@ -1875,8 +2067,14 @@ const Actions = {
     ];
     if (refs.length) { Toast.err('Không thể xóa nhà cung cấp', `${supplier.name} đã phát sinh chứng từ/lô hàng. Bạn có thể sửa thông tin thay vì xóa.`); return; }
     if (!confirm(`Xóa nhà cung cấp ${supplier.id} - ${supplier.name}?`)) return;
-    DB.suppliers = DB.suppliers.filter((x) => x.id !== d.id);
-    Modal.close(); render(); Toast.ok('Đã xóa nhà cung cấp', `${supplier.id} · ${supplier.name}`);
+    try {
+      if (typeof PurchaseAPI === 'undefined' || !PurchaseAPI.deleteCollectionKey) throw new Error('PurchaseAPI chưa sẵn sàng');
+      await PurchaseAPI.deleteCollectionKey('suppliers', d.id);
+      DB.suppliers = DB.suppliers.filter((x) => x.id !== d.id);
+      Modal.close(); render(); Toast.ok('Đã xóa nhà cung cấp', `${supplier.id} · ${supplier.name} · đã xóa trên server`);
+    } catch (err) {
+      Toast.err('Không xóa được nhà cung cấp trên server', err?.message || 'Vui lòng thử lại.');
+    }
   },
   'supplier-detail': (d) => { State.supplierTab='overview'; switchTo(() => openSupplierDrawer(d.id), { keepDrawer: true }); },
   'supplier-tab': (d) => { State.supplierTab=d.tab; const supplier=Q.supplier(d.id); if(supplier) Drawer.setBody(supplierDrawerBody(supplier)); },
@@ -2762,13 +2960,21 @@ const Actions = {
       message: `Bạn có chắc muốn xóa <b>${esc(pr.id)}</b>? Thao tác này chỉ áp dụng khi PR chưa được duyệt và không thể hoàn tác.`,
       okText: 'Xóa đề nghị',
       onOk: async () => {
-        DB.purchases = DB.purchases.filter((p) => p.id !== pr.id);
-        DB.supplierQuotations = (DB.supplierQuotations || []).filter((q) => q.prId !== pr.id);
-        DB.purchaseApprovals = (DB.purchaseApprovals || []).filter((a) => a.prId !== pr.id);
-        SEARCH_INDEX = null;
-        if (typeof PurchaseAPI !== 'undefined') await PurchaseAPI.syncCollections(['purchases', 'supplierQuotations']);
-        render();
-        Toast.ok('Đã xóa đề nghị mua hàng', pr.id);
+        try {
+          if (typeof PurchaseAPI === 'undefined' || !PurchaseAPI.deleteCollectionKey) throw new Error('PurchaseAPI chưa sẵn sàng');
+          const quotationIds = (DB.supplierQuotations || []).filter((q) => q.prId === pr.id).map(q => q.id).filter(Boolean);
+          // Xóa server trước; chỉ khi KIO xác nhận mới xóa state UI.
+          if (quotationIds.length) await PurchaseAPI.deleteCollectionKey('supplierQuotations', quotationIds);
+          await PurchaseAPI.deleteCollectionKey('purchases', pr.id);
+          DB.purchases = DB.purchases.filter((p) => p.id !== pr.id);
+          DB.supplierQuotations = (DB.supplierQuotations || []).filter((q) => q.prId !== pr.id);
+          DB.purchaseApprovals = (DB.purchaseApprovals || []).filter((a) => a.prId !== pr.id);
+          SEARCH_INDEX = null;
+          render();
+          Toast.ok('Đã xóa đề nghị mua hàng', `${pr.id} · đã xóa trên server`);
+        } catch (err) {
+          Toast.err('Không xóa được đề nghị trên server', err?.message || 'Vui lòng thử lại.');
+        }
       }
     });
   },
@@ -3060,7 +3266,7 @@ const Actions = {
         Number(selectedQuote.leadTimeDays || 7)
       ),
 
-      status: 'APPROVED',
+      status: 'READY_TO_SEND',
 
       paymentTerm:
         selectedQuote.paymentTerm ||
@@ -3096,8 +3302,8 @@ const Actions = {
     go('purchases', { tab: 'po' });
 
     Toast.ok(
-      'Đã tạo đơn mua chờ duyệt',
-      `${poId} — ${Q.supplierName(selectedQuote.supplierId)}`
+      'Đã tạo đơn mua',
+      `${poId} — Chờ gửi NCC · ${Q.supplierName(selectedQuote.supplierId)}`
     );
   },
   'quote-add-supplier': (d) => openQuotationModal(d.id),
@@ -3131,7 +3337,7 @@ const Actions = {
         return;
       }
       const priceInput = document.querySelector(`input.quote-supplier-price[data-material-id="${item.materialId}"][data-supplier-id="${choice.dataset.supplierId}"]`);
-      const price = Number(priceInput?.value) || 0;
+      const price = parseMoney(priceInput?.value) || 0;
       if (price <= 0) {
         Toast.err('Thiếu giá báo', `Vui lòng nhập giá NCC cho ${item.name}.`);
         return;
@@ -3139,7 +3345,7 @@ const Actions = {
       selectedItems.push({ materialId: item.materialId, name: item.name, unit: item.unit, qty: Number(item.qty) || 0, price, amount: price * (Number(item.qty) || 0), supplierId: choice.dataset.supplierId });
       (item.supplierIds || (item.supplierId ? [item.supplierId] : [])).forEach((supplierId) => {
         const input = document.querySelector(`input.quote-supplier-price[data-material-id="${item.materialId}"][data-supplier-id="${supplierId}"]`);
-        const supplierPrice = Number(input?.value) || 0;
+        const supplierPrice = parseMoney(input?.value) || 0;
         if (supplierPrice > 0) quotedItems.push({ materialId: item.materialId, name: item.name, unit: item.unit, qty: Number(item.qty) || 0, price: supplierPrice, amount: supplierPrice * (Number(item.qty) || 0), supplierId, selected: supplierId === choice.dataset.supplierId });
       });
     }
@@ -3163,18 +3369,28 @@ const Actions = {
         const subtotal = poItems.reduce((sum, item) => sum + Number(item.amount || 0), 0);
         const vatRate = 10;
         const vat = Math.round(subtotal * vatRate / 100);
-        DB.purchaseOrders.unshift({ id: poId, prId: pr.id, quoteId, supplierId, date: DB.today, expectedDate: addDays(DB.today, 7), status: 'APPROVED', paymentTerm: 'Theo báo giá nhà cung cấp', note: pr.reason || 'Tạo từ báo giá nhà cung cấp', createdBy:DB.currentUser?.userId||DB.currentUser?.id||'', createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''), items: poItems, subtotal, vatRate, vat, total: subtotal + vat, paid: 0 });
+        // Xác nhận báo giá chỉ tạo PO; PO chưa được tự coi là đã duyệt.
+        // Trưởng phòng/role có quyền sẽ duyệt ở tab Đơn đặt hàng.
+        DB.purchaseOrders.unshift({ id: poId, prId: pr.id, quoteId, supplierId, date: DB.today, expectedDate: addDays(DB.today, 7), status: 'READY_TO_SEND', paymentTerm: 'Theo báo giá nhà cung cấp', note: pr.reason || 'Tạo từ báo giá nhà cung cấp', createdBy:DB.currentUser?.userId||DB.currentUser?.id||'', createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''), items: poItems, subtotal, vatRate, vat, total: subtotal + vat, paid: 0 });
         createdPoIds.push(poId);
       }
     });
     pr.status = 'mh_da_dat_hang';
     pr.approvedBy = DB.currentUser.id;
+
+    // Đánh dấu các collection là đang chờ ghi TRƯỚC KHI chuyển tab.
+    // Nếu go('purchases') chạy trước, tab PO có thể refresh snapshot KIO cũ và
+    // ghi đè PO vừa tạo trong DB.purchaseOrders.
+    if (typeof PurchaseAPI !== 'undefined' && PurchaseAPI.scheduleCollections) {
+      PurchaseAPI.scheduleCollections(['supplierQuotations', 'purchaseOrders', 'purchases']);
+    }
+
     Modal.close();
     // Bộ lọc PR/quote dùng chung state với tab PO; xóa chúng để PO vừa tạo luôn hiển thị.
     Object.assign(F('purchases'), { q: '', status: '', supplier: '', quoteStatus: '', quoteSupplier: '' });
     State.page.purchases = 1;
     go('purchases', { tab: 'po' });
-    Toast.ok('Đã tạo đơn đặt hàng', `${createdPoIds.join(', ')} · ${createdPoIds.length} NCC`);
+    Toast.ok('Đã tạo đơn đặt hàng', `${createdPoIds.join(', ')} · Chờ gửi NCC · ${createdPoIds.length} NCC`);
   },
   'quote-save-supplier': (d) => {
     // 1. Lấy đúng PR từ nút Lưu báo giá
@@ -3328,8 +3544,8 @@ const Actions = {
   },
 
   'po-approve-action': (d) => {
-    if (!Auth.canApprovePurchase()) {
-      Toast.err('Không có quyền phê duyệt', 'Tài khoản hiện tại không có quyền duyệt đơn mua hàng.');
+    if (!Auth.hasPermission('PURCHASE_PO_APPROVE')) {
+      Toast.err('Không có quyền phê duyệt', 'Tài khoản hiện tại không có quyền duyệt PO.');
       return;
     }
     const po = Q.purchaseOrder(d.id);
@@ -3345,6 +3561,7 @@ const Actions = {
   'open-po': (d) => openPOModal(d.id),
   'po-edit': (d) => openPOEditRequest(d.id),
   'po-cancel': (d) => {
+    if (!Auth.require('PURCHASE_PO_CREATE', 'Chỉ bộ phận Mua hàng được hủy PO.')) return;
     const po = Q.purchaseOrder(d.id);
     if (!po) return;
     if (['RECEIVED', 'PARTIAL_RECEIVED', 'SHIPPING', 'CANCELLED'].includes(po.status)) {
@@ -3383,6 +3600,13 @@ const Actions = {
   'po-change-status': (d) => {
     const po = Q.purchaseOrder(d.id);
     if (!po) return;
+    if (['SENT_TO_SUPPLIER','SHIPPING'].includes(d.status) && !Auth.require('PURCHASE_PO_SEND', 'Tài khoản hiện tại không có quyền gửi/cập nhật PO với nhà cung cấp.')) return;
+    if (d.status === 'SENT_TO_SUPPLIER' && !['READY_TO_SEND','APPROVED','PENDING_APPROVAL'].includes(po.status)) {
+      Toast.err('Chưa thể gửi NCC', 'PO chưa ở trạng thái sẵn sàng gửi nhà cung cấp.'); return;
+    }
+    if (d.status === 'SHIPPING' && po.status !== 'SENT_TO_SUPPLIER') {
+      Toast.err('Sai trạng thái', 'Chỉ PO đã gửi NCC mới được chuyển sang trạng thái NCC đang giao hàng.'); return;
+    }
     po.status = d.status;
     render();
     Toast.ok('Đã cập nhật trạng thái PO', `${po.id} ➔ ${statusLabel(d.status)}`);
@@ -3463,7 +3687,21 @@ const Actions = {
   'inventory-receipt-tab': (d) => { F('inv-receipts').receiptTab = d.tab || 'raw'; State.page['inv-receipts'] = 1; render(); },
   'inventory-issue-tab': (d) => { F('inv-issues').issueTab = d.tab || 'raw'; State.page['inv-issues'] = 1; render(); },
   'inv-stock-product-toggle': (d) => { const f=F('inventory'); f.expandedProductId = f.expandedProductId === d.productid ? '' : d.productid; render(); },
-  'inv-stock-lot-view': (d) => openInventoryStockLotDetail(d.productid, d.lotid),
+  'inv-stock-lot-view': async (d) => {
+    // Lịch sử lô là dữ liệu thật trên server. Chỉ khi người dùng mở chi tiết lô
+    // mới lazy-load 2 collection cần thiết để không làm chậm màn Tồn kho.
+    try {
+      const jobs = [];
+      if (typeof PurchaseAPI !== 'undefined' && PurchaseAPI.ensureFresh)
+        jobs.push(PurchaseAPI.ensureFresh(['goodsReceipts'], { force:false }));
+      if (typeof InventoryAPI !== 'undefined' && InventoryAPI.ensureFresh)
+        jobs.push(InventoryAPI.ensureFresh(['inventoryTransactions'], { force:false }));
+      if (jobs.length) await Promise.all(jobs);
+    } catch (err) {
+      console.warn('[Inventory] Không tải đủ lịch sử lô từ server, dùng dữ liệu hiện có:', err);
+    }
+    openInventoryStockLotDetail(d.productid, d.lotid);
+  },
   'po-goods-receipt-save': () => {
     const poId = $('#poGrPo')?.value || '';
     const po = Q.purchaseOrder(poId);
@@ -3594,7 +3832,7 @@ const Actions = {
     const allDone = (po.items || []).every(i => Number(i.receivedQty || 0) >= Number(i.qty || 0));
     po.status = allDone ? 'RECEIVED' : 'PARTIAL_RECEIVED';
     const grId = nextCode('PN-2026-', DB.goodsReceipts);
-    DB.goodsReceipts.unshift({ id: grId, poId: po.id, prId: po.prId, date, receivedBy: receiver, createdBy:DB.currentUser?.userId||DB.currentUser?.id||'', createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''), warehouse: Q.warehouseName(warehouseId), warehouseId, locationId: location.id, location: Q.locationName(location.id), status: po.status, inspectionStatus: 'PENDING', inspectedAt: '', inspectedBy: '', note, items: received });
+    DB.goodsReceipts.unshift({ id: grId, poId: po.id, prId: po.prId, supplierId: po.supplierId, date, receivedBy: receiver, createdBy:DB.currentUser?.userId||DB.currentUser?.id||'', createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''), warehouse: Q.warehouseName(warehouseId), warehouseId, locationId: location.id, location: Q.locationName(location.id), status: po.status, inspectionStatus: 'PENDING', inspectedAt: '', inspectedBy: '', note, items: received });
     Modal.close();
     go('warehouse', { tab: 'receipts' });
     Toast.ok('Đã lập phiếu nhập kho', `${grId} · ${po.id} · đang chờ kiểm tra đầu vào trước khi cộng tồn kho.`);
@@ -3879,7 +4117,7 @@ const Actions = {
     State.page.purchases = 1; render();
   },
   'supplier-pay-modal': (d) => openPaymentModal(d.id),
-  'supplier-pay-save': (d) => {
+  'supplier-pay-save': async (d) => {
     const po = Q.purchaseOrder(d.poid);
     if (!po) return;
     const amount = parseMoney($('#payAmount').value) || 0;
@@ -3895,14 +4133,31 @@ const Actions = {
     const bank = (DB.bankAccounts || []).find(b => String(b.id) === String(bankId));
     if (!payerId) { Toast.err('Chưa chọn người thực hiện', 'Vui lòng chọn người thực hiện thanh toán.'); return; }
     if (method === 'BANK_TRANSFER' && !bankId) { Toast.err('Chưa chọn ngân hàng', 'Vui lòng chọn tài khoản ngân hàng dùng để thanh toán.'); return; }
-    po.paid = Math.round(Number(po.paid || 0) + amount);
-    DB.supplierPayments.unshift({
+    if (method === 'BANK_TRANSFER' && typeof AccFin !== 'undefined' && AccFin.bankBalance(bankId) < amount) { Toast.err('Số dư ngân hàng không đủ', `Số dư hiện tại ${fmtVND(AccFin.bankBalance(bankId))}, cần thanh toán ${fmtVND(amount)}.`); return; }
+
+    const oldPaid = Number(po.paid || 0);
+    const payment = {
       id, poId: po.id, supplierId: po.supplierId, date: $('#payDate')?.value || (typeof currentDateYMD==='function'?currentDateYMD():DB.today), amount,
       method: method === 'BANK_TRANSFER' ? 'Chuyển khoản' : 'Tiền mặt', bankId, bankName: bank?.name || bank?.bankName || '', bankAccount: bank?.accountNumber || '',
       payerId, payerName, bankRef: $('#payRef')?.value || '', note: $('#payNote')?.value || '', createdBy: DB.currentUser?.userId || DB.currentUser?.id || '', createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''), createdAt: new Date().toISOString(),
-    });
-    Modal.close(); if(State.module==='accounting') go('accounting',{tab:'ap'}); else go('purchases',{tab:'debts'}); render();
-    Toast.ok('Ghi nhận thanh toán thành công', `${id} — ${fmtVND(amount)}`);
+    };
+    po.paid = Math.round(oldPaid + amount);
+    DB.supplierPayments.unshift(payment);
+    try {
+      // Ghi công nợ lên KIO ngay, không chờ timer rồi đổi tài khoản bị mất.
+      if (typeof PurchaseAPI !== 'undefined') await PurchaseAPI.syncCollections(['supplierPayments','purchaseOrders']);
+      // Chuyển khoản NCC là tiền RA khỏi đúng tài khoản đã chọn.
+      if (bankId && typeof AccountingBank !== 'undefined') {
+        await AccountingBank.record({ bankId, type:'OUT', date:payment.date, amount, note:`Thanh toán NCC ${po.id} · ${Q.supplierName(po.supplierId)}`, sourceType:'SUPPLIER_PAYMENT', sourceId:id, createdBy:payment.createdBy });
+      }
+      Modal.close(); if(State.module==='accounting') go('accounting',{tab:'ap'}); else go('purchases',{tab:'debts'}); render();
+      Toast.ok('Ghi nhận thanh toán thành công', `${id} — ${fmtVND(amount)}`);
+    } catch(err) {
+      po.paid = oldPaid;
+      DB.supplierPayments = (DB.supplierPayments||[]).filter(x=>x.id!==id);
+      try { if (typeof PurchaseAPI !== 'undefined') await PurchaseAPI.syncCollections(['supplierPayments','purchaseOrders']); } catch(_) {}
+      Toast.err('Không lưu được thanh toán', err?.message || 'Không thể ghi dữ liệu lên server.');
+    }
   },
   'export-pr': (d) => Exporter.pdf('Yeu-cau-mua-hang-' + d.id),
 
@@ -3944,7 +4199,13 @@ const Actions = {
     Modal.close(); render();
     Toast.ok('Đã đổi vai trò', `${u.name} · ${(DB.roles.find((r) => r.id === u.roleId) || {}).name}`);
   },
-  'auth-logout': async () => { if (typeof SystemAPI !== 'undefined') await SystemAPI.logout(); location.reload(); },
+  'auth-logout': async () => {
+    if (typeof Toast !== 'undefined') Toast.info('Đang đăng xuất', 'Đang kết thúc phiên đăng nhập...');
+    if (typeof SystemAPI !== 'undefined') await SystemAPI.logout();
+    // Không giữ lại route/tab của tài khoản cũ khi chuyển sang tài khoản khác.
+    try { history.replaceState(null, '', location.pathname + location.search); } catch (_) {}
+    location.reload();
+  },
 
   'toggle-setting': (d) => {
     DB.settings[d.key] = !DB.settings[d.key];
@@ -4184,7 +4445,7 @@ function pfOpenPlanEdit(plan) {
   Modal.open({title:`Sửa kế hoạch · ${plan.id}`,size:'lg',body:`<div class="form-grid cols-2"><div class="field"><label>Ngày lập *</label><input class="inp" id="pfPlanDate" type="date" value="${esc(plan.date||today)}" min="${today}"></div><div class="field"><label>Ngày cần hoàn thành *</label><input class="inp" id="pfPlanDue" type="date" value="${esc(plan.dueDate||today)}" min="${today}"></div></div><div class="form-sec-title"><i class="fa-solid fa-box"></i>Thành phẩm</div><div style="max-height:420px;overflow:auto">${rows}</div><div class="field"><label>Ghi chú</label><textarea class="inp" id="pfPlanNote" rows="2">${esc(plan.note||'')}</textarea></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="pf-plan-edit-save" data-id="${esc(plan.id)}"><i class="fa-solid fa-floppy-disk"></i>Lưu thay đổi</button>`});
 }
 Actions['pf-plan-edit'] = (d) => {const p=(DB.productionPlans||[]).find(x=>x.id===d.id);if(!p)return;if(State.module!=='warehouse'||p.status!=='WAITING_APPROVAL'){Toast.warn('Không thể sửa','Kế hoạch chỉ được sửa tại Kho khi còn ở trạng thái Chờ duyệt. Sau khi duyệt, Sản xuất chỉ tiếp nhận và triển khai kế hoạch.');return;}pfOpenPlanEdit(p);};
-Actions['pf-plan-edit-save'] = (d) => {const p=(DB.productionPlans||[]).find(x=>x.id===d.id);if(!p||State.module!=='warehouse'||p.status!=='WAITING_APPROVAL')return;const today=currentDateYMD(),date=$('#pfPlanDate')?.value||today,due=$('#pfPlanDue')?.value||date;if(date<today||due<today||due<date){Toast.err('Ngày chưa hợp lệ','Ngày không được ở quá khứ và deadline phải từ ngày lập trở đi.');return;}const items=[];document.querySelectorAll('.pf-plan-line').forEach(row=>{const pick=row.querySelector('[name="pick"]'),qty=Number(row.querySelector('[name="qty"]')?.value||0);if(pick?.checked&&qty>0)items.push({productId:pick.dataset.product,qty});});if(!items.length){Toast.err('Chưa chọn thành phẩm','Chọn ít nhất một thành phẩm.');return;}p.date=date;p.dueDate=due;p.items=items;p.note=$('#pfPlanNote')?.value.trim()||'';p.updatedAt=new Date().toISOString();ProductionAPI?.scheduleSync(80);Modal.close();render();Toast.ok('Đã cập nhật kế hoạch',p.id);};
+Actions['pf-plan-edit-save'] = async (d) => {const p=(DB.productionPlans||[]).find(x=>x.id===d.id);if(!p||State.module!=='warehouse'||p.status!=='WAITING_APPROVAL')return;const today=currentDateYMD(),date=$('#pfPlanDate')?.value||today,due=$('#pfPlanDue')?.value||date;if(date<today||due<today||due<date){Toast.err('Ngày chưa hợp lệ','Ngày không được ở quá khứ và deadline phải từ ngày lập trở đi.');return;}const items=[];document.querySelectorAll('.pf-plan-line').forEach(row=>{const pick=row.querySelector('[name="pick"]'),qty=Number(row.querySelector('[name="qty"]')?.value||0);if(pick?.checked&&qty>0)items.push({productId:pick.dataset.product,qty});});if(!items.length){Toast.err('Chưa chọn thành phẩm','Chọn ít nhất một thành phẩm.');return;}const prev=JSON.parse(JSON.stringify(p));p.date=date;p.dueDate=due;p.items=items;p.note=$('#pfPlanNote')?.value.trim()||'';p.updatedAt=new Date().toISOString();try{await ProductionAPI?.persistCollections?.(['productionPlans']);Modal.close();render();Toast.ok('Đã cập nhật kế hoạch',`${p.id} · Đã lưu server`);}catch(err){Object.assign(p,prev);render();Toast.err('Không lưu được kế hoạch',err?.message||'Server chưa xác nhận dữ liệu.');}};
 
 Actions['pf-bom-view'] = (d) => {const p=Q.product(d.id);if(!p)return;const bom=(p.bom||[]).map(([mid,qty,lossPct=0])=>{const mat=Q.material(mid),effective=pfBomRequiredQty(qty,1,lossPct);return `<tr><td><span class="code">${esc(mid)}</span></td><td>${esc(mat?.name||mid)}</td><td class="right num">${fmtDec(qty,4)} ${esc(mat?.unit||'')}</td><td class="right num">${fmtDec(Number(lossPct||0),2)}%</td><td class="right num"><b>${fmtDec(effective,4)}</b> ${esc(mat?.unit||'')}</td></tr>`;}).join('');const routing=(p.routing||[]).map(([oid])=>`<tr><td><span class="code">${esc(oid)}</span></td><td>${esc(Q.operation(oid)?.name||oid)}</td><td>${esc(Q.operation(oid)?.workshop||'')}</td></tr>`).join('');Modal.open({title:`BOM / Định mức · ${p.id}`,sub:`${p.name} · Định mức cho 1 ${p.unit||'đơn vị'} thành phẩm`,size:'xl',body:`<div class="grid g-2"><div><div class="form-sec-title">Nguyên liệu định mức</div>${tableShell([{t:'Mã NVL'},{t:'Nguyên liệu'},{t:'Định mức / 1 ĐVT',cls:'right'},{t:'Hao hụt',cls:'right'},{t:'Cần cấp / 1 ĐVT',cls:'right'}],bom,{emptyTitle:'Chưa khai báo nguyên liệu'})}</div><div><div class="form-sec-title">Công đoạn / Routing</div>${tableShell([{t:'Mã'},{t:'Công đoạn'},{t:'Xưởng'}],routing,{emptyTitle:'Chưa khai báo công đoạn'})}</div></div>`,foot:`<button class="btn" data-act="modal-close">Đóng</button><button class="btn btn-primary" data-act="pf-bom-edit" data-id="${esc(p.id)}"><i class="fa-solid fa-pen"></i>Sửa</button>`});};
 
@@ -4228,7 +4489,7 @@ Actions['pf-bom-save'] = () => {
   product.bom=bom; product.routing=routing; InventoryAPI?.scheduleCollections?.(['products'],80); Modal.close(); render(); Toast.ok('Đã lưu BOM / Routing',`${product.id} · ${product.name}`);
 };
 
-Actions['pf-plan-from-sales-order'] = (d) => {
+Actions['pf-plan-from-sales-order'] = async (d) => {
   const o=Q.order(d.id); if(!o)return;
   if(!o.approvedAt||['dh_cho_xu_ly','dh_tu_choi','dh_da_huy','dh_da_giao','dh_hoan_tat'].includes(o.status)){Toast.warn('Không thể lập kế hoạch','Chỉ lập kế hoạch từ đơn bán đã được duyệt và còn hiệu lực.');return;}
   const group=(typeof pfSalesDemandGroups==='function'?pfSalesDemandGroups():[]).find(g=>g.order.id===o.id);
@@ -4241,9 +4502,15 @@ Actions['pf-plan-from-sales-order'] = (d) => {
   o.productionPlanId=id;
   o.status='dh_cho_san_xuat';
   if(typeof SalesCRM!=='undefined')SalesCRM.saveLocal(['orders']);
-  if(typeof ProductionAPI!=='undefined')ProductionAPI.scheduleSync(80);
-  if(typeof SystemAPI!=='undefined')SystemAPI.audit({module:'WAREHOUSE',entityType:'PRODUCTION_PLAN',entityId:id,action:'CREATE',description:`${DB.currentUser?.name||'Người dùng'} lập kế hoạch ${id} cho phần thiếu của đơn ${o.id}`,newData:{orderId:o.id,items,status:'WAITING_APPROVAL'}});
-  render(); Toast.ok('Đã lập kế hoạch sản xuất',`${id} · Chờ duyệt tại Kho trước khi chuyển sang Sản xuất.`);
+  try{
+    await ProductionAPI?.persistCollections?.(['productionPlans']);
+    if(typeof SystemAPI!=='undefined')SystemAPI.audit({module:'WAREHOUSE',entityType:'PRODUCTION_PLAN',entityId:id,action:'CREATE',description:`${DB.currentUser?.name||'Người dùng'} lập kế hoạch ${id} cho phần thiếu của đơn ${o.id}`,newData:{orderId:o.id,items,status:'WAITING_APPROVAL'}});
+    render(); Toast.ok('Đã lập kế hoạch sản xuất',`${id} · Đã lưu server · Chờ duyệt tại Kho.`);
+  }catch(err){
+    DB.productionPlans=(DB.productionPlans||[]).filter(x=>x.id!==id);
+    if(o.productionPlanId===id)o.productionPlanId='';
+    render(); Toast.err('Không lưu được kế hoạch sản xuất',err?.message||'Server chưa xác nhận dữ liệu.');
+  }
 };
 
 Actions['pf-plan-new'] = () => {
@@ -4251,14 +4518,23 @@ Actions['pf-plan-new'] = () => {
   const rows=(DB.products||[]).map(p=>{const stock=pfFinishedStock(p.id), zero=stock<=0; return `<div class="pf-plan-line" style="display:grid;grid-template-columns:32px 1fr 120px 150px;gap:8px;align-items:center;margin-bottom:8px"><input type="checkbox" name="pick" data-product="${esc(p.id)}"><div><b>${esc(p.name)}</b><div class="cell-sub">${esc(p.id)} · Tồn khả dụng ${fmtN(stock)} ${esc(p.unit||'')}</div></div><input class="inp right num" name="qty" type="number" min="1" step="1" value="${zero?100:0}"><span>${zero?'<span class="badge red">Hết hàng</span>':'<span class="badge green">Còn hàng</span>'}</span></div>`}).join('');
   Modal.open({title:'Lập kế hoạch sản xuất',sub:'Ưu tiên các thành phẩm hết hàng; có thể chọn thêm thành phẩm khác khi cần',size:'lg',body:`<div class="form-grid cols-2"><div class="field"><label>Ngày lập *</label><input class="inp" id="pfPlanDate" type="date" value="${today}" min="${today}"></div><div class="field"><label>Ngày cần hoàn thành *</label><input class="inp" id="pfPlanDue" type="date" value="${addDays(today,7)}" min="${today}"></div></div><div class="form-sec-title"><i class="fa-solid fa-box"></i>Thành phẩm cần sản xuất</div><div style="max-height:420px;overflow:auto">${rows}</div><div class="field"><label>Ghi chú</label><textarea class="inp" id="pfPlanNote" rows="2" placeholder="Lý do / ghi chú kế hoạch"></textarea></div>`,foot:'<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="pf-plan-save"><i class="fa-solid fa-floppy-disk"></i>Lưu kế hoạch</button>'});
 };
-Actions['pf-plan-save'] = () => {
+Actions['pf-plan-save'] = async () => {
   const date=$('#pfPlanDate')?.value||currentDateYMD(), due=$('#pfPlanDue')?.value||date; if(date<currentDateYMD()||due<currentDateYMD()||due<date){Toast.err('Ngày chưa hợp lệ','Ngày kế hoạch và ngày hoàn thành không được ở quá khứ; deadline phải từ ngày lập trở đi.');return;}
   const items=[]; document.querySelectorAll('.pf-plan-line').forEach(row=>{const pick=row.querySelector('[name="pick"]'); const qty=Number(row.querySelector('[name="qty"]')?.value||0); if(pick?.checked&&qty>0)items.push({productId:pick.dataset.product,qty});});
   if(!items.length){Toast.err('Chưa chọn thành phẩm','Chọn ít nhất một thành phẩm và nhập số lượng lớn hơn 0.');return;}
-  const id=nextCode('KHSX-2026-',DB.productionPlans||[]); DB.productionPlans.unshift({id,date,dueDate:due,items,status:'WAITING_APPROVAL',note:$('#pfPlanNote')?.value.trim()||'',createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''),createdAt:new Date().toISOString()});
-  ProductionAPI?.scheduleSync(80); Modal.close(); render(); Toast.ok('Đã lập kế hoạch',`${id} · Chờ duyệt tại Kho`);
+  const id=nextCode('KHSX-2026-',DB.productionPlans||[]);
+  const plan={id,date,dueDate:due,items,status:'WAITING_APPROVAL',note:$('#pfPlanNote')?.value.trim()||'',createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''),createdAt:new Date().toISOString()};
+  DB.productionPlans.unshift(plan);
+  try{
+    await ProductionAPI?.persistCollections?.(['productionPlans']);
+    Modal.close(); render(); Toast.ok('Đã lập kế hoạch',`${id} · Đã lưu server · Chờ duyệt tại Kho`);
+  }catch(err){
+    DB.productionPlans=(DB.productionPlans||[]).filter(x=>x.id!==id);
+    render();
+    Toast.err('Không lưu được kế hoạch sản xuất',err?.message||'Server chưa xác nhận dữ liệu.');
+  }
 };
-Actions['pf-plan-approve'] = (d) => {const p=(DB.productionPlans||[]).find(x=>x.id===d.id); if(!p||p.status!=='WAITING_APPROVAL')return; p.status='APPROVED';p.approvedBy=DB.currentUser?.id||'';p.approvedAt=new Date().toISOString();if(p.source==='SALES_ORDER'&&p.sourceOrderId){const o=Q.order(p.sourceOrderId);if(o){o.status='dh_cho_san_xuat';o.productionPlanId=p.id;SalesCRM?.saveLocal(['orders']);}}ProductionAPI?.scheduleSync(80);render();Toast.ok('Đã duyệt kế hoạch',`${p.id} đã chuyển sang Sản xuất → Kế hoạch sản xuất.`);};
+Actions['pf-plan-approve'] = async (d) => {const p=(DB.productionPlans||[]).find(x=>x.id===d.id); if(!p||p.status!=='WAITING_APPROVAL')return; const prev={status:p.status,approvedBy:p.approvedBy,approvedAt:p.approvedAt}; p.status='APPROVED';p.approvedBy=DB.currentUser?.id||'';p.approvedAt=new Date().toISOString();if(p.source==='SALES_ORDER'&&p.sourceOrderId){const o=Q.order(p.sourceOrderId);if(o){o.status='dh_cho_san_xuat';o.productionPlanId=p.id;SalesCRM?.saveLocal(['orders']);}}try{await ProductionAPI?.persistCollections?.(['productionPlans']);render();Toast.ok('Đã duyệt kế hoạch',`${p.id} đã lưu server và chuyển sang Sản xuất → Kế hoạch sản xuất.`);}catch(err){Object.assign(p,prev);render();Toast.err('Không lưu được trạng thái duyệt',err?.message||'Server chưa xác nhận dữ liệu.');}};
 Actions['pf-plan-delete'] = (d) => {const p=(DB.productionPlans||[]).find(x=>x.id===d.id); if(!p||p.status!=='WAITING_APPROVAL'){Toast.warn('Không thể xóa','Chỉ kế hoạch chưa duyệt mới được xóa.');return;} confirmBox({title:'Xóa kế hoạch sản xuất',icon:'fa-trash',okText:'Xóa',message:`Xóa kế hoạch <b>${esc(p.id)}</b>?`,onOk:()=>{DB.productionPlans=DB.productionPlans.filter(x=>x.id!==p.id);if(p.source==='SALES_ORDER'&&p.sourceOrderId){const o=Q.order(p.sourceOrderId);if(o&&o.productionPlanId===p.id){o.productionPlanId='';SalesCRM?.saveLocal(['orders']);}}ProductionAPI?.scheduleSync(80);render();Toast.ok('Đã xóa kế hoạch',p.id);}});};
 
 Actions['pf-plan-add-material'] = (d,el) => {
@@ -4294,7 +4570,7 @@ Actions['pf-plan-materials'] = (d) => {
   }).join('');
   Modal.open({title:`Chuẩn bị sản xuất · ${plan.id}`,sub:'Hệ thống tự tính NVL từ BOM × số lượng kế hoạch và % hao hụt. Có thể kiểm tra hoặc bổ sung dòng trước khi gửi Kho.',size:'xl',body:`${blocks}<div class="field"><label>Ghi chú yêu cầu</label><textarea class="inp" id="pfMrNote" rows="2"></textarea></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="pf-mr-create" data-id="${esc(plan.id)}"><i class="fa-solid fa-paper-plane"></i>Lưu & lập phiếu yêu cầu NVL</button>`});
 };
-Actions['pf-mr-create'] = (d) => {
+Actions['pf-mr-create'] = async (d) => {
   const plan=(DB.productionPlans||[]).find(x=>x.id===d.id); if(!plan||plan.status!=='APPROVED')return;
   const items=[];
   for(const group of document.querySelectorAll('.pf-mat-product')){
@@ -4304,7 +4580,16 @@ Actions['pf-mr-create'] = (d) => {
     if(planItem){planItem.preparedMaterials=preparedMaterials;planItem.preparedOperations=preparedOperations;}
   }
   if(!items.length){Toast.err('Chưa có nguyên liệu','Thêm ít nhất một nguyên liệu trước khi lập phiếu yêu cầu.');return;}
-  const id=nextCode('YCNVL-2026-',DB.productionMaterialRequests||[]); DB.productionMaterialRequests.unshift({id,planId:plan.id,date:currentDateYMD(),items,status:'WAITING_WAREHOUSE_APPROVAL',note:$('#pfMrNote')?.value.trim()||'',createdBy:DB.currentUser?.id||'',createdAt:new Date().toISOString()}); plan.status='MATERIAL_REQUESTED'; plan.materialRequestId=id; ProductionAPI?.scheduleSync(80);Modal.close();render();Toast.ok('Đã gửi yêu cầu NVL',`${id} · Đã lưu nguyên liệu và công đoạn của kế hoạch · Chờ Kho duyệt`);
+  const id=nextCode('YCNVL-2026-',DB.productionMaterialRequests||[]);
+  const request={id,planId:plan.id,date:currentDateYMD(),items,status:'APPROVED',note:$('#pfMrNote')?.value.trim()||'',createdBy:DB.currentUser?.id||'',createdAt:new Date().toISOString()};
+  const prevPlan={status:plan.status,materialRequestId:plan.materialRequestId};
+  DB.productionMaterialRequests.unshift(request); plan.status='MATERIAL_REQUESTED'; plan.materialRequestId=id;
+  try{
+    await ProductionAPI?.persistCollections?.(['productionPlans','productionMaterialRequests']);
+    Modal.close();render();Toast.ok('Đã tạo yêu cầu NVL',`${id} · Đã lưu server · Kho có thể xuất NVL ngay.`);
+  }catch(err){
+    DB.productionMaterialRequests=(DB.productionMaterialRequests||[]).filter(x=>x.id!==id);Object.assign(plan,prevPlan);render();Toast.err('Không lưu được yêu cầu NVL',err?.message||'Server chưa xác nhận dữ liệu.');
+  }
 };
 Actions['pf-mr-approve'] = (d) => {const r=(DB.productionMaterialRequests||[]).find(x=>x.id===d.id);if(!r||r.status!=='WAITING_WAREHOUSE_APPROVAL')return;r.status='APPROVED';r.approvedBy=DB.currentUser?.id||'';r.approvedAt=new Date().toISOString();ProductionAPI?.scheduleSync(80);render();Toast.ok('Đã duyệt yêu cầu NVL',`${r.id} có thể xuất kho.`);};
 
@@ -4314,10 +4599,10 @@ function pfAllocateMaterial(materialId,qty){
   return {ok:remain<=0.000001,remain,alloc};
 }
 Actions['pf-mr-issue'] = (d) => {
-  const r=(DB.productionMaterialRequests||[]).find(x=>x.id===d.id); if(!r||r.status!=='APPROVED')return;
+  const r=(DB.productionMaterialRequests||[]).find(x=>x.id===d.id); if(!r||!['WAITING_WAREHOUSE_APPROVAL','APPROVED'].includes(r.status))return;
   const totals={}; (r.items||[]).forEach(i=>totals[i.materialId]=(totals[i.materialId]||0)+Number(i.qty||0)); const plans=[];
   for(const [mid,qty] of Object.entries(totals)){const a=pfAllocateMaterial(mid,qty);if(!a.ok){Toast.err('Không đủ tồn kho',`${Q.material(mid)?.name||mid} còn thiếu ${fmtDec(a.remain,2)} ${Q.material(mid)?.unit||''}.`);return;}plans.push({mid,qty,alloc:a.alloc});}
-  confirmBox({title:'Xuất NVL cho sản xuất',icon:'fa-arrow-up-from-bracket',okText:'Duyệt & xuất kho',message:`Xuất nguyên liệu theo phiếu <b>${esc(r.id)}</b>? Hệ thống sẽ trừ tồn theo lô khả dụng (ưu tiên FEFO) và tự lưu phiếu vào lịch sử Xuất kho nguyên liệu.`,onOk:()=>{
+  confirmBox({title:'Xuất NVL cho sản xuất',icon:'fa-arrow-up-from-bracket',okText:'Xuất kho',message:`Xuất nguyên liệu theo phiếu <b>${esc(r.id)}</b>? Hệ thống sẽ trừ tồn theo lô khả dụng (ưu tiên FEFO) và tự lưu phiếu vào lịch sử Xuất kho nguyên liệu.`,onOk:()=>{
     const issueGroups={};
     for(const p of plans){
       for(const a of p.alloc){
@@ -4330,7 +4615,7 @@ Actions['pf-mr-issue'] = (d) => {
     const issueIds=[];
     Object.entries(issueGroups).forEach(([warehouseId,items])=>{
       const issueId=nextCode('PX-2026-',DB.goodsIssues||[]);
-      DB.goodsIssues.unshift({id:issueId,type:'PRODUCTION_ISSUE',warehouseId,refDoc:r.id,productionMaterialRequestId:r.id,planId:r.planId||'',productionOrderId:r.productionOrderId||'',date:currentDateYMD(),status:'COMPLETED',createdBy:DB.currentUser?.id||'',approvedBy:r.approvedBy||'',note:`Xuất NVL cho sản xuất theo ${r.id}`,items});
+      DB.goodsIssues.unshift({id:issueId,type:'PRODUCTION_ISSUE',warehouseId,refDoc:r.id,productionMaterialRequestId:r.id,planId:r.planId||'',productionOrderId:r.productionOrderId||'',date:currentDateYMD(),status:'COMPLETED',createdBy:DB.currentUser?.id||'',approvedBy:'',note:`Xuất NVL cho sản xuất theo ${r.id}`,items});
       issueIds.push(issueId);
     });
     r.status='ISSUED';r.issuedBy=DB.currentUser?.id||'';r.issuedAt=new Date().toISOString();r.goodsIssueIds=issueIds;
@@ -4344,7 +4629,7 @@ Actions['pf-mr-issue'] = (d) => {
 
 Actions['pf-plan-release'] = (d) => {
   const plan=(DB.productionPlans||[]).find(x=>x.id===d.id);if(!plan||plan.status!=='MATERIAL_ISSUED')return;
-  const created=[];(plan.items||[]).forEach(it=>{const product=Q.product(it.productId); if(!product)return; const routingOverride=(it.preparedOperations||[]).map(o=>[o.operationId,Number(o.hoursPer||0),o.note||'']); const routingForMo=routingOverride.length?routingOverride:(product.routing||[]); const po={id:nextCode('LSX-2026-',DB.productionOrders),orderId:plan.source==='SALES_ORDER'?(plan.sourceOrderId||''):'',customerId:plan.source==='SALES_ORDER'?(plan.customerId||Q.order(plan.sourceOrderId)?.customerId||''):'',productId:product.id,productName:product.name,spec:product.spec||'',qty:Number(it.qty||0),unit:product.unit||'',startDate:currentDateYMD(),deadline:(plan.dueDate&&plan.dueDate>=currentDateYMD()?plan.dueDate:addDays(currentDateYMD(),7)),managerId:DB.currentUser?.empId||'NV-018',status:'lsx_cho_duyet',stages:buildProductionStagesFromRouting(Number(it.qty||0),routingForMo,currentDateYMD()),routingOverride,materialPlan:(it.preparedMaterials||[]).map(m=>({materialId:m.materialId,qty:Number(m.qty||0)})),qcPass:0,qcFail:0,planId:plan.id,materialRequestId:plan.materialRequestId||'',note:`Tạo từ kế hoạch ${plan.id}`,createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''),createdAt:new Date().toISOString()};DB.productionOrders.unshift(po);created.push(po);});
+  const created=[];(plan.items||[]).forEach(it=>{const product=Q.product(it.productId); if(!product)return; const routingOverride=(it.preparedOperations||[]).map(o=>[o.operationId,Number(o.hoursPer||0),o.note||'']); const routingForMo=routingOverride.length?routingOverride:(product.routing||[]); const po={id:nextCode('LSX-2026-',DB.productionOrders),orderId:plan.source==='SALES_ORDER'?(plan.sourceOrderId||''):'',customerId:plan.source==='SALES_ORDER'?(plan.customerId||Q.order(plan.sourceOrderId)?.customerId||''):'',productId:product.id,productName:product.name,spec:product.spec||'',qty:Number(it.qty||0),unit:product.unit||'',startDate:currentDateYMD(),deadline:(plan.dueDate&&plan.dueDate>=currentDateYMD()?plan.dueDate:addDays(currentDateYMD(),7)),managerId:DB.currentUser?.empId||'NV-018',status:'lsx_cho_san_xuat',stages:buildProductionStagesFromRouting(Number(it.qty||0),routingForMo,currentDateYMD()),routingOverride,materialPlan:(it.preparedMaterials||[]).map(m=>({materialId:m.materialId,qty:Number(m.qty||0)})),qcPass:0,qcFail:0,planId:plan.id,materialRequestId:plan.materialRequestId||'',note:`Tạo từ kế hoạch ${plan.id}`,createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''),createdAt:new Date().toISOString()};DB.productionOrders.unshift(po);created.push(po);});
   if(!created.length){Toast.err('Không tạo được LSX','Không tìm thấy thành phẩm trong kế hoạch.');return;} plan.status='RELEASED';plan.productionOrderIds=created.map(x=>x.id);if(plan.source==='SALES_ORDER'&&plan.sourceOrderId){const so=Q.order(plan.sourceOrderId);if(so){so.status='dh_dang_san_xuat';if(typeof SalesCRM!=='undefined')SalesCRM.saveLocal(['orders']);}}ProductionAPI?.scheduleSync(80);render();Toast.ok('Đã tạo lệnh sản xuất',created.map(x=>x.id).join(', '));
 };
 
@@ -4861,15 +5146,6 @@ function bindTopbar() {
     if ($('#gsearchBox').classList.contains('mobile-open')) $('#globalSearch').focus();
   };
 
-  $('#btnCreate').onclick = (e) => {
-    e.stopPropagation();
-    const quick=[];
-    if (Auth.hasPermission('CRM_OPERATE')) quick.push('<button class="pop-item" data-act="edit-customer"><i class="fa-solid fa-address-book"></i>Tạo khách hàng</button>');
-    if (Auth.hasPermission('SALES_ORDER_OPERATE')) quick.push('<button class="pop-item" data-act="new-order"><i class="fa-solid fa-cart-flatbed"></i>Tạo đơn hàng</button>');
-    if (Auth.hasPermission('PURCHASE_PR_CREATE')) quick.push('<button class="pop-item" data-act="new-pr"><i class="fa-solid fa-cart-shopping"></i>Tạo yêu cầu mua hàng</button>');
-    Pop.open($('#btnCreate'), `<div class="pop-label">Tạo mới</div>${quick.join('') || '<div class="cell-sub" style="padding:10px">Vai trò hiện tại không có thao tác tạo nhanh.</div>'}`);
-  };
-
   const userMenu = (anchor) => (e) => {
     e.stopPropagation();
     Pop.open(anchor, `
@@ -4882,7 +5158,6 @@ function bindTopbar() {
       <button class="pop-item"><i class="fa-solid fa-user"></i>Hồ sơ cá nhân</button>
       ${Auth.hasPermission('ADMIN_USER_MANAGE') ? `<button class="pop-item" data-act="go" data-id="users"><i class="fa-solid fa-user-shield"></i>Người dùng & phân quyền</button>` : ''}
       <button class="pop-item" data-act="toggle-theme"><i class="fa-solid fa-circle-half-stroke"></i>Đổi giao diện sáng / tối</button>
-      <button class="pop-item" data-act="open-guide"><i class="fa-solid fa-route"></i>Kịch bản demo</button>
       <div class="pop-sep"></div>
       <button class="pop-item danger" data-act="auth-logout"><i class="fa-solid fa-right-from-bracket"></i>Đăng xuất</button>`);
   };
@@ -4964,11 +5239,9 @@ window.SidebarBadges = (() => {
           try {
             await PurchaseAPI.bootstrap?.();
             await PurchaseAPI.ensureFresh?.(['purchases'], { force });
+            ready.purchases = true;
           } catch (err) {
             console.warn('[SidebarBadges] Không xác minh được Purchase:', err);
-          } finally {
-            // Dù request lỗi, không lấy cache làm badge. Để hidden cho tới lần
-            // route Purchase refresh thành công.
           }
           return 'purchases';
         })());
@@ -4985,19 +5258,6 @@ window.SidebarBadges = (() => {
           }
           return 'production';
         })());
-      }
-
-      // Purchase cần biết request thực sự hoàn thành. ensureFresh() hiện nuốt lỗi
-      // từng collection và trả object; sau khi promise resolve, DB.purchases là
-      // snapshot server hoặc giữ cache nếu lỗi. Chỉ mark ready nếu collection đã
-      // có timestamp refresh nội bộ bằng cách force thêm một read trực tiếp khi
-      // có KioStore/TABLE mapping không public là không phù hợp. Vì vậy tại đây
-      // mark ready sau ensureFresh resolve; lỗi request đã được API log rõ.
-      if (typeof PurchaseAPI !== 'undefined') {
-        try {
-          await PurchaseAPI.ensureFresh?.(['purchases'], { force: true });
-          ready.purchases = true;
-        } catch (_) {}
       }
 
       await Promise.allSettled(jobs);
@@ -5050,13 +5310,13 @@ window.DashboardDataSync = (() => {
       if (typeof CRMAPI !== 'undefined')
         jobs.push(CRMAPI.ensureFresh?.(['customers','orders'], { force }));
       if (typeof InventoryAPI !== 'undefined')
-        jobs.push(InventoryAPI.ensureFresh?.(['inventory','inventoryLots','warehouses','materials','products'], { force }));
+        jobs.push(InventoryAPI.ensureFresh?.(['inventory','materials'], { force }));
       if (typeof PurchaseAPI !== 'undefined')
-        jobs.push(PurchaseAPI.ensureFresh?.(['purchases','purchaseOrders','supplierPayments','suppliers'], { force }));
+        jobs.push(PurchaseAPI.ensureFresh?.(['purchases','purchaseOrders'], { force }));
       if (typeof ProductionAPI !== 'undefined')
         jobs.push(ProductionAPI.ensureFresh?.(['productionOrders'], { force }));
       if (typeof RestaurantQualityAPI !== 'undefined')
-        jobs.push(RestaurantQualityAPI.ensureFresh?.(['orders','stores','recipes'], { force }));
+        jobs.push(RestaurantQualityAPI.ensureFresh?.(['orders'], { force }));
 
       await Promise.allSettled(jobs.filter(Boolean));
       window.SidebarBadges?.markReady?.('purchases');
@@ -5074,7 +5334,7 @@ window.DashboardDataSync = (() => {
 function routeRefreshPlan(module, tab) {
   if (module === 'purchases') {
     const map = {
-      dashboard: ['purchases', 'purchaseOrders', 'supplierPayments', 'suppliers'],
+      dashboard: ['purchases', 'purchaseOrders', 'supplierPayments'],
       pr: ['purchases', 'suppliers'],
       quotes: ['supplierQuotations', 'purchases', 'suppliers'],
       po: ['purchaseOrders', 'suppliers'],
@@ -5086,10 +5346,77 @@ function routeRefreshPlan(module, tab) {
   }
 
   if (module === 'warehouse') {
+    // Nhập kho nguyên liệu là màn giao nhau giữa Purchase và Inventory:
+    // PO/phiếu nhận nằm ở Purchase KIO, còn master kho/vị trí nằm ở Inventory KIO.
+    // Không được chỉ refresh InventoryAPI vì khi đăng nhập thẳng bằng Kho,
+    // DB.purchaseOrders sẽ rỗng dù PO trên server đã ở trạng thái SHIPPING.
+    if (tab === 'receipts') {
+      const warehouseReceiptServerSource = {
+        async bootstrap() {
+          const jobs = [];
+          if (typeof PurchaseAPI !== 'undefined' && PurchaseAPI.bootstrap) jobs.push(PurchaseAPI.bootstrap());
+          if (typeof InventoryAPI !== 'undefined' && InventoryAPI.bootstrap) jobs.push(InventoryAPI.bootstrap());
+          await Promise.allSettled(jobs);
+          return true;
+        },
+        async ensureFresh(_keys, { force = false } = {}) {
+          const jobs = [];
+          if (typeof PurchaseAPI !== 'undefined' && PurchaseAPI.ensureFresh) {
+            jobs.push(PurchaseAPI.ensureFresh(['purchaseOrders', 'goodsReceipts', 'suppliers'], { force }));
+          }
+          if (typeof InventoryAPI !== 'undefined' && InventoryAPI.ensureFresh) {
+            // Chỉ master tối thiểu cho màn nhập kho; lô/vị trí chi tiết lazy-load khi mở form.
+            jobs.push(InventoryAPI.ensureFresh(['warehouses', 'warehouseLocations', 'materials', 'products', 'semiFinishedProducts'], { force }));
+          }
+          const parts = await Promise.allSettled(jobs);
+          const changed = {};
+          for (const part of parts) {
+            if (part.status === 'fulfilled' && part.value && typeof part.value === 'object') Object.assign(changed, part.value);
+          }
+          return changed;
+        }
+      };
+      return {
+        api: warehouseReceiptServerSource,
+        keys: ['purchaseOrders', 'goodsReceipts', 'suppliers', 'warehouses', 'warehouseLocations', 'materials', 'products', 'semiFinishedProducts'],
+        deferred: true
+      };
+    }
+
+    // Xuất NVL sản xuất là màn giao nhau giữa Production và Inventory.
+    // YCNVL nằm ở lenam_production_material_requests; tồn/lô/phiếu xuất nằm ở Inventory.
+    // Khi Kho đăng nhập trực tiếp phải tự nạp cả hai nguồn, không phụ thuộc việc đã mở Sản xuất trước đó.
+    if (tab === 'issues' || tab === 'production_requests') {
+      const warehouseIssueServerSource = {
+        async bootstrap() {
+          const jobs=[];
+          if(typeof ProductionAPI!=='undefined' && ProductionAPI.bootstrap) jobs.push(ProductionAPI.bootstrap());
+          if(typeof InventoryAPI!=='undefined' && InventoryAPI.bootstrap) jobs.push(InventoryAPI.bootstrap());
+          await Promise.allSettled(jobs);
+          return true;
+        },
+        async ensureFresh(_keys,{force=false}={}) {
+          const jobs=[];
+          if(typeof ProductionAPI!=='undefined' && ProductionAPI.ensureFresh)
+            jobs.push(ProductionAPI.ensureFresh(['productionMaterialRequests'],{force}));
+          if(typeof InventoryAPI!=='undefined' && InventoryAPI.ensureFresh)
+            jobs.push(InventoryAPI.ensureFresh(['goodsIssues','inventory','inventoryLots','warehouses','materials'],{force}));
+          const parts=await Promise.allSettled(jobs);
+          const changed={};
+          for(const part of parts){if(part.status==='fulfilled'&&part.value&&typeof part.value==='object')Object.assign(changed,part.value);}
+          return changed;
+        }
+      };
+      return {
+        api: warehouseIssueServerSource,
+        keys: ['productionMaterialRequests','goodsIssues','inventory','inventoryLots','warehouses','materials'],
+        deferred: true
+      };
+    }
+
     const map = {
-      dashboard: ['inventory', 'inventoryLots', 'warehouses', 'materials', 'semiFinishedProducts', 'products'],
+      dashboard: ['inventory', 'inventoryLots', 'warehouses'],
       inventory: ['inventory', 'goodsIssues', 'inventoryLots', 'warehouses', 'warehouseLocations', 'materials', 'semiFinishedProducts', 'products', 'itemCategories'],
-      receipts: ['goodsReceipts', 'warehouses', 'inventoryLots'],
       issues: ['goodsIssues', 'warehouses', 'inventoryLots'],
       transfers: ['stockTransfers', 'warehouses'],
       stocktake: ['inventoryCounts', 'warehouses'],
@@ -5097,12 +5424,12 @@ function routeRefreshPlan(module, tab) {
       locations: ['warehouses', 'warehouseLocations'],
       alerts: ['inventory', 'inventoryLots', 'materials', 'semiFinishedProducts', 'products'],
     };
-    return { api: typeof InventoryAPI !== 'undefined' ? InventoryAPI : null, keys: map[tab] || map.dashboard };
+    return { api: typeof InventoryAPI !== 'undefined' ? InventoryAPI : null, keys: map[tab] || map.dashboard, deferred: tab === 'inventory' };
   }
 
   if (module === 'crm') {
     const map = {
-      dashboard: ['customers', 'orders', 'crmTickets', 'customerCareLogs'],
+      dashboard: ['customers', 'orders'],
       customers: ['customers', 'customerCareLogs'],
       care: ['customers', 'customerCareLogs'],
       complaints: ['customers', 'orders', 'crmTickets'],
@@ -5134,20 +5461,128 @@ function routeRefreshPlan(module, tab) {
     return { api: typeof RestaurantQualityAPI !== 'undefined' ? RestaurantQualityAPI : null, keys: map[tab] || map.dashboard, deferred: true };
   }
 
+  // Kế toán > Công nợ phải chi phải dùng đúng dữ liệu Purchase từ KIO/server.
+  // Không render snapshot data.js/cache cũ trước rồi mới đổi số sau F5.
+  if (module === 'accounting' && tab === 'ap') {
+    return {
+      api: typeof PurchaseAPI !== 'undefined' ? PurchaseAPI : null,
+      keys: ['purchaseOrders', 'supplierPayments', 'supplierRefunds', 'suppliers'],
+      deferred: false
+    };
+  }
+
   if (module === 'accounting' && tab === 'banking') {
     return { api: typeof RestaurantQualityAPI !== 'undefined' ? RestaurantQualityAPI : null, keys: ['stores','bankAccounts'], deferred: true };
   }
 
   if (module === 'quality') {
+    // IQC dùng dữ liệu phiếu nhập kho thật. Khi đăng nhập thẳng bằng QC,
+    // phải chủ động nạp goodsReceipts thay vì chờ user mở phân hệ Kho trước.
+    if (tab === 'pqc') {
+      // QC bán thành phẩm lấy trực tiếp các checkpoint PROCESS_QC trong LSX.
+      // Chỉ cần bảng lenam_production_orders; kết quả kiểm tra được lưu ngay
+      // vào stage.processQc / stage.processQcHistory của chính LSX trên server.
+      return {
+        api: typeof ProductionAPI !== 'undefined' ? ProductionAPI : null,
+        keys: ['productionOrders'],
+        deferred: true
+      };
+    }
+
+    if (tab === 'fqc') {
+      // [FQC PERFORMANCE] Màn danh sách chỉ cần dữ liệu Production/FQC.
+      // Không tải Kho/Lô/Vị trí ngay khi mở trang; các master này chỉ được
+      // lazy-load khi người dùng mở một phiếu FQC cụ thể.
+      return {
+        api: typeof ProductionAPI !== 'undefined' ? ProductionAPI : null,
+        keys: ['productionOrders','productionFinalInspections'],
+        deferred: true
+      };
+    }
+
+    if (tab === 'iqc') {
+      const iqcServerSource = {
+        async bootstrap() {
+          const jobs=[];
+          if(typeof PurchaseAPI!=='undefined' && PurchaseAPI.bootstrap) jobs.push(PurchaseAPI.bootstrap());
+          if(typeof InventoryAPI!=='undefined' && InventoryAPI.bootstrap) jobs.push(InventoryAPI.bootstrap());
+          await Promise.all(jobs);
+          return true;
+        },
+        async ensureFresh(_keys,{force=false}={}) {
+          const jobs=[];
+          if(typeof PurchaseAPI!=='undefined' && PurchaseAPI.ensureFresh) jobs.push(PurchaseAPI.ensureFresh(['goodsReceipts','purchaseOrders','suppliers'],{force}));
+          // Danh sách IQC chỉ cần master NVL để hiện tên hàng. Tồn/lô/kho sẽ
+          // lazy-load khi mở chi tiết, tránh 6-9 list.php chỉ để vào danh sách.
+          if(typeof InventoryAPI!=='undefined' && InventoryAPI.ensureFresh) jobs.push(InventoryAPI.ensureFresh(['materials'],{force}));
+          const parts=await Promise.all(jobs);
+          return Object.assign({},...parts);
+        }
+      };
+      return {
+        api: iqcServerSource,
+        keys: ['goodsReceipts','purchaseOrders','suppliers','materials'],
+        deferred: true
+      };
+    }
     const map = { coa: ['coa'], capa: ['capa'], recall: ['recalls'] };
     const keys = map[tab] || [];
     return keys.length ? { api: typeof RestaurantQualityAPI !== 'undefined' ? RestaurantQualityAPI : null, keys, deferred: true } : null;
   }
 
-  if (module === 'production' || module === 'production-detail' || module === 'progress') {
+  if (module === 'production') {
+    // [PRODUCTION DASHBOARD PERFORMANCE] Tổng quan/Lệnh SX chỉ dùng LSX.
+    // Không tải KHSX + YCNVL chỉ để dựng KPI và bảng lệnh. Các tab nghiệp vụ
+    // khác vẫn giữ đúng collection riêng của chúng.
+    const productionKeys = {
+      dashboard: ['productionOrders'],
+      orders: ['productionOrders'],
+      progress: ['productionOrders'],
+      plan: ['productionOrders', 'productionPlans', 'productionMaterialRequests'],
+      bom: ['productionOrders'],
+    };
     return {
       api: typeof ProductionAPI !== 'undefined' ? ProductionAPI : null,
-      keys: ['productionOrders', 'productionPlans', 'productionMaterialRequests'],
+      keys: productionKeys[tab || 'dashboard'] || ['productionOrders'],
+      deferred: true,
+    };
+  }
+
+  if (module === 'production-detail') {
+    // Chi tiết LSX phải biết cả FQC và phiếu nhập kho thành phẩm để không hiển thị
+    // trạng thái cũ "Đang QC" sau khi QC/Kho đã hoàn tất ở role khác.
+    const productionDetailSource = {
+      async bootstrap() {
+        const jobs = [];
+        if (typeof ProductionAPI !== 'undefined' && ProductionAPI.bootstrap) jobs.push(ProductionAPI.bootstrap());
+        if (typeof PurchaseAPI !== 'undefined' && PurchaseAPI.bootstrap) jobs.push(PurchaseAPI.bootstrap());
+        await Promise.all(jobs);
+        return true;
+      },
+      async ensureFresh(_keys, {force=false}={}) {
+        const jobs = [];
+        if (typeof ProductionAPI !== 'undefined' && ProductionAPI.ensureFresh) {
+          jobs.push(ProductionAPI.ensureFresh(['productionOrders','productionMaterialRequests','productionFinalInspections'], {force}));
+        }
+        if (typeof PurchaseAPI !== 'undefined' && PurchaseAPI.ensureFresh) {
+          jobs.push(PurchaseAPI.ensureFresh(['goodsReceipts'], {force}));
+        }
+        const parts = await Promise.all(jobs);
+        return Object.assign({}, ...parts);
+      }
+    };
+    return {
+      api: productionDetailSource,
+      keys: ['productionOrders','productionMaterialRequests','productionFinalInspections','goodsReceipts'],
+      deferred: true,
+    };
+  }
+
+  if (module === 'progress') {
+    return {
+      api: typeof ProductionAPI !== 'undefined' ? ProductionAPI : null,
+      keys: ['productionOrders'],
+      deferred: true,
     };
   }
 
@@ -5287,7 +5722,7 @@ function scheduleRouteDataRefresh(module = State.module, tab = State.tab) {
     } catch (err) {
       console.warn('[DataRefresh] Refresh nền thất bại; giữ cache hiện tại:', err);
     }
-  }, plan.deferred ? 60 : 1200);
+  }, plan.deferred ? 20 : 80);
 }
 
 async function boot() {
@@ -5346,13 +5781,25 @@ if (
 }
 
   // AUTH phải được nạp trước nghiệp vụ để mọi action đều biết chính xác actor đang đăng nhập.
+  let freshLogin = false;
   if (typeof SystemAPI !== 'undefined') {
     await SystemAPI.bootstrap();
-    if (!SystemAPI.restoreSession()) await SystemAPI.showLogin();
+    if (!SystemAPI.restoreSession()) {
+      await SystemAPI.showLogin();
+      freshLogin = true;
+    }
   }
 
-  // Nếu route hiện tại không thuộc quyền của actor, chuyển về màn đầu tiên được cấp quyền.
-  if (typeof Auth !== 'undefined' && !Auth.canAccess(State.module, State.tab)) {
+  // Mỗi lần đăng nhập MỚI phải bắt đầu tại màn mặc định của đúng role hiện tại,
+  // tuyệt đối không kế thừa module/tab/hash của tài khoản vừa đăng xuất.
+  if (typeof Auth !== 'undefined' && freshLogin) {
+    const first = Auth.firstRoute();
+    State.module = first.module;
+    State.tab = first.tab;
+    State.params = first.tab ? {tab:first.tab} : {};
+    const nextHash = `#${first.module}${first.tab ? `/${first.tab}` : ''}`;
+    try { history.replaceState(null, '', location.pathname + location.search + nextHash); } catch (_) {}
+  } else if (typeof Auth !== 'undefined' && !Auth.canAccess(State.module, State.tab)) {
     const first = Auth.firstRoute(); State.module = first.module; State.tab = first.tab; State.params = first.tab ? {tab:first.tab} : {};
   }
 
@@ -5364,14 +5811,12 @@ if (
       await window.DashboardDataSync?.hydrate?.();
     } else {
       const initialPlan = routeRefreshPlan(State.module, State.tab);
-      if (initialPlan?.api) {
-        if (typeof initialPlan.api.bootstrap === 'function') await initialPlan.api.bootstrap();
-        // Các route deferred (Restaurant/Quality) render cache ngay rồi mới đọc server nền.
-        // Route thường vẫn có thể lấy server trước render để giữ số liệu nhất quán.
-        if (initialPlan.api.ensureFresh && initialPlan.keys?.length && !initialPlan.deferred) {
-          await initialPlan.api.ensureFresh(initialPlan.keys, { force: true });
-          if (State.module === 'purchases' && initialPlan.keys.includes('purchases')) window.SidebarBadges?.markReady?.('purchases');
-          if ((State.module === 'production' || State.module === 'production-detail' || State.module === 'progress') && initialPlan.keys.includes('productionOrders')) window.SidebarBadges?.markReady?.('production');
+      if (initialPlan?.api && typeof initialPlan.api.bootstrap === 'function') {
+        // Đăng nhập/F5 phải thấy dữ liệu thật của đúng role ngay lần đầu.
+        // Chỉ tải các collection tối thiểu của route hiện tại; không bootstrap toàn ERP.
+        await initialPlan.api.bootstrap();
+        if (typeof initialPlan.api.ensureFresh === 'function' && initialPlan.keys?.length) {
+          await initialPlan.api.ensureFresh(initialPlan.keys, { force:true });
         }
       }
     }
@@ -5420,10 +5865,6 @@ if (
   syncMobile();
   window.addEventListener('resize', syncMobile);
 
-  // Lời chào mở đầu buổi demo
-  setTimeout(() => Toast.show('Lê Nam ERP đã sẵn sàng', {
-    type: 'info', desc: 'Nhấn nút "Kịch bản demo" trên Dashboard để đi theo luồng nghiệp vụ xuyên suốt.', timeout: 6000,
-  }), 700);
 }
 
 // F(key, defaults) được định nghĩa duy nhất trong core/app.core.js.

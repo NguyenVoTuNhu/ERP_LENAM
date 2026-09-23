@@ -5,6 +5,10 @@
 function inventoryMasterItem(id) {
   return Q.material(id) || (DB.semiFinishedProducts || []).find((x) => x.id === id) || Q.product(id);
 }
+
+function inventoryCanOperate() {
+  return typeof Auth === 'undefined' || Auth.hasPermission('INVENTORY_OPERATE');
+}
 function inventoryItemCategory(item, type) {
   if (!item) return '';
   if (type === 'RAW_MATERIAL') return item.group || item.category || '';
@@ -64,9 +68,9 @@ function openMaterialModal(id) {
           <td class="muted">${esc(x.ref)}</td></tr>`),
         { emptyTitle: 'Chưa có giao dịch', emptyDesc: 'Vật tư này chưa phát sinh nhập xuất trong kỳ.' })}`,
     foot: `<button class="btn" data-act="modal-close">Đóng</button>
-           <button class="btn" data-act="inventory-item-edit" data-type="RAW_MATERIAL" data-id="${m.id}"><i class="fa-solid fa-pen"></i>Sửa</button>
-           <button class="btn" data-act="stock-move" data-id="${m.id}"><i class="fa-solid fa-right-left"></i>Nhập / xuất kho</button>
-           ${Number(m.stock||0) < Number(m.minStock||0) ? `<button class="btn btn-primary" data-act="material-request" data-id="${m.id}"><i class="fa-solid fa-cart-plus"></i>Tạo yêu cầu mua</button>` : ''}`,
+           ${inventoryCanOperate() ? `<button class="btn" data-act="inventory-item-edit" data-type="RAW_MATERIAL" data-id="${m.id}"><i class="fa-solid fa-pen"></i>Sửa</button>
+           <button class="btn" data-act="stock-move" data-id="${m.id}"><i class="fa-solid fa-right-left"></i>Nhập / xuất kho</button>` : ''}
+           ${inventoryCanOperate() && Number(m.stock||0) < Number(m.minStock||0) && (typeof Auth === 'undefined' || Auth.hasPermission('PURCHASE_PR_CREATE')) ? `<button class="btn btn-primary" data-act="material-request" data-id="${m.id}"><i class="fa-solid fa-cart-plus"></i>Tạo yêu cầu mua</button>` : ''}`,
   });
 }
 
@@ -178,7 +182,7 @@ function openInventoryMasterDetail(type, id) {
     title: esc(item.name || id), sub: `${id} · ${typeLabel} · ${esc(inventoryItemCategory(item,type)||'Chưa phân loại')}`, size:'md',
     body:`<div class="info-grid">${infoItem('Mã hàng',`<span class="code">${esc(id)}</span>`)}${infoItem('Danh mục',esc(inventoryItemCategory(item,type)||'—'))}${infoItem('Đơn vị tính',esc(item.unit||'—'))}${infoItem('Đơn giá',fmtVND(Number(item.price||0)))}${infoItem('Tổng tồn',`<b class="num">${fmtN(qty)} ${esc(item.unit||'')}</b>`)}${type === 'FINISHED_GOODS' ? infoItem('Khối lượng đóng gói', Number(item.packedWeightG||0)>0 || Number(item.packedWeightKg||0)>0 ? `<b class="num">${fmtDec(Number(item.packedWeightG||0) || Number(item.packedWeightKg||0)*1000,2)} g / ${esc(item.unit||'ĐVT')}</b>` : '<span class="muted">Chưa khai báo</span>') + infoItem('Hạn sử dụng mặc định', Number(item.shelfLifeDays||0)>0 ? `<b>${fmtN(Number(item.shelfLifeDays))} ngày</b>` : '<span class="muted">Chưa quy định</span>') : ''}${infoItem('Quy cách',esc(item.spec||'—'))}</div>
       <div class="form-sec-title"><i class="fa-solid fa-warehouse"></i>Tồn theo kho/lô</div>${tableShell([{t:'Kho'},{t:'Lô'},{t:'Số lượng',cls:'right'}],rows.map(r=>`<tr><td>${esc(Q.warehouseName(r.warehouseId))}</td><td><span class="code">${esc(Q.lot(r.lotId)?.lotNumber||'—')}</span></td><td class="right num">${fmtN(r.qtyOnHand)} ${esc(r.unit||item.unit||'')}</td></tr>`),{emptyTitle:'Chưa phát sinh tồn kho'})}`,
-    foot:`<button class="btn" data-act="modal-close">Đóng</button><button class="btn btn-primary" data-act="inventory-item-edit" data-type="${type}" data-id="${esc(id)}"><i class="fa-solid fa-pen"></i>Sửa</button>`
+    foot:`<button class="btn" data-act="modal-close">Đóng</button>${inventoryCanOperate() ? `<button class="btn btn-primary" data-act="inventory-item-edit" data-type="${type}" data-id="${esc(id)}"><i class="fa-solid fa-pen"></i>Sửa</button>` : ''}`
   });
 }
 
@@ -460,8 +464,8 @@ Views.inventory = function () {
   return `
   ${pageHead('Tồn kho', 'Theo dõi tồn kho tổng hợp theo mặt hàng; click để xem chi tiết từng lô ngay bên dưới', `
     <button class="btn" data-act="inv-export-stock"><i class="fa-solid fa-file-export"></i>Export</button>
-    <button class="btn" data-act="item-category-manager" data-type="${cfg.type}"><i class="fa-solid fa-tags"></i>Danh mục</button>
-    <button class="btn btn-primary" data-act="inventory-item-add" data-type="${cfg.type}"><i class="fa-solid fa-plus"></i>Thêm ${cfg.itemLabel.toLowerCase()}</button>
+    ${inventoryCanOperate() ? `<button class="btn" data-act="item-category-manager" data-type="${cfg.type}"><i class="fa-solid fa-tags"></i>Danh mục</button>
+    <button class="btn btn-primary" data-act="inventory-item-add" data-type="${cfg.type}"><i class="fa-solid fa-plus"></i>Thêm ${cfg.itemLabel.toLowerCase()}</button>` : ''}
   `)}
   <div class="tabs" style="margin-bottom:14px">
     <button class="tab ${stockTab === 'raw' ? 'active' : ''}" data-act="inventory-stock-tab" data-tab="raw"><i class="fa-solid fa-seedling"></i>Kho nguyên liệu</button>
@@ -501,6 +505,37 @@ function openInventoryStockLotDetail(productId, lotId) {
   const item = material || product;
   const lot = Q.lot(lotId);
   const receipts = (DB.goodsReceipts || []).filter(r => (r.items || []).some(i => i.lotId === lotId || i.lotNumber === lot?.lotNumber));
+
+  // Lịch sử nhập lô phải tồn tại sau F5/đổi role. Nguồn ưu tiên là phiếu nhập thật
+  // (goodsReceipts); đồng thời dùng ledger inventoryTransactions làm fallback cho
+  // nhập SX, nhập TP sau QC, chuyển kho vào hoặc dữ liệu cũ không có goodsReceipt.
+  const receiptHistory = [];
+  const receiptKeys = new Set();
+  for (const r of receipts) {
+    for (const i of (r.items || []).filter(i => i.lotId === lotId || i.lotNumber === lot?.lotNumber)) {
+      const key = `${r.id}|${i.lotId || i.lotNumber || ''}|${Number(i.qty||0)}`;
+      receiptKeys.add(key);
+      receiptHistory.push({
+        docId:r.id, date:r.date, ref:r.poId || r.refId || '—', qty:Number(i.qty||0),
+        unit:i.unit || row.unit || item?.unit || '', source:'Phiếu nhập kho', userId:r.receivedBy || r.createdBy || ''
+      });
+    }
+  }
+  const inboundTx = (DB.inventoryTransactions || [])
+    .filter(t => t.productId === productId && t.lotId === lotId && Number(t.qty || 0) > 0)
+    .sort((a,b) => String(b.date || '').localeCompare(String(a.date || '')) || String(b.id || '').localeCompare(String(a.id || '')));
+  for (const t of inboundTx) {
+    // Nếu ledger trùng đúng phiếu nhập đã có thì không lặp dòng.
+    const duplicate = receiptHistory.some(h =>
+      (h.docId === t.transactionNumber || h.docId === t.refId) && Math.abs(Number(h.qty||0)-Number(t.qty||0)) < 1e-9
+    );
+    if (duplicate) continue;
+    receiptHistory.push({
+      docId:t.transactionNumber || t.id, date:t.date, ref:t.refId || t.refType || '—', qty:Number(t.qty||0),
+      unit:row.unit || item?.unit || '', source:'Sổ giao dịch kho', userId:t.userId || ''
+    });
+  }
+  receiptHistory.sort((a,b) => String(b.date || '').localeCompare(String(a.date || '')) || String(b.docId || '').localeCompare(String(a.docId || '')));
 
   // Tìm người đã kiểm tra đúng lô này. Ưu tiên materialInspections vì đây là dấu vết QC chi tiết.
   const inspections = (DB.materialInspections || [])
@@ -550,7 +585,7 @@ function openInventoryStockLotDetail(productId, lotId) {
         ${infoItem('Kết quả QC', latestInspection?.status ? statusLabel(latestInspection.status) : (lot?.qcStatus ? statusLabel(lot.qcStatus) : '—'))}
       </div>
       <div class="form-sec-title"><i class="fa-solid fa-clock-rotate-left"></i>Lịch sử nhập của lô</div>
-      ${tableShell([{t:'Phiếu nhập'},{t:'Ngày'},{t:'PO'},{t:'Số lượng',cls:'right'}], receipts.flatMap(r => (r.items||[]).filter(i => i.lotId===lotId || i.lotNumber===lot?.lotNumber).map(i => `<tr><td><span class="code">${r.id}</span></td><td>${fmtDate(r.date)}</td><td>${esc(r.poId||'—')}</td><td class="right num">${fmtDec(i.qty,3)} ${esc(i.unit||'')}</td></tr>`)), {emptyTitle:'Chưa có lịch sử phiếu nhập cho lô này'})}
+      ${tableShell([{t:'Chứng từ nhập'},{t:'Ngày'},{t:'Tham chiếu'},{t:'Số lượng',cls:'right'},{t:'Nguồn'},{t:'Người nhập'}], receiptHistory.map(h => `<tr><td><span class="code">${esc(h.docId||'—')}</span></td><td>${fmtDate(h.date)}</td><td>${h.ref && h.ref!=='—' ? `<span class="code">${esc(h.ref)}</span>` : '—'}</td><td class="right num strong">${fmtDec(h.qty,3)} ${esc(h.unit||'')}</td><td>${esc(h.source||'—')}</td><td>${esc(Q.employeeName(h.userId)||h.userId||'—')}</td></tr>`), {emptyTitle:'Chưa có lịch sử nhập được ghi nhận cho lô này'})}
 
       <div class="form-sec-title" style="margin-top:16px"><i class="fa-solid fa-rotate-left"></i>Lịch sử trả nhà cung cấp</div>
       ${tableShell(
@@ -840,7 +875,7 @@ Views['inv-receipts'] = function () {
   });
   return `${pageHead('Nhập kho','Danh sách nhập kho theo từng loại kho; thao tác được thực hiện trực tiếp tại từng dòng',`
     <button class="btn" data-act="inv-export-receipts"><i class="fa-solid fa-file-export"></i>Xuất Excel</button>
-    <button class="btn btn-primary" data-act="inv-new-receipt" data-tab="${receiptTab}"><i class="fa-solid fa-plus"></i>${receiptTab==='raw'?'Phiếu nhập kho nguyên liệu':receiptTab==='semi'?'Phiếu nhập kho bán thành phẩm':'Phiếu nhập kho thành phẩm'}</button>`)}
+    ${inventoryCanOperate() ? `<button class="btn btn-primary" data-act="inv-new-receipt" data-tab="${receiptTab}"><i class="fa-solid fa-plus"></i>${receiptTab==='raw'?'Phiếu nhập kho nguyên liệu':receiptTab==='semi'?'Phiếu nhập kho bán thành phẩm':'Phiếu nhập kho thành phẩm'}</button>` : ''}`)}
     <div class="tabs" style="margin-bottom:14px">
       <button class="tab ${receiptTab==='raw'?'active':''}" data-act="inventory-receipt-tab" data-tab="raw"><i class="fa-solid fa-seedling"></i>Kho nguyên liệu</button>
       <button class="tab ${receiptTab==='semi'?'active':''}" data-act="inventory-receipt-tab" data-tab="semi"><i class="fa-solid fa-cubes-stacked"></i>Kho bán thành phẩm</button>
@@ -876,8 +911,12 @@ Views['inv-issues'] = function () {
   const rawAvailableQty=(productId)=>(DB.inventory||[]).filter(r=>whIds.has(r.warehouseId)&&r.productId===productId).reduce((sum,r)=>sum+Number(r.qtyAvailable??r.qtyOnHand??0),0);
   const issueItemLabel=(productId,qty,unit='',lotId='',warnOut=false)=>{
     const item=Q.material(productId)||Q.product(productId); const name=item?.name||productId;
-    const out=warnOut&&issueTab==='raw'&&rawAvailableQty(productId)<=0; const lot=lotId?Q.lot(lotId):null;
-    return `<span ${out?'style="color:var(--danger);font-weight:700"':''}>${esc(name)}</span><div class="cell-sub">${fmtDec(qty,3)} ${esc(unit||item?.unit||'')}${lotId?` · Lô ${esc(lot?.lotNumber||lotId)}`:''}${out?' · Hết tồn kho nguyên liệu':''}</div>`;
+    const available=rawAvailableQty(productId);
+    // Chỉ các yêu cầu xuất chưa hoàn tất mới cảnh báo thiếu.
+    // Thiếu = tồn khả dụng của toàn bộ kho nguyên liệu < số lượng đang yêu cầu xuất.
+    const shortage=warnOut&&issueTab==='raw'&&available<Number(qty||0);
+    const lot=lotId?Q.lot(lotId):null;
+    return `<span ${shortage?'style="font-weight:700"':''}>${esc(name)}</span><div class="cell-sub" ${shortage?'style="font-weight:700"':''}>${fmtDec(qty,3)} ${esc(unit||item?.unit||'')}${lotId?` · Lô ${esc(lot?.lotNumber||lotId)}`:''}</div>`;
   };
   let entries=(DB.goodsIssues||[]).filter(gi=>whIds.has(gi.warehouseId)).map(gi=>({kind:'issue',date:gi.date,id:gi.id,gi}));
   if(issueTab==='raw') {
@@ -925,8 +964,7 @@ Views['inv-issues'] = function () {
       const total=(r.items||[]).reduce((n,i)=>n+Number(i.qty||0),0);
       const source=r.productionOrderId ? `LSX ${r.productionOrderId}` : `Kế hoạch ${r.planId||'—'}`;
       const acts=[{act:'pf-mr-view',data:`data-id="${esc(r.id)}"`,icon:'fa-eye',title:'Xem chi tiết yêu cầu NVL'}];
-      if(r.status==='WAITING_WAREHOUSE_APPROVAL') acts.push({act:'pf-mr-approve',data:`data-id="${esc(r.id)}"`,icon:'fa-check',title:'Duyệt yêu cầu NVL'});
-      if(r.status==='APPROVED') acts.push({act:'pf-mr-issue',data:`data-id="${esc(r.id)}"`,icon:'fa-arrow-up-from-bracket',title:'Xuất NVL cho sản xuất'});
+      if(['WAITING_WAREHOUSE_APPROVAL','APPROVED'].includes(r.status)) acts.push({act:'pf-mr-issue',data:`data-id="${esc(r.id)}"`,icon:'fa-arrow-up-from-bracket',title:'Xuất NVL cho sản xuất'});
       return `<tr><td><span class="code">${esc(r.id)}</span><div class="cell-sub">Yêu cầu NVL sản xuất</div></td><td><span class="badge blue">Xuất sản xuất</span></td><td>${fmtDate(r.date)}</td><td>Kho nguyên liệu</td><td><span class="code">${esc(source)}</span></td><td>${(r.items||[]).map(i=>issueItemLabel(i.materialId,i.qty,Q.material(i.materialId)?.unit||'','',['WAITING_WAREHOUSE_APPROVAL','APPROVED'].includes(r.status))).join('<br>')||'—'}</td><td class="right num">${fmtDec(total,3)}</td><td>${pfRequestStatus(r.status)}</td><td class="right">${rowActions(acts)}</td></tr>`;
     }
     if(x.kind==='return'){
@@ -1146,7 +1184,7 @@ Views['inv-lots'] = function () {
 
   return `
   ${pageHead('Quản lý Lô & Hạn sử dụng', `Theo dõi lô hàng, HSD và trạng thái QC cho từng lô đậu hủ`, `
-    <button class="btn" data-act="inv-lot-config"><i class="fa-solid fa-sliders"></i>Cấu hình cảnh báo</button>
+    ${inventoryCanOperate() ? `<button class="btn" data-act="inv-lot-config"><i class="fa-solid fa-sliders"></i>Cấu hình cảnh báo</button>` : ''}
   `)}
 
   <div class="grid g-auto-sm" style="margin-bottom:14px">
@@ -1920,7 +1958,7 @@ Views['inv-warehouses'] = function () {
 
   if(!selectedSite){
     const totalShelves=(DB.warehouseLocations||[]).filter(x=>x.status!=='inactive').length;
-    return `${pageHead('Quản lý kho','Danh sách kho vật lý. Bấm vào một kho để quản lý khu, kệ, tồn kho, lô và lịch sử.','<button class="btn btn-primary" data-act="inv-warehouse-new"><i class="fa-solid fa-plus"></i>Thêm kho</button>')}
+    return `${pageHead('Quản lý kho','Danh sách kho vật lý. Bấm vào một kho để quản lý khu, kệ, tồn kho, lô và lịch sử.',inventoryCanOperate() ? '<button class="btn btn-primary" data-act="inv-warehouse-new"><i class="fa-solid fa-plus"></i>Thêm kho</button>' : '')}
       <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Tổng kho',sites.length,'fa-warehouse','blue')}${mkpi('Đang hoạt động',sites.filter(x=>x.status==='active').length,'fa-circle-check','green')}${mkpi('Tổng khu',allZones.length,'fa-border-all','indigo')}${mkpi('Tổng kệ',totalShelves,'fa-layer-group','teal')}</div>
       <div class="card"><div class="card-head"><div><div class="card-title"><i class="fa-solid fa-warehouse"></i>Danh sách kho</div><div class="card-sub">Kho là địa điểm vật lý như Kho Thủ Đức, Kho Bình Dương, Kho Đồng Nai.</div></div></div>
       ${tableShell([{t:'Mã kho'},{t:'Tên kho / Địa chỉ'},{t:'Khu',cls:'center'},{t:'Kệ',cls:'center'},{t:'Mặt hàng',cls:'center'},{t:'Lô',cls:'center'},{t:'Tổng tồn',cls:'right'},{t:'Trạng thái'},{t:'Thao tác',cls:'right',w:'115px'}],siteRows,{emptyTitle:'Chưa có kho',emptyDesc:'Bấm Thêm kho để khai báo địa điểm kho đầu tiên.'})}</div>`;
@@ -1939,7 +1977,7 @@ Views['inv-warehouses'] = function () {
   const tabs=[['overview','Tổng quan','fa-chart-pie'],['zones','Khu & Kệ','fa-layer-group'],['stock','Tồn kho','fa-boxes-stacked'],['lots','Lô & HSD','fa-calendar-days'],['history','Lịch sử nhập xuất','fa-clock-rotate-left']];
   const topBack=`<div style="display:flex;align-items:center;margin:0 0 10px"><button class="btn" data-act="inv-warehouse-site-back"><i class="fa-solid fa-arrow-left"></i>Trở về danh sách kho</button></div>`;
   const tabBar=`<div class="card" style="padding:8px;margin-bottom:14px"><div style="display:flex;gap:6px;flex-wrap:wrap">${tabs.map(([id,label,icon])=>`<button class="btn ${tab===id?'btn-primary':''}" data-act="inv-warehouse-tab" data-tab="${id}"><i class="fa-solid ${icon}"></i>${label}</button>`).join('')}</div></div>`;
-  const header=`${topBack}${pageHead('Quản lý kho',`${selectedSite.name} · ${selectedSite.address||'Chưa khai báo địa chỉ'}`,`<button class="btn" data-act="inv-warehouse-edit" data-id="${esc(selectedSite.id)}"><i class="fa-solid fa-pen"></i>Sửa thông tin kho</button>`)}`;
+  const header=`${topBack}${pageHead('Quản lý kho',`${selectedSite.name} · ${selectedSite.address||'Chưa khai báo địa chỉ'}`,inventoryCanOperate() ? `<button class="btn" data-act="inv-warehouse-edit" data-id="${esc(selectedSite.id)}"><i class="fa-solid fa-pen"></i>Sửa thông tin kho</button>` : '')}`;
 
   let content='';
   if(tab==='overview'){
@@ -2174,13 +2212,11 @@ Views['warehouse-production-requests'] = function () {
     <td>${pfRequestStatus(r.status)}</td><td>${esc(Q.employeeName(r.createdBy)||r.createdBy||'—')}</td>
     <td class="right">${rowActions([
       {act:'pf-mr-view',data:`data-id="${esc(r.id)}"`,icon:'fa-eye',title:'Xem chi tiết'},
-      ...(r.status==='WAITING_WAREHOUSE_APPROVAL'?[{act:'pf-mr-edit',data:`data-id="${esc(r.id)}"`,icon:'fa-pen',title:'Sửa phiếu'},{act:'pf-mr-approve',data:`data-id="${esc(r.id)}"`,icon:'fa-check',title:'Duyệt yêu cầu NVL'},{act:'pf-mr-delete',data:`data-id="${esc(r.id)}"`,icon:'fa-trash',title:'Xóa phiếu'}]:[]),
-      ...(r.status==='APPROVED'?[{act:'pf-mr-issue',data:`data-id="${esc(r.id)}"`,icon:'fa-arrow-up-from-bracket',title:'Xuất NVL cho sản xuất'}]:[])
+      ...(['WAITING_WAREHOUSE_APPROVAL','APPROVED'].includes(r.status)?[{act:'pf-mr-issue',data:`data-id="${esc(r.id)}"`,icon:'fa-arrow-up-from-bracket',title:'Xuất NVL cho sản xuất'}]:[])
     ])}</td></tr>`);
-  return `${pageHead('Yêu cầu NVL sản xuất','Kho duyệt phiếu yêu cầu và xuất nguyên liệu sang sản xuất')}
+  return `${pageHead('Yêu cầu NVL sản xuất','Phiếu từ kế hoạch sản xuất được chuyển thẳng sang Kho để xuất nguyên liệu')}
     <div class="grid g-auto-sm" style="margin-bottom:14px">
-      ${mkpi('Chờ duyệt',reqs.filter(r=>r.status==='WAITING_WAREHOUSE_APPROVAL').length,'fa-hourglass-half','orange')}
-      ${mkpi('Đã duyệt',reqs.filter(r=>r.status==='APPROVED').length,'fa-circle-check','blue')}
+      ${mkpi('Chờ xuất NVL',reqs.filter(r=>['WAITING_WAREHOUSE_APPROVAL','APPROVED'].includes(r.status)).length,'fa-hourglass-half','orange')}
       ${mkpi('Đã xuất',reqs.filter(r=>r.status==='ISSUED').length,'fa-truck-ramp-box','green')}
     </div><div class="card">${tableShell([{t:'Phiếu'},{t:'Ngày'},{t:'Nguyên liệu / SL'},{t:'Trạng thái'},{t:'Người yêu cầu'},{t:'Thao tác',cls:'right'}],rows,{emptyTitle:'Chưa có yêu cầu NVL sản xuất'})}</div>`;
 };

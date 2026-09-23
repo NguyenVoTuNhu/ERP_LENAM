@@ -340,19 +340,8 @@ const tabs =
         ] : []),
       ])}</td>
     </tr>`);
-    const pendingOrders = DB.purchaseOrders.filter((po) => po.status === 'PENDING_APPROVAL').sort((a, b) => b.id.localeCompare(a.id));
-    const orderRows = pendingOrders.map((po) => `<tr>
-      <td><span class="code">${po.id}</span><div class="cell-sub">Từ ${po.prId}</div></td>
-      <td><div class="strong">${esc(Q.supplierName(po.supplierId))}</div><div class="cell-sub">${esc(po.quoteId || 'Báo giá đã chọn')}</div></td>
-      <td>${po.items.map((item) => `<div>${esc(item.name)} <span class="muted">(${fmtN(item.qty)} ${esc(item.unit)})</span></div>`).join('')}</td>
-      <td class="right strong num">${fmtVND(Number(po.total || 0))}</td>
-      <td class="num">${fmtDate(po.expectedDate)}</td>
-      <td>${badge(po.status)}</td>
-      <td class="right">${rowActions([
-        { act: 'open-po', data: `data-id="${po.id}"`, icon: 'fa-eye', title: 'Xem đơn mua' },
-        ...(canApprovePurchase ? [{ act: 'po-approve-action', data: `data-id="${po.id}"`, icon: 'fa-check', title: 'Duyệt đơn mua hàng' }] : []),
-      ])}</td>
-    </tr>`);
+    // PO không áp dụng bước duyệt riêng; PR là điểm kiểm soát phê duyệt.
+
 
     return `<div class="grid g-auto-sm" style="margin-bottom:14px">
       ${mkpi('Chờ duyệt', pending.length, 'fa-hourglass-half', 'orange')}
@@ -367,12 +356,6 @@ const tabs =
         { t: 'Ngày cần hàng' }, { t: 'Trạng thái' }, { t: 'Thao tác', cls: 'right', w: '150px' },
       ], rows, { emptyTitle: 'Không có đề nghị mua hàng chờ duyệt' })}
     </div>
-    <div class="card">
-      <div class="card-head"><div><h3>Đơn mua hàng chờ duyệt</h3><p>Đối chiếu báo giá đã chọn trước khi phát hành đơn đặt hàng cho nhà cung cấp.</p></div><span class="chip"><i class="fa-solid fa-file-signature"></i> ${pendingOrders.length} đơn chờ duyệt</span></div>
-      ${tableShell([
-        { t: 'Mã đơn mua', w: '130px' }, { t: 'Nhà cung cấp' }, { t: 'Vật tư' }, { t: 'Giá trị', cls: 'right' },
-        { t: 'Giao dự kiến' }, { t: 'Trạng thái' }, { t: 'Thao tác', cls: 'right', w: '130px' },
-      ], orderRows, { emptyTitle: 'Không có đơn mua hàng chờ duyệt' })}
     </div>`;
   };
 
@@ -381,16 +364,40 @@ const tabs =
     const approvedStatuses = PURCHASE_INVENTORY_CONFIG.prStatus.approved;
     const quoteStatus = f.quoteStatus || '';
     const quoteSupplier = f.quoteSupplier || '';
+
+    // Trạng thái tại màn Báo giá phải phản ánh đúng tiến độ báo giá,
+    // không dùng trực tiếp status của PR/PO vì sẽ sinh các nhãn trùng nghĩa
+    // như "Đã duyệt / Đã phê duyệt / Đã duyệt PO".
+    const quoteProcessStatus = (pr) => {
+      const poExists = (DB.purchaseOrders || []).some((po) => po.prId === pr.id && po.status !== 'CANCELLED');
+      if (poExists) return 'PO_CREATED';
+      const quotes = (DB.supplierQuotations || []).filter((quote) => quote.prId === pr.id);
+      if (quotes.some((quote) => quote.confirmed || quote.confirmedAt)) return 'SUPPLIER_SELECTED';
+      if (quotes.some((quote) => (quote.items || []).some((item) => Number(item.price || 0) > 0))) return 'QUOTING';
+      return 'WAITING_QUOTE';
+    };
+    const quoteProcessBadge = (status) => ({
+      WAITING_QUOTE: '<span class="badge slate">Chờ báo giá</span>',
+      QUOTING: '<span class="badge orange">Đang báo giá</span>',
+      SUPPLIER_SELECTED: '<span class="badge blue">Đã chọn NCC</span>',
+      PO_CREATED: '<span class="badge green">Đã tạo PO</span>',
+    }[status] || '<span class="badge slate">Chờ báo giá</span>');
+
     const approvedPrs = DB.purchases.filter((p) => {
       if (!approvedStatuses.includes(p.status)) return false;
       if (!inDateRange(p.date, f.quoteDateFrom, f.quoteDateTo)) return false;
-      if (quoteStatus && p.status !== quoteStatus) return false;
+      if (quoteStatus && quoteProcessStatus(p) !== quoteStatus) return false;
       const supplierIds = (p.items || []).flatMap((item) => item.supplierIds || (item.supplierId ? [item.supplierId] : []));
       return !quoteSupplier || supplierIds.includes(quoteSupplier);
     }).sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
 
     const quotePage = paged(approvedPrs, 'purchaseQuotePrs', 5);
-    const quoteStatuses = approvedStatuses.map((status) => [status, statusLabel(status)]);
+    const quoteStatuses = [
+      ['WAITING_QUOTE', 'Chờ báo giá'],
+      ['QUOTING', 'Đang báo giá'],
+      ['SUPPLIER_SELECTED', 'Đã chọn nhà cung cấp'],
+      ['PO_CREATED', 'Đã tạo đơn đặt hàng'],
+    ];
     const quoteSuppliers = DB.suppliers.map((supplier) => [supplier.id, supplier.name]);
 
     const renderInlineQuote = (pr) => {
@@ -453,7 +460,7 @@ const tabs =
         <td>${supplierIds.map((id) => `<span class="chip" style="margin:2px">${esc(Q.supplierName(id))}</span>`).join('') || '<span class="muted">Chưa có NCC</span>'}</td>
         <td class="right strong num">${fmtVND(p.total)}</td>
         <td class="num">${fmtDate(p.date)}</td>
-        <td style="white-space:nowrap">${badge(p.status)} <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} muted" style="margin-left:6px"></i></td>
+        <td style="white-space:nowrap">${quoteProcessBadge(quoteProcessStatus(p))} <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} muted" style="margin-left:6px"></i></td>
       </tr>
       ${expanded ? `<tr class="quote-inline-detail"><td colspan="6" style="padding:0 14px 14px 28px;background:var(--surface-2);border-top:0"><div class="quote-child-panel">${renderInlineQuote(p)}</div></td></tr>` : ''}`;
     });
@@ -461,7 +468,7 @@ const tabs =
     return `<div class="card">
       <div class="card-head"><div><h3>Báo giá nhà cung cấp theo đề nghị mua</h3><p>Click vào từng đề nghị để mở báo giá ngay bên dưới dòng đó. Click lại để thu gọn.</p></div><span class="chip"><i class="fa-solid fa-list"></i> ${approvedPrs.length} đề nghị</span></div>
       <div class="toolbar">
-        ${selectFilter('purchases', 'quoteStatus', quoteStatuses, 'Tất cả trạng thái đã duyệt')}
+        ${selectFilter('purchases', 'quoteStatus', quoteStatuses, 'Tất cả trạng thái báo giá')}
         ${selectFilter('purchases', 'quoteSupplier', quoteSuppliers, 'Tất cả nhà cung cấp')}
         ${dateRangeInputs('quoteDateFrom', 'quoteDateTo')}
         ${(quoteStatus || quoteSupplier || f.quoteDateFrom || f.quoteDateTo) ? '<button class="btn btn-sm" data-act="clear-quote-filters"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>' : ''}
@@ -473,11 +480,68 @@ const tabs =
 
   /* -------------------------------------------------- TAB 3: PO (ĐƠN ĐẶT HÀNG) */
   const renderPoTab = () => {
+    // Quy trình mới: PR đã được duyệt trước khi báo giá, vì vậy PO không duyệt lại.
+    // Chuyển các PO cũ còn Chờ duyệt/Đã duyệt sang Chờ gửi NCC để tiếp tục luồng mới.
+    let normalizedOldPo = false;
+    (DB.purchaseOrders || []).forEach((po) => {
+      if (['PENDING_APPROVAL','APPROVED'].includes(po.status)) {
+        po.status = 'READY_TO_SEND';
+        normalizedOldPo = true;
+      }
+    });
+    if (normalizedOldPo && typeof PurchaseAPI !== 'undefined' && PurchaseAPI.scheduleCollections) {
+      PurchaseAPI.scheduleCollections(['purchaseOrders']);
+    }
+    // Tự phục hồi PO nếu báo giá đã được xác nhận/chọn NCC nhưng lần ghi trước
+    // bị snapshot server cũ ghi đè. Trường hợp điển hình: YCM-2026-0073.
+    // Không tạo trùng: mỗi quote chỉ sinh PO khi chưa có PO tham chiếu quoteId.
+    let recoveredPo = false;
+    (DB.supplierQuotations || []).forEach((quote) => {
+      if (!(quote?.selected && (quote.confirmed || quote.confirmedAt))) return;
+      if ((DB.purchaseOrders || []).some((po) => po.quoteId === quote.id && po.status !== 'CANCELLED')) return;
+
+      const selectedItems = (quote.items || []).filter((item) => item.selected !== false);
+      if (!selectedItems.length) return;
+      const pr = Q.purchase(quote.prId);
+      const poId = nextCode('PO-2026-', DB.purchaseOrders || []);
+      const poItems = selectedItems.map((item) => ({ ...item, receivedQty: Number(item.receivedQty || 0) }));
+      const subtotal = poItems.reduce((sum, item) => sum + Number(item.amount || (Number(item.qty || 0) * Number(item.price || 0))), 0);
+      const vatRate = 10;
+      const vat = Math.round(subtotal * vatRate / 100);
+
+      DB.purchaseOrders.unshift({
+        id: poId,
+        prId: quote.prId,
+        quoteId: quote.id,
+        supplierId: quote.supplierId,
+        date: quote.confirmedAt || quote.date || DB.today,
+        expectedDate: addDays(quote.confirmedAt || quote.date || DB.today, Number(quote.leadTimeDays || 7)),
+        status: 'READY_TO_SEND',
+        paymentTerm: quote.paymentTerm || 'Theo báo giá nhà cung cấp',
+        note: pr?.reason || quote.note || 'Khôi phục từ báo giá NCC đã xác nhận',
+        createdBy: quote.createdBy || '',
+        createdByName: quote.createdByName || '',
+        items: poItems,
+        subtotal,
+        vatRate,
+        vat,
+        total: subtotal + vat,
+        paid: 0,
+      });
+      if (pr) pr.status = 'mh_da_dat_hang';
+      recoveredPo = true;
+    });
+
+    if (recoveredPo && typeof PurchaseAPI !== 'undefined' && PurchaseAPI.scheduleCollections) {
+      PurchaseAPI.scheduleCollections(['purchaseOrders', 'purchases']);
+      setTimeout(() => Toast?.ok?.('Đã khôi phục đơn đặt hàng', 'PO được tạo lại từ báo giá NCC đã xác nhận trước đó.'), 0);
+    }
+
     const list = DB.purchaseOrders.filter((po) => {
       const returnedQty = (DB.goodsIssues || [])
         .filter(x => x.type === 'RETURN_OUT' && (x.refDoc === po.id || x.poId === po.id))
         .reduce((sum, issue) => sum + (issue.items || []).reduce((n, item) => n + Number(item.qty || 0), 0), 0);
-      if (f.status === '__PO_WAITING__' && !['DRAFT','PENDING_APPROVAL','APPROVED','SENT_TO_SUPPLIER'].includes(po.status)) return false;
+      if (f.status === '__PO_WAITING__' && !['DRAFT','READY_TO_SEND','SENT_TO_SUPPLIER'].includes(po.status)) return false;
       else if (f.status === '__PO_INBOUND__' && !['SHIPPING','PARTIAL_RECEIVED'].includes(po.status)) return false;
       else if (f.status === '__RECEIVED_RETURNED__' && !(po.status === 'RECEIVED' && returnedQty > 0)) return false;
       else if (f.status && !['__PO_WAITING__','__PO_INBOUND__','__RECEIVED_RETURNED__'].includes(f.status) && po.status !== f.status) return false;
@@ -513,12 +577,12 @@ const tabs =
         <td>${poStatusHtml(po)}</td>
         <td>${rowActions([
           { act: 'open-po', data: `data-id="${po.id}"`, icon: 'fa-eye', title: 'Xem chi tiết PO' },
-          ...(['DRAFT', 'APPROVED'].includes(po.status) ? [{ act: 'po-edit', data: `data-id="${po.id}"`, icon: 'fa-pen-to-square', title: 'Sửa và chuyển lại thành đề nghị mua' }] : []),
-          ...(po.status === 'APPROVED' ? [{ act: 'po-change-status', data: `data-id="${po.id}" data-status="SENT_TO_SUPPLIER"`, icon: 'fa-paper-plane', title: 'Gửi cho Nhà cung cấp' }] : []),
-          ...(po.status === 'SENT_TO_SUPPLIER' ? [{ act: 'po-change-status', data: `data-id="${po.id}" data-status="SHIPPING"`, icon: 'fa-truck-fast', title: 'Xác nhận đã giao hàng' }] : []),
-          ...(po.status === 'RECEIVED' && !(DB.supplierEvaluationHistory || []).some(e => e.poId === po.id) ? [{ act: 'po-evaluate-supplier', data: `data-id="${po.id}"`, icon: 'fa-star', title: 'Đánh giá nhà cung cấp' }] : []),
-          ...((DB.goodsIssues || []).some(x => x.type === 'RETURN_OUT' && (x.refDoc === po.id || x.poId === po.id)) ? [{ act: 'po-create-return-pr', data: `data-id="${po.id}"`, icon: 'fa-cart-plus', title: 'Gửi đề nghị mua thêm cho hàng đã trả' }] : []),
-          ...(!['RECEIVED', 'PARTIAL_RECEIVED', 'CANCELLED', 'SHIPPING'].includes(po.status) ? [{ act: 'po-cancel', data: `data-id="${po.id}"`, icon: 'fa-ban', title: 'Hủy đơn đặt hàng' }] : []),
+          ...(['DRAFT', 'READY_TO_SEND'].includes(po.status) && typeof Auth !== 'undefined' && Auth.hasPermission('PURCHASE_PO_CREATE') ? [{ act: 'po-edit', data: `data-id="${po.id}"`, icon: 'fa-pen-to-square', title: 'Sửa và chuyển lại thành đề nghị mua' }] : []),
+          ...(po.status === 'READY_TO_SEND' && typeof Auth !== 'undefined' && Auth.hasPermission('PURCHASE_PO_SEND') ? [{ act: 'po-change-status', data: `data-id="${po.id}" data-status="SENT_TO_SUPPLIER"`, icon: 'fa-paper-plane', title: 'Gửi cho Nhà cung cấp' }] : []),
+          ...(po.status === 'SENT_TO_SUPPLIER' && typeof Auth !== 'undefined' && Auth.hasPermission('PURCHASE_PO_SEND') ? [{ act: 'po-change-status', data: `data-id="${po.id}" data-status="SHIPPING"`, icon: 'fa-truck-fast', title: 'Xác nhận NCC đang giao hàng' }] : []),
+          ...(po.status === 'RECEIVED' && !(DB.supplierEvaluationHistory || []).some(e => e.poId === po.id) && typeof Auth !== 'undefined' && Auth.hasPermission('PURCHASE_SUPPLIER_MANAGE') ? [{ act: 'po-evaluate-supplier', data: `data-id="${po.id}"`, icon: 'fa-star', title: 'Đánh giá nhà cung cấp' }] : []),
+          ...((DB.goodsIssues || []).some(x => x.type === 'RETURN_OUT' && (x.refDoc === po.id || x.poId === po.id)) && typeof Auth !== 'undefined' && Auth.hasPermission('PURCHASE_PR_CREATE') ? [{ act: 'po-create-return-pr', data: `data-id="${po.id}"`, icon: 'fa-cart-plus', title: 'Gửi đề nghị mua thêm cho hàng đã trả' }] : []),
+          ...(!['RECEIVED', 'PARTIAL_RECEIVED', 'CANCELLED', 'SHIPPING'].includes(po.status) && typeof Auth !== 'undefined' && Auth.hasPermission('PURCHASE_PO_CREATE') ? [{ act: 'po-cancel', data: `data-id="${po.id}"`, icon: 'fa-ban', title: 'Hủy đơn đặt hàng' }] : []),
         ])}</td>
       </tr>`);
 
@@ -532,7 +596,7 @@ const tabs =
     return `
     <div class="grid g-auto-sm" style="margin-bottom:14px">
       ${mkpi('Tổng đơn đặt hàng', poSource.length, 'fa-file-invoice-dollar', 'blue', 'purchase-po-dashboard-all')}
-      ${mkpi('Chờ / đã gửi NCC', poSource.filter((p) => ['DRAFT','PENDING_APPROVAL','APPROVED','SENT_TO_SUPPLIER'].includes(p.status)).length, 'fa-paper-plane', 'slate', 'purchase-po-dashboard-waiting')}
+      ${mkpi('Chờ / đã gửi NCC', poSource.filter((p) => ['DRAFT','READY_TO_SEND','SENT_TO_SUPPLIER'].includes(p.status)).length, 'fa-paper-plane', 'slate', 'purchase-po-dashboard-waiting')}
       ${mkpi('Đang giao / nhận một phần', poSource.filter((p) => ['SHIPPING','PARTIAL_RECEIVED'].includes(p.status)).length, 'fa-truck-fast', 'orange', 'purchase-po-dashboard-inbound')}
       ${mkpi('Đã nhận đủ', poSource.filter((p) => p.status === 'RECEIVED').length, 'fa-circle-check', 'green', 'purchase-po-dashboard-received')}
       ${mkpi('Giá trị PO hiệu lực', fmtShort(poTotalValue), 'fa-sack-dollar', 'indigo')}
@@ -542,7 +606,7 @@ const tabs =
     <div class="card">
       <div class="toolbar">
         ${searchBox('purchases', 'Tìm mã đơn hàng, mã đề nghị, nhà cung cấp…')}
-        ${selectFilter('purchases', 'status', [['__PO_WAITING__','Chờ / đã gửi NCC'],['__PO_INBOUND__','Đang giao / nhận một phần'],['DRAFT','Nháp'],['PENDING_APPROVAL','Chờ duyệt'],['APPROVED','Đã duyệt'],['SENT_TO_SUPPLIER','Đã gửi NCC'],['SHIPPING','Đang giao hàng'],['PARTIAL_RECEIVED','Nhận một phần'],['RECEIVED','Đã nhận đủ'],['__RECEIVED_RETURNED__','Đã nhận đủ, trả hàng 1 phần'],['CANCELLED','Đã hủy']], 'Tất cả trạng thái đơn hàng')}
+        ${selectFilter('purchases', 'status', [['__PO_WAITING__','Chờ / đã gửi NCC'],['__PO_INBOUND__','Đang giao / nhận một phần'],['DRAFT','Nháp'],['READY_TO_SEND','Chờ gửi NCC'],['SENT_TO_SUPPLIER','Đã gửi NCC'],['SHIPPING','Đang giao hàng'],['PARTIAL_RECEIVED','Nhận một phần'],['RECEIVED','Đã nhận đủ'],['__RECEIVED_RETURNED__','Đã nhận đủ, trả hàng 1 phần'],['CANCELLED','Đã hủy']], 'Tất cả trạng thái đơn hàng')}
         ${selectFilter('purchases', 'supplier', suppliers, 'Tất cả nhà cung cấp')}
         ${dateRangeInputs('poDateFrom', 'poDateTo')}
         ${(f.q || f.status || f.supplier || f.poDateFrom || f.poDateTo) ? '<button class="btn btn-sm" data-act="clear-filter" data-key="purchases"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>' : ''}
@@ -991,8 +1055,8 @@ Views.purchases.after = function () {
       value: reportPOs.filter((po) => po.supplierId === supplier.id).reduce((sum, po) => sum + Number(po.total || 0), 0)
     })).filter((x) => x.value > 0).sort((a,b)=>b.value-a.value).slice(0,8);
     Charts.bar('chPurchaseReportSupplier', supplierRows.map(x => String(x.supplier.name || x.supplier.id).slice(0,20)), [{ label:'Giá trị mua (VND)', data:supplierRows.map(x=>x.value), color:'blue' }], { money:true });
-    const statuses = ['DRAFT','PENDING_APPROVAL','APPROVED','SENT_TO_SUPPLIER','SHIPPING','PARTIAL_RECEIVED','RECEIVED'];
-    Charts.donut('chPurchaseReportStatus', ['Nháp','Chờ duyệt','Đã duyệt','Đã gửi NCC','Đang giao','Nhận 1 phần','Đã nhận đủ'], statuses.map(st => reportPOs.filter(po=>po.status===st).length), ['slate','orange','blue','indigo','teal','orange','green']);
+    const statuses = ['DRAFT','READY_TO_SEND','SENT_TO_SUPPLIER','SHIPPING','PARTIAL_RECEIVED','RECEIVED'];
+    Charts.donut('chPurchaseReportStatus', ['Nháp','Chờ gửi NCC','Đã gửi NCC','Đang giao','Nhận 1 phần','Đã nhận đủ'], statuses.map(st => reportPOs.filter(po=>po.status===st).length), ['slate','orange','blue','teal','orange','green']);
   }
 
   if (f.tab === 'dashboard') {
@@ -1029,7 +1093,7 @@ Views.purchases.after = function () {
     // [DASHBOARD CONSISTENCY] Gom đầy đủ mọi trạng thái PO đang có trong dữ liệu,
     // tránh biểu đồ có tổng nhỏ hơn số PO trên bảng do bỏ sót APPROVED/CANCELLED.
     const poCounts = [
-      DB.purchaseOrders.filter(p => ['DRAFT','PENDING_APPROVAL','APPROVED'].includes(p.status)).length,
+      DB.purchaseOrders.filter(p => ['DRAFT','READY_TO_SEND'].includes(p.status)).length,
       DB.purchaseOrders.filter(p => p.status === 'SENT_TO_SUPPLIER').length,
       DB.purchaseOrders.filter(p => p.status === 'SHIPPING').length,
       DB.purchaseOrders.filter(p => p.status === 'PARTIAL_RECEIVED').length,
@@ -2238,7 +2302,7 @@ function openQuotationModal(prId) {
 function openPOEditRequest(id) {
   const po = Q.purchaseOrder(id);
   if (!po) return;
-  if (!['DRAFT', 'APPROVED'].includes(po.status)) {
+  if (!['DRAFT', 'READY_TO_SEND'].includes(po.status)) {
     Toast.err('Không thể sửa PO', 'Chỉ PO chưa gửi Nhà cung cấp mới được chuyển về Đề nghị mua hàng.');
     return;
   }
@@ -2376,9 +2440,11 @@ function openPOModal(id) {
         [{ t: 'Phiếu xuất trả' }, { t: 'Ngày trả' }, { t: 'Nguyên liệu' }, { t: 'Số lượng trả', cls: 'right' }, { t: 'Lô hệ thống' }, { t: 'Lý do' }],
         returns.flatMap((r) => (r.items || []).map((it) => `<tr><td><span class="code">${r.id}</span></td><td class="num">${fmtDate(r.date)}</td><td>${esc(Q.material(it.productId)?.name || it.productId)}</td><td class="right num strong">${fmtN(it.qty)} ${esc(it.unit || '')}</td><td><span class="code">${esc(Q.lot(it.lotId)?.lotNumber || it.lotId || '—')}</span></td><td class="muted">${esc(r.note || '')}</td></tr>`)),
         { emptyTitle: 'Chưa có lịch sử trả hàng' })}`,
-        foot: `          ${['DRAFT', 'APPROVED'].includes(po.status) ? `<button class="btn btn-warning" data-act="po-edit" data-id="${po.id}"><i class="fa-solid fa-pen-to-square"></i>Sửa đơn</button>` : ''}
-          ${returns.length ? `<button class="btn btn-success left" data-act="po-create-return-pr" data-id="${po.id}"><i class="fa-solid fa-cart-plus"></i>Gửi đề nghị mua thêm</button>` : ''}
-          ${po.status === 'RECEIVED' && !(DB.supplierEvaluationHistory || []).some(e => e.poId === po.id) ? `<button class="btn btn-primary" data-act="po-evaluate-supplier" data-id="${po.id}"><i class="fa-solid fa-star"></i>Đánh giá NCC</button>` : ''}
+        foot: `          ${po.status === 'READY_TO_SEND' && typeof Auth !== 'undefined' && Auth.hasPermission('PURCHASE_PO_SEND') ? `<button class="btn btn-primary" data-act="po-change-status" data-id="${po.id}" data-status="SENT_TO_SUPPLIER"><i class="fa-solid fa-paper-plane"></i>Gửi NCC</button>` : ''}
+          ${['DRAFT', 'READY_TO_SEND'].includes(po.status) && typeof Auth !== 'undefined' && Auth.hasPermission('PURCHASE_PO_CREATE') ? `<button class="btn btn-warning" data-act="po-edit" data-id="${po.id}"><i class="fa-solid fa-pen-to-square"></i>Sửa đơn</button>` : ''}
+          ${!['RECEIVED', 'PARTIAL_RECEIVED', 'CANCELLED', 'SHIPPING'].includes(po.status) && typeof Auth !== 'undefined' && Auth.hasPermission('PURCHASE_PO_CREATE') ? `<button class="btn btn-danger" data-act="po-cancel" data-id="${po.id}"><i class="fa-solid fa-ban"></i>Hủy PO</button>` : ''}
+          ${returns.length && typeof Auth !== 'undefined' && Auth.hasPermission('PURCHASE_PR_CREATE') ? `<button class="btn btn-success left" data-act="po-create-return-pr" data-id="${po.id}"><i class="fa-solid fa-cart-plus"></i>Gửi đề nghị mua thêm</button>` : ''}
+          ${po.status === 'RECEIVED' && !(DB.supplierEvaluationHistory || []).some(e => e.poId === po.id) && typeof Auth !== 'undefined' && Auth.hasPermission('PURCHASE_SUPPLIER_MANAGE') ? `<button class="btn btn-primary" data-act="po-evaluate-supplier" data-id="${po.id}"><i class="fa-solid fa-star"></i>Đánh giá NCC</button>` : ''}
            <button class="btn" data-act="modal-close">Đóng</button>`,
   });
 }

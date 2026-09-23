@@ -17,6 +17,25 @@ function currentStage(po) {
   return pending || po.stages[po.stages.length - 1];
 }
 
+/** Phân biệt QC công đoạn với QC thành phẩm cuối.
+ * Legacy order chưa có stageType vẫn được nhận diện bằng vị trí: Final QC luôn
+ * là công đoạn áp chót và ngay sau nó là Hoàn thành.
+ */
+function isFinalQcStage(po, stageOrIndex) {
+  const stages = po?.stages || [];
+  const i = typeof stageOrIndex === 'number' ? stageOrIndex : stages.indexOf(stageOrIndex);
+  const s = i >= 0 ? stages[i] : stageOrIndex;
+  if (!s) return false;
+  if (s.stageType === 'FINAL_QC' || s.operationId === 'FINAL_QC') return true;
+  const next = stages[i + 1];
+  return i === stages.length - 2 && /QC|KCS|ATTP|kiểm tra chất lượng/i.test(String(s.name || '')) && /hoàn thành/i.test(String(next?.name || ''));
+}
+function isProcessQcStage(po, stageOrIndex) {
+  const stages = po?.stages || [];
+  const i = typeof stageOrIndex === 'number' ? stageOrIndex : stages.indexOf(stageOrIndex);
+  const s = i >= 0 ? stages[i] : stageOrIndex;
+  return !!s && !isFinalQcStage(po, i) && (s.stageType === 'PROCESS_QC' || /QC|KCS|kiểm tra chất lượng/i.test(String(s.name || '')));
+}
 
 
 /** Dựng công đoạn LSX từ routing đã khai báo trong BOM.
@@ -30,10 +49,14 @@ function buildProductionStagesFromRouting(qty, routing, startDate) {
     if (!operationId) return;
     const op = (DB.operations || []).find(x => x.id === operationId) || {};
     const name = String(op.name || op.workshop || operationId).trim();
-    if (!name || /(^|\s)QC(\s|$)|hoàn thành/i.test(name)) return;
+    // Giữ nguyên QC nằm giữa routing. Chỉ loại công đoạn Hoàn thành vì
+    // hệ thống luôn bổ sung Final QC + Hoàn thành ở cuối quy trình.
+    if (!name || /hoàn thành/i.test(name)) return;
+    const isProcessQc = /(^|\s)QC(\s|$)|KCS|kiểm tra chất lượng/i.test(name);
     stages.push({
       operationId,
       name,
+      stageType: isProcessQc ? 'PROCESS_QC' : 'PROCESS',
       leadId: op.leadId || '',
       machine: op.machine || '',
       qtyPlan: Number(qty || 0), qtyDone: 0, hours: 0,
@@ -43,8 +66,8 @@ function buildProductionStagesFromRouting(qty, routing, startDate) {
     });
   });
   const qcOp = (DB.operations || []).find(o => /(^|\s)QC(\s|$)|KCS|ATTP/i.test(String(o.name || o.workshop || '')));
-  stages.push({operationId:qcOp?.id||'QC', name:'QC — ATTP', leadId:qcOp?.leadId||'NV-015', machine:qcOp?.machine||'Phòng kiểm nghiệm / bàn QC', qtyPlan:Number(qty||0), qtyDone:0, hours:0, status:'pending', start:'', end:'', note:''});
-  stages.push({operationId:'COMPLETE', name:'Hoàn thành', leadId:'NV-018', machine:'Kho thành phẩm', qtyPlan:Number(qty||0), qtyDone:0, hours:0, status:'pending', start:'', end:'', note:''});
+  stages.push({operationId:'FINAL_QC', sourceOperationId:qcOp?.id||'', stageType:'FINAL_QC', name:'QC — ATTP', leadId:qcOp?.leadId||'NV-015', machine:qcOp?.machine||'Phòng kiểm nghiệm / bàn QC', qtyPlan:Number(qty||0), qtyDone:0, hours:0, status:'pending', start:'', end:'', note:''});
+  stages.push({operationId:'COMPLETE', stageType:'COMPLETE', name:'Hoàn thành', leadId:'NV-018', machine:'Kho thành phẩm', qtyPlan:Number(qty||0), qtyDone:0, hours:0, status:'pending', start:'', end:'', note:''});
   return stages;
 }
 
@@ -64,7 +87,7 @@ function productionOrderStarted(po) {
 }
 
 function productionOrderCanDelete(po) {
-  return !!po && ['lsx_cho_duyet','lsx_cho_san_xuat'].includes(po.status) && !po.approvedAt && !productionOrderStarted(po);
+  return !!po && ['lsx_cho_duyet','lsx_cho_san_xuat'].includes(po.status) && !productionOrderStarted(po);
 }
 
 function productionOrderCanEdit(po) { return false; }
@@ -80,13 +103,60 @@ function productionOrderMaterialState(po) {
   const req = productionOrderMaterialRequest(po);
   if (!req) return { code:'MISSING', label:'Chưa lập yêu cầu NVL', tone:'orange' };
   if (req.status === 'ISSUED' || po?.materialIssuedAt) return { code:'ISSUED', label:'Đã cấp NVL', tone:'green', req };
-  if (req.status === 'APPROVED') return { code:'APPROVED', label:'Kho đã duyệt, chờ xuất', tone:'blue', req };
-  return { code:'WAITING', label:'Chờ Kho duyệt', tone:'orange', req };
+  if (req.status === 'APPROVED') return { code:'APPROVED', label:'Chờ Kho xuất NVL', tone:'blue', req };
+  return { code:'WAITING', label:'Chờ xuất NVL', tone:'orange', req };
 }
 
 function productionOrderFinishedReceipt(po) {
   if (po?.finishedReceiptId) return (DB.goodsReceipts || []).find((r) => r.id === po.finishedReceiptId) || null;
   return (DB.goodsReceipts || []).find((r) => (r.items || []).some((i) => i.productionOrderId === po?.id) || r.productionOrderId === po?.id) || null;
+}
+
+
+// Đồng bộ trạng thái hiển thị của LSX từ chứng từ thật đã có trong DB.
+// Không tạo dữ liệu mới; chỉ sửa state local nếu FQC/phiếu nhập đã chứng minh
+// lệnh đã qua QC/đã nhập kho nhưng productionOrders còn status cũ.
+function reconcileProductionOrderFinalState(po) {
+  if (!po) return false;
+  const ins = (DB.productionFinalInspections || []).find(x => x.productionOrderId === po.id);
+  const receipt = productionOrderFinishedReceipt(po);
+  let changed = false;
+  const finalQcIdx = (po.stages || []).findIndex((st, idx) => typeof isFinalQcStage === 'function' ? isFinalQcStage(po, idx) : /QC — ATTP/i.test(String(st?.name||'')));
+
+  if (ins && (ins.status || 'PENDING') !== 'PENDING') {
+    const total = Number(ins.qty || po.qty || 0);
+    po.qcPass = Number(ins.passQty || 0);
+    po.qcFail = Number(ins.failQty || 0);
+    po.qcNote = ins.note || po.qcNote || '';
+    po.qcAt = ins.inspectedAt || po.qcAt || '';
+    po.qcBy = ins.inspectedBy || po.qcBy || '';
+    po.qcByName = ins.inspectedByName || po.qcByName || '';
+    if (finalQcIdx >= 0) {
+      const st = po.stages[finalQcIdx];
+      if (st.status !== 'done' || Number(st.qtyDone||0) !== total) {
+        st.status = 'done'; st.qtyDone = total; st.end = (ins.inspectedAt || '').slice(0,10) || currentDateYMD();
+        changed = true;
+      }
+      const done = po.stages[finalQcIdx + 1];
+      if (done && done.status !== 'done') {
+        done.status = 'done'; done.qtyPlan = Number(ins.passQty || po.qty || 0); done.qtyDone = Number(ins.passQty || 0);
+        done.start = done.start || currentDateYMD(); done.end = done.end || currentDateYMD();
+        changed = true;
+      }
+    }
+  }
+
+  if (receipt) {
+    if (po.finishedReceiptId !== receipt.id) { po.finishedReceiptId = receipt.id; changed = true; }
+    if (po.status !== 'lsx_da_nhap_kho') { po.status = 'lsx_da_nhap_kho'; changed = true; }
+    const received = Number(po.qcPass || (receipt.items || []).reduce((s,i)=>s+Number(i.qty||0),0));
+    if (Number(po.receivedQty||0) !== received) { po.receivedQty = received; changed = true; }
+    po.receivedAt = po.receivedAt || receipt.createdAt || receipt.date || new Date().toISOString();
+  } else if (ins && (ins.status || 'PENDING') !== 'PENDING' && po.status === 'lsx_dang_qc') {
+    po.status = Number(ins.passQty || 0) > 0 ? 'lsx_hoan_thanh' : 'lsx_hoan_thanh';
+    changed = true;
+  }
+  return changed;
 }
 
 function openProductionOrderEditForm(id) {
@@ -97,7 +167,7 @@ function openProductionOrderEditForm(id) {
   const managers = (DB.employees || []).map((e) => `<option value="${esc(e.id)}" ${e.id===po.managerId?'selected':''}>${esc(e.id)} — ${esc(e.name)}</option>`).join('');
   Modal.open({
     title: `Cập nhật lệnh sản xuất ${po.id}`,
-    sub: lockCore ? 'Lệnh đã duyệt/bắt đầu: khóa thành phẩm và số lượng, chỉ cập nhật thông tin điều hành.' : 'Có thể cập nhật thông tin lệnh trước khi duyệt.',
+    sub: lockCore ? 'Lệnh đã bắt đầu: khóa thành phẩm và số lượng, chỉ cập nhật thông tin điều hành.' : 'Lệnh đang chờ sản xuất.',
     size: 'md',
     body: `<div class="form-grid cols-2">
       <div class="field"><label>Thành phẩm *</label><select class="inp" id="poEditProduct" ${lockCore?'disabled':''}>${productOptions}</select></div>
@@ -139,8 +209,6 @@ Views.production = function () {
     const prog = Q.progress(p);
     const d = daysTo(p.deadline);
     const st = currentStage(p);
-    const materialRequest=(DB.productionMaterialRequests||[]).find(r=>r.id===p.materialRequestId||r.productionOrderId===p.id);
-    const hasBom=!!(Q.product(p.productId)?.bom||[]).length;
     return `<tr class="clickable" data-act="open-production-order" data-id="${p.id}">
       <td><span class="code">${p.id}</span><div class="cell-sub">${esc(st.name)}</div></td>
       <td class="hide-sm"><span class="code" style="color:var(--text-2)">${p.orderId}</span><div class="cell-sub">${esc(Q.customerName(p.customerId))}</div></td>
@@ -152,8 +220,7 @@ Views.production = function () {
       <td>${badge(p.status)}</td>
       <td class="right">${rowActions([
         { act:'open-production-order', data:`data-id="${p.id}"`, icon:'fa-eye', title:'Xem chi tiết' },
-        ...(!p.approvedAt && ['lsx_cho_duyet','lsx_cho_san_xuat'].includes(p.status) ? [{ act:'po-approve', data:`data-id="${p.id}"`, icon:'fa-check', title:'Duyệt lệnh sản xuất' }] : []),
-        ...(p.approvedAt && p.status==='lsx_cho_san_xuat' ? [{ act:'po-advance', data:`data-id="${p.id}"`, icon:'fa-play', title:'Bắt đầu sản xuất' }] : []),
+        ...(['lsx_cho_duyet','lsx_cho_san_xuat'].includes(p.status) ? [{ act:'po-advance', data:`data-id="${p.id}"`, icon:'fa-play', title:'Bắt đầu sản xuất' }] : []),
         ...(p.status==='lsx_dang_san_xuat' ? [{ act:'po-advance', data:`data-id="${p.id}"`, icon:'fa-gears', title:'Cập nhật công đoạn' }] : []),
         ...(p.status==='lsx_dang_qc' ? [{ act:'po-qc', data:`data-id="${p.id}"`, icon:'fa-clipboard-check', title:'Đi đến QC thành phẩm' }] : []),
         ...(productionOrderCanDelete(p) ? [{ act:'po-delete', data:`data-id="${p.id}"`, icon:'fa-trash', title:'Xóa lệnh sản xuất' }] : []),
@@ -169,8 +236,7 @@ Views.production = function () {
 
   <div class="grid g-auto-sm" style="margin-bottom:14px">
     ${mkpi('Tổng lệnh', DB.productionOrders.length, 'fa-industry', 'blue')}
-    ${mkpi('Chờ duyệt', cnt('lsx_cho_duyet') + DB.productionOrders.filter(p=>p.status==='lsx_cho_san_xuat'&&!p.approvedAt).length, 'fa-file-signature', 'orange')}
-    ${mkpi('Chờ sản xuất', DB.productionOrders.filter(p=>p.status==='lsx_cho_san_xuat'&&p.approvedAt).length, 'fa-hourglass-start', 'slate')}
+    ${mkpi('Chờ sản xuất', DB.productionOrders.filter(p=>['lsx_cho_duyet','lsx_cho_san_xuat'].includes(p.status)).length, 'fa-hourglass-start', 'slate')}
     ${mkpi('Đang sản xuất', cnt('lsx_dang_san_xuat'), 'fa-gears', 'indigo')}
     ${mkpi('Đang QC', cnt('lsx_dang_qc'), 'fa-clipboard-check', 'orange')}
     ${mkpi('Hoàn thành', cnt('lsx_hoan_thanh'), 'fa-circle-check', 'green')}
@@ -215,7 +281,21 @@ Views['production-detail'] = function (params) {
       if (typeof ProductionAPI !== 'undefined') ProductionAPI.scheduleSync(250);
     }
   }
-  if (p) ensureProductionOrderStageSchema(p);
+  if (p) {
+    ensureProductionOrderStageSchema(p);
+    const repaired = reconcileProductionOrderFinalState(p);
+    if (repaired) {
+      // Chỉ persist đúng LSX đã được đối soát; stage progress được cập nhật để
+      // lần refresh sau không bị record tiến độ cũ kéo status ngược về Đang QC.
+      requestAnimationFrame(() => setTimeout(() => {
+        try {
+          const finalQcIdx = (p.stages || []).findIndex((st, idx) => isFinalQcStage(p, idx));
+          ProductionAPI?.scheduleCollections?.(['productionOrders']);
+          if (finalQcIdx >= 0) ProductionAPI?.persistStageProgress?.(p, [finalQcIdx, finalQcIdx + 1]).catch?.(()=>{});
+        } catch (_) {}
+      }, 0));
+    }
+  }
   if (!p) return `<div class="empty"><div class="empty-ico"><i class="fa-solid fa-file-circle-xmark"></i></div><h4>Không tìm thấy lệnh sản xuất</h4><button class="btn btn-primary btn-sm" data-act="go" data-id="production">Về danh sách</button></div>`;
 
   const prog = Q.progress(p);
@@ -234,8 +314,7 @@ Views['production-detail'] = function (params) {
   ${pageHead(`Lệnh sản xuất ${p.id}`, `${esc(p.productName)} · Đơn hàng ${p.orderId} · ${esc(Q.customerName(p.customerId))}`, `
     <button class="btn" data-act="go" data-id="production"><i class="fa-solid fa-arrow-left"></i>Danh sách</button>
     <button class="btn" data-act="export-po-detail" data-id="${p.id}"><i class="fa-solid fa-print"></i>In phiếu SX</button>
-    ${!p.approvedAt && ['lsx_cho_duyet','lsx_cho_san_xuat'].includes(p.status) ? `<button class="btn btn-primary" data-act="po-approve" data-id="${p.id}"><i class="fa-solid fa-check"></i>Duyệt lệnh</button>` : ''}
-    ${p.approvedAt && p.status==='lsx_cho_san_xuat' ? `<button class="btn btn-primary" data-act="po-advance" data-id="${p.id}"><i class="fa-solid fa-play"></i>Bắt đầu sản xuất</button>` : ''}
+    ${['lsx_cho_duyet','lsx_cho_san_xuat'].includes(p.status) ? `<button class="btn btn-primary" data-act="po-advance" data-id="${p.id}"><i class="fa-solid fa-play"></i>Bắt đầu sản xuất</button>` : ''}
     ${p.status==='lsx_dang_san_xuat' ? `<button class="btn btn-primary" data-act="po-advance" data-id="${p.id}"><i class="fa-solid fa-gears"></i>Cập nhật công đoạn</button>` : ''}
     ${p.status==='lsx_dang_qc' ? `<button class="btn btn-primary" data-act="po-qc" data-id="${p.id}"><i class="fa-solid fa-clipboard-check"></i>Đi đến QC thành phẩm</button>` : ''}
     ${productionOrderCanDelete(p) ? `<button class="btn" data-act="po-delete" data-id="${p.id}"><i class="fa-solid fa-trash"></i>Xóa</button>` : ''}
@@ -258,7 +337,6 @@ Views['production-detail'] = function (params) {
           ${infoItem('Ngày bắt đầu', fmtDate(p.startDate))}
           ${infoItem('Deadline', `${fmtDate(p.deadline)} ${!['lsx_hoan_thanh','lsx_da_nhap_kho'].includes(p.status) ? (d < 0 ? `<span style="color:var(--red);font-weight:700">(trễ ${-d} ngày)</span>` : `<span style="color:${d <= 3 ? 'var(--orange)' : 'var(--text-3)'}">(còn ${d} ngày)</span>`) : ''}`)}
           ${infoItem('Người phụ trách', esc(Q.employeeName(p.managerId)))}
-          ${infoItem('Phê duyệt', p.approvedAt ? `<span class="badge green">Đã duyệt</span><div class="cell-sub">${esc(p.approvedByName||p.approvedBy||'')}</div>` : '<span class="badge orange">Chưa duyệt</span>')}
           ${infoItem('Cấp nguyên liệu', `<span class="badge ${materialState.tone}">${esc(materialState.label)}</span>${materialState.req ? `<div class="cell-sub"><span class="code">${esc(materialState.req.id)}</span></div>` : ''}`)}
           ${infoItem('Nguồn lệnh', p.planId ? `Kế hoạch <span class="code">${esc(p.planId)}</span>` : p.orderId ? `Đơn bán <span class="code">${esc(p.orderId)}</span>` : 'Tạo thủ công')}
           ${infoItem('Nhập kho TP', finishedReceipt ? `<span class="badge green">Đã nhập</span><div class="cell-sub"><span class="code">${esc(finishedReceipt.id)}</span></div>` : (p.status==='lsx_dang_qc' ? '<span class="badge orange">Chờ QC · chưa tính tồn</span>' : p.status==='lsx_hoan_thanh' ? '<span class="badge red">QC không đạt · không nhập tồn</span>' : '<span class="badge slate">Chưa đến bước</span>'))}
@@ -372,18 +450,22 @@ Views['production-detail'] = function (params) {
             </div>
             <div class="kcol-foot">
               ${s.status === 'done' ? '<button class="btn btn-xs" disabled style="width:100%"><i class="fa-solid fa-check"></i>Đã xong</button>'
-                : s.status === 'doing' ? (/QC/i.test(String(s.name||'')) ? `<button class="btn btn-xs btn-primary" style="width:100%" data-act="po-qc" data-id="${p.id}"><i class="fa-solid fa-clipboard-check"></i>Mở QC/QA</button>` : `<button class="btn btn-xs btn-primary" style="width:100%" data-act="stage-update" data-id="${p.id}" data-i="${i}"><i class="fa-solid fa-pen"></i>Ghi nhận sản lượng</button>`)
-                : canStart ? `<button class="btn btn-xs" style="width:100%" data-act="stage-start" data-id="${p.id}" data-i="${i}"><i class="fa-solid fa-play"></i>Bắt đầu</button>`
+                : s.status === 'doing' ? (isFinalQcStage(p, i) ? `<button class="btn btn-xs btn-primary" style="width:100%" data-act="po-qc" data-id="${p.id}"><i class="fa-solid fa-clipboard-check"></i>Mở QC thành phẩm</button>` : isProcessQcStage(p,i) ? `<button class="btn btn-xs" disabled style="width:100%"><i class="fa-solid fa-vial-circle-check"></i>Chờ QC bán thành phẩm</button>` : `<button class="btn btn-xs btn-primary" style="width:100%" data-act="stage-update" data-id="${p.id}" data-i="${i}"><i class="fa-solid fa-pen"></i>Ghi nhận sản lượng</button>`)
+                : canStart ? `<button class="btn btn-xs" style="width:100%" data-act="stage-start" data-id="${p.id}" data-i="${i}"><i class="fa-solid fa-play"></i>${isProcessQcStage(p,i)?'Chuyển QC bán thành phẩm':'Bắt đầu'}</button>`
                 : '<button class="btn btn-xs" disabled style="width:100%">Chờ công đoạn trước</button>'}
             </div>
           </div>`;
         }).join('')}
       </div>
     </div>
-    ${(order || p.status === 'lsx_dang_qc') ? `<div class="card-foot" style="display:flex;gap:9px;flex-wrap:wrap;justify-content:flex-end">
-      ${order ? `<button class="btn btn-sm" data-act="open-order" data-id="${order.id}"><i class="fa-solid fa-cart-flatbed"></i>Xem đơn hàng ${order.id}</button>` : ''}
-      ${p.status === 'lsx_dang_qc' ? `<button class="btn btn-sm btn-success" data-act="po-qc" data-id="${p.id}"><i class="fa-solid fa-clipboard-check"></i>Mở kiểm tra thành phẩm</button>` : ''}
-    </div>` : ''}
+    ${(() => {
+      const finalQcIdx = (p.stages || []).findIndex((st, idx) => isFinalQcStage(p, idx));
+      const finalQcReady = finalQcIdx >= 0 && (p.stages || []).slice(0, finalQcIdx).every(st => st.status === 'done');
+      return (order || finalQcReady) ? `<div class="card-foot" style="display:flex;gap:9px;flex-wrap:wrap;justify-content:flex-end">
+        ${order ? `<button class="btn btn-sm" data-act="open-order" data-id="${order.id}"><i class="fa-solid fa-cart-flatbed"></i>Xem đơn hàng ${order.id}</button>` : ''}
+        ${finalQcReady ? `<button class="btn btn-sm btn-success" data-act="po-qc" data-id="${p.id}"><i class="fa-solid fa-clipboard-check"></i>Mở kiểm tra thành phẩm</button>` : ''}
+      </div>` : '';
+    })()}
   </div>`;
 };
 
@@ -420,15 +502,23 @@ function openProductionReceiptModal(poId) {
 function openStageModal(poId, index) {
   const p = Q.po(poId);
   const s = p.stages[index];
+  const qtyPlan = Number(s.qtyPlan || 0);
+  const qtyDone = Number(s.qtyDone || 0);
+  const qtyRemain = Math.max(0, qtyPlan - qtyDone);
   Modal.open({
     title: `Ghi nhận công đoạn: ${esc(s.name)}`,
-    sub: `${p.id} · ${esc(p.productName)} · Kế hoạch ${fmtN(s.qtyPlan)} ${esc(p.unit)}`,
+    sub: `${p.id} · ${esc(p.productName)} · Kế hoạch ${fmtN(qtyPlan)} ${esc(p.unit)}`,
     body: `
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px">
+        <div class="mini-stat"><div class="muted">Đã hoàn thành</div><b>${fmtN(qtyDone)} ${esc(p.unit)}</b></div>
+        <div class="mini-stat"><div class="muted">Kế hoạch</div><b>${fmtN(qtyPlan)} ${esc(p.unit)}</b></div>
+        <div class="mini-stat"><div class="muted">Còn lại</div><b>${fmtN(qtyRemain)} ${esc(p.unit)}</b></div>
+      </div>
       <div class="form-grid">
-        <div class="field"><label>Sản lượng đã hoàn thành (${esc(p.unit)}) <span class="req">*</span></label>
-          <input class="inp num" type="number" id="stQty" min="0" max="${s.qtyPlan}" value="${s.qtyDone}" /></div>
-        <div class="field"><label>Giờ máy phát sinh <span class="req">*</span></label>
-          <input class="inp num" type="number" id="stHours" min="0" step="0.5" value="${s.hours}" /></div>
+        <div class="field"><label>Sản lượng bổ sung lần này (${esc(p.unit)}) <span class="req">*</span></label>
+          <input class="inp num" type="number" id="stQty" min="0.0001" max="${qtyRemain}" step="0.0001" value="" placeholder="Tối đa ${fmtN(qtyRemain)}" /></div>
+        <div class="field"><label>Giờ máy phát sinh lần này <span class="req">*</span></label>
+          <input class="inp num" type="number" id="stHours" min="0.0001" step="0.5" value="" /></div>
         <div class="field"><label>Người phụ trách <span class="req">*</span></label>
           <select class="inp" id="stLead">
             ${DB.employees.filter((e) => ['Sản xuất', 'QC/KCS', 'Kho vận'].includes(e.dept) && e.status !== 'ns_nghi_viec').slice(0, 40)
@@ -438,10 +528,10 @@ function openStageModal(poId, index) {
           <input class="inp" id="stMachine" value="${esc(s.machine)}" /></div>
       </div>
       <div class="field"><label>Ghi chú <span class="req">*</span></label>
-        <textarea class="inp" id="stNote" rows="2" placeholder="Ví dụ: dừng 30 phút thay dao phay…">${esc(s.note)}</textarea></div>
+        <textarea class="inp" id="stNote" rows="2" placeholder="Ví dụ: dừng 30 phút thay dao phay…"></textarea></div>
       <div style="font-size:12.3px;color:var(--text-3);background:var(--surface-2);border-radius:var(--r);padding:10px 12px">
         <i class="fa-solid fa-circle-info" style="color:var(--primary)"></i>
-        Khi ghi nhận đủ <b>${fmtN(s.qtyPlan)} ${esc(p.unit)}</b>, công đoạn sẽ tự động chuyển sang trạng thái hoàn tất và mở công đoạn kế tiếp.
+        Mỗi lần ghi nhận sẽ <b>cộng dồn</b> vào sản lượng đã hoàn thành. Chỉ khi tổng đạt đúng <b>${fmtN(qtyPlan)} ${esc(p.unit)}</b> thì công đoạn mới hoàn tất.
       </div>`,
     foot: `<button class="btn" data-act="modal-close">Hủy</button>
            <button class="btn" data-act="stage-save" data-id="${p.id}" data-i="${index}" data-full="0"><i class="fa-solid fa-floppy-disk"></i>Lưu sản lượng</button>
@@ -714,7 +804,7 @@ function pfPlanStatus(status) {
   const x=map[status]||[status||'—','slate']; return `<span class="badge ${x[1]}">${x[0]}</span>`;
 }
 function pfRequestStatus(status) {
-  const map={WAITING_WAREHOUSE_APPROVAL:['Chờ kho duyệt','orange'],APPROVED:['Kho đã duyệt','blue'],ISSUED:['Đã xuất NVL','green'],COMPLETED:['Đã hoàn thành','green'],REJECTED:['Từ chối','red']};
+  const map={WAITING_WAREHOUSE_APPROVAL:['Chờ xuất NVL','orange'],APPROVED:['Chờ xuất NVL','blue'],ISSUED:['Đã xuất NVL','green'],COMPLETED:['Đã hoàn thành','green'],REJECTED:['Từ chối','red']};
   const x=map[status]||[status||'—','slate']; return `<span class="badge ${x[1]}">${x[0]}</span>`;
 }
 function pfBomRequiredQty(qtyPerUnit, productionQty, lossPct=0) {

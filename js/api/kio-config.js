@@ -42,6 +42,16 @@ const KIO_CONFIG = Object.freeze({
   }),
 
 
+  // SẢN XUẤT — tách collection khỏi lenam_inventory_settings để mỗi màn chỉ
+  // đọc đúng dữ liệu cần thiết, tránh tải singleton Production rất lớn.
+  productionTables: Object.freeze({
+    productionOrders: 'lenam_production_orders',
+    productionPlans: 'lenam_production_plans',
+    productionMaterialRequests: 'lenam_production_material_requests',
+    productionFinalInspections: 'lenam_production_final_inspections',
+  }),
+
+
   // CRM – Bán hàng dùng bảng riêng trên KIO server.
   // Giữ prefix lenam_ để không lẫn với các dự án khác trên cùng server.
   crmTables: Object.freeze({
@@ -95,17 +105,17 @@ const KIO_CONFIG = Object.freeze({
   inventorySettingsTable: 'lenam_inventory_settings',
 
   storageKeys: Object.freeze({
-    purchaseCache: 'lenam:kio:purchase-cache:v2',
-    inventoryCache: 'lenam:kio:inventory-cache:v2',
+    purchaseCache: 'lenam:kio:purchase-cache:v3-real-server',
+    inventoryCache: 'lenam:kio:inventory-cache:v3-real-server',
     purchaseDemoSeed: 'lenam:kio:purchase-demo-seeded:20260910-refactor1',
     inventoryDemoSeed: 'lenam:kio:inventory-demo-seeded:20260910-refactor1',
-    crmCache: 'lenam:kio:crm-cache:v1',
+    crmCache: 'lenam:kio:crm-cache:v2-real-server',
     crmDemoSeed: 'lenam:kio:crm-demo-seeded:20260911-crm-tables-v1',
-    logisticsCache: 'lenam_logistics_v2',
-    systemCache: 'lenam:kio:system-cache:v1',
+    logisticsCache: 'lenam_logistics_v3_real_server',
+    systemCache: 'lenam:kio:system-cache:v2',
     restaurantCache: 'lenam:kio:restaurant-cache:v1',
     qualityCache: 'lenam:kio:quality-cache:v1',
     globalWarmupStamp: 'lenam:kio:global-warmup:v1',
-    authSession: 'lenam:auth:session:v1',
+    authSession: 'lenam:auth:session:v2',
   }),
 });

@@ -22,7 +22,6 @@
  * -------------------------------------------------------------------------*/
 const APPROVAL_DOC_TYPES = {
   PR:                   { label: 'Đề nghị mua hàng',        icon: 'fa-cart-shopping',       tone: 'orange' },
-  PO:                   { label: 'Đơn đặt hàng',            icon: 'fa-file-invoice',         tone: 'blue'   },
   PAYMENT:              { label: 'Thanh toán',              icon: 'fa-money-bill-transfer',  tone: 'green'  },
   CASH_OUT:             { label: 'Chi tiền',                icon: 'fa-sack-dollar',          tone: 'red'    },
   DISCOUNT:             { label: 'Giảm giá',                icon: 'fa-tags',                 tone: 'indigo' },
@@ -40,47 +39,42 @@ const APPROVAL_DOC_TYPE_LIST = Object.keys(APPROVAL_DOC_TYPES);
 DB.approvalWorkflows = DB.approvalWorkflows || [
   { id: 'WF-PR',     docType: 'PR',     name: 'Đề nghị mua hàng',       slaHours: 24,
     levels: [
-      { level: 1, role: 'R07', label: 'Trưởng phòng Mua hàng duyệt', minAmount: 0 },
-      { level: 2, role: 'R02', label: 'Ban giám đốc duyệt (giá trị lớn)', minAmount: 50000000 },
-    ] },
-  { id: 'WF-PO',     docType: 'PO',     name: 'Đơn đặt hàng',           slaHours: 24,
-    levels: [
-      { level: 1, role: 'R07', label: 'Trưởng phòng Mua hàng duyệt', minAmount: 0 },
-      { level: 2, role: 'R02', label: 'Ban giám đốc duyệt (giá trị lớn)', minAmount: 100000000 },
+      { level: 1, role: 'ROLE_PURCHASE_MANAGER', label: 'Trưởng phòng Mua hàng duyệt', minAmount: 0 },
+      { level: 2, role: 'ROLE_DIRECTOR', label: 'Ban giám đốc duyệt (giá trị lớn)', minAmount: 50000000 },
     ] },
   { id: 'WF-PAYMENT', docType: 'PAYMENT', name: 'Thanh toán',          slaHours: 12,
     levels: [
-      { level: 1, role: 'R08', label: 'Kế toán trưởng duyệt', minAmount: 0 },
-      { level: 2, role: 'R02', label: 'Ban giám đốc duyệt (giá trị lớn)', minAmount: 20000000 },
+      { level: 1, role: 'ROLE_ACCOUNTING', label: 'Kế toán duyệt', minAmount: 0 },
+      { level: 2, role: 'ROLE_DIRECTOR', label: 'Ban giám đốc duyệt (giá trị lớn)', minAmount: 20000000 },
     ] },
   { id: 'WF-CASH',   docType: 'CASH_OUT', name: 'Chi tiền',            slaHours: 8,
     levels: [
-      { level: 1, role: 'R08', label: 'Kế toán trưởng duyệt', minAmount: 0 },
-      { level: 2, role: 'R01', label: 'Giám đốc điều hành duyệt (giá trị lớn)', minAmount: 10000000 },
+      { level: 1, role: 'ROLE_ACCOUNTING', label: 'Kế toán duyệt', minAmount: 0 },
+      { level: 2, role: 'ROLE_DIRECTOR', label: 'Ban giám đốc duyệt (giá trị lớn)', minAmount: 10000000 },
     ] },
   { id: 'WF-DISCOUNT', docType: 'DISCOUNT', name: 'Giảm giá',          slaHours: 24,
     levels: [
-      { level: 1, role: 'R03', label: 'Trưởng phòng Kinh doanh duyệt', minAmount: 0 },
-      { level: 2, role: 'R02', label: 'Ban giám đốc duyệt (mức giảm lớn)', minAmount: 10 },
+      { level: 1, role: 'ROLE_SALES', label: 'Kinh doanh duyệt', minAmount: 0 },
+      { level: 2, role: 'ROLE_DIRECTOR', label: 'Ban giám đốc duyệt (mức giảm lớn)', minAmount: 10 },
     ] },
   { id: 'WF-CANCEL', docType: 'ORDER_CANCEL', name: 'Hủy đơn hàng',    slaHours: 24,
     levels: [
-      { level: 1, role: 'R03', label: 'Trưởng phòng Kinh doanh duyệt', minAmount: 0 },
+      { level: 1, role: 'ROLE_SALES', label: 'Kinh doanh duyệt', minAmount: 0 },
     ] },
   { id: 'WF-ISSUE',  docType: 'SPECIAL_ISSUE', name: 'Xuất kho đặc biệt', slaHours: 12,
     levels: [
-      { level: 1, role: 'R06', label: 'Thủ kho xác nhận', minAmount: 0 },
-      { level: 2, role: 'R05', label: 'Quản đốc Sản xuất duyệt', minAmount: 0 },
+      { level: 1, role: 'ROLE_WAREHOUSE', label: 'Kho xác nhận', minAmount: 0 },
+      { level: 2, role: 'ROLE_PRODUCTION', label: 'Sản xuất duyệt', minAmount: 0 },
     ] },
   { id: 'WF-OVERNORM', docType: 'OVER_NORM_PRODUCTION', name: 'Sản xuất ngoài định mức', slaHours: 24,
     levels: [
-      { level: 1, role: 'R05', label: 'Quản đốc Sản xuất duyệt', minAmount: 0 },
-      { level: 2, role: 'R02', label: 'Ban giám đốc duyệt (chênh lệch lớn)', minAmount: 5000000 },
+      { level: 1, role: 'ROLE_PRODUCTION', label: 'Sản xuất duyệt', minAmount: 0 },
+      { level: 2, role: 'ROLE_DIRECTOR', label: 'Ban giám đốc duyệt (chênh lệch lớn)', minAmount: 5000000 },
     ] },
   { id: 'WF-RETURN', docType: 'RETURN_EXCHANGE', name: 'Đổi trả hàng', slaHours: 24,
     levels: [
-      { level: 1, role: 'R03', label: 'Trưởng phòng Kinh doanh duyệt', minAmount: 0 },
-      { level: 2, role: 'R08', label: 'Kế toán đối chiếu công nợ', minAmount: 0 },
+      { level: 1, role: 'ROLE_SALES', label: 'Kinh doanh duyệt', minAmount: 0 },
+      { level: 2, role: 'ROLE_ACCOUNTING', label: 'Kế toán đối chiếu công nợ', minAmount: 0 },
     ] },
 ];
 DB.approvalRequests = DB.approvalRequests || [];
@@ -141,7 +135,7 @@ function approvalDocTypeChip(docType) {
 const ApprovalEngine = {
   /* Đăng ký nghiệp vụ thật sự cần thực thi khi một yêu cầu duyệt xong hết cấp
    * (onApproved) hoặc bị từ chối ở bất kỳ cấp nào (onRejected). Đây là điểm
-   * nối để PR/PO/Thanh toán (hoặc bất kỳ chứng từ nào khác) áp dụng thay đổi
+   * nối để PR/Thanh toán (hoặc bất kỳ chứng từ nào khác) áp dụng thay đổi
    * thật vào DB chỉ SAU KHI đã đi hết quy trình phê duyệt — xem mục 8 cuối
    * file để biết cách đăng ký cho PR/PO/Thanh toán. */
   handlers: {},
@@ -385,7 +379,7 @@ function approvalsPendingView() {
 }
 
 function approvalsWorkflowsView() {
-  const canEdit = ['R01', 'R02'].includes((Auth.currentRole() || {}).id);
+  const canEdit = ['ROLE_ADMIN', 'ROLE_DIRECTOR'].includes((Auth.currentRole() || {}).id);
   const rows = DB.approvalWorkflows.map((w) => {
     const t = APPROVAL_DOC_TYPES[w.docType] || { label: w.docType };
     return `<tr>
@@ -581,7 +575,7 @@ function openApprovalActionModal(id, kind) {
 function openWorkflowEditForm(id) {
   const w = DB.approvalWorkflows.find((x) => x.id === id);
   if (!w) return;
-  const canEdit = ['R01', 'R02'].includes((Auth.currentRole() || {}).id);
+  const canEdit = ['ROLE_ADMIN', 'ROLE_DIRECTOR'].includes((Auth.currentRole() || {}).id);
   const roleOptions = (sel) => DB.roles.map((r) => `<option value="${r.id}" ${r.id === sel ? 'selected' : ''}>${esc(r.name)}</option>`).join('');
   const levelRows = (w.levels || []).map((l) => `<div class="ap-wf-level-line" style="display:grid;grid-template-columns:70px 1fr 1fr 160px 34px;gap:8px;margin-bottom:8px;align-items:center">
       <div class="cell-sub" style="text-align:center">Cấp ${l.level}</div>
@@ -706,8 +700,7 @@ Object.assign(Actions, {
  * đưa chứng từ về đúng trạng thái "đã từ chối" như luồng cũ.
  *
  * File này ghi đè (override) 3 action đã có sẵn trong app.js:
- *   Actions['pr-approve-action'], Actions['po-approve-action'],
- *   Actions['supplier-pay-save']
+ *   Actions['pr-approve-action'], Actions['supplier-pay-save']
  * Việc override chỉ có tác dụng nếu mod-approvals.js được nạp SAU app.js
  * (xem mục 9 — hướng dẫn thứ tự nạp — ngay bên dưới).
  *
@@ -735,6 +728,15 @@ if (APPROVAL_INTEGRATE_PURCHASE_FLOW) {
         SystemAPI.audit({ module: 'PURCHASE', entityType: 'PURCHASE_REQUEST', entityId: p.id, action: 'APPROVE', description: `${lastLvl.approverName} phê duyệt ${p.id} qua quy trình ${req.levels.length} cấp`, newData: { status: p.status } });
       }
       DB.purchaseApprovals.unshift({ id: nextCode('PA-', DB.purchaseApprovals), prId: p.id, approverId: lastLvl.approverId, time: DB.today + ' 09:00', action: 'approve', prevStatus: 'mh_cho_duyet', nextStatus: 'mh_da_duyet', note: 'Đã phê duyệt qua quy trình phê duyệt nhiều cấp' });
+
+      // IMPORTANT: mod-approvals override action duyệt sau khi PurchaseAPI đã wrap
+      // các action Purchase, vì vậy thay đổi PR ở đây phải tự đánh dấu dirty +
+      // đồng bộ KIO. Nếu không, đổi tài khoản/refresh sẽ nạp snapshot server cũ
+      // và PR quay lại Chờ duyệt.
+      if (typeof PurchaseAPI !== 'undefined' && PurchaseAPI.scheduleCollections) {
+        PurchaseAPI.scheduleCollections(['purchases'], 0);
+      }
+
       F('purchases').prId = p.id;
       render();
     },
@@ -748,6 +750,9 @@ if (APPROVAL_INTEGRATE_PURCHASE_FLOW) {
       p.rejectedAt = rejectedLvl?.time || new Date().toISOString();
       DB.purchaseApprovals.unshift({ id: nextCode('PA-', DB.purchaseApprovals), prId: p.id, approverId: rejectedLvl?.approverId || '', time: DB.today + ' 09:00', action: 'reject', prevStatus: 'mh_cho_duyet', nextStatus: 'mh_tu_choi', note: rejectedLvl?.note || '' });
       if (typeof SystemAPI !== 'undefined') SystemAPI.audit({ module: 'PURCHASE', entityType: 'PURCHASE_REQUEST', entityId: p.id, action: 'REJECT', description: `${rejectedLvl?.approverName || ''} từ chối ${p.id}: ${rejectedLvl?.note || ''}`, newData: { status: p.status } });
+      if (typeof PurchaseAPI !== 'undefined' && PurchaseAPI.scheduleCollections) {
+        PurchaseAPI.scheduleCollections(['purchases'], 0);
+      }
       render();
     },
   });
@@ -791,89 +796,18 @@ if (APPROVAL_INTEGRATE_PURCHASE_FLOW) {
   })();
 
   /* ---- 8.2 Đơn đặt hàng (PO) ------------------------------------------ */
-  ApprovalEngine.registerHandler('PO', {
-    onApproved(req) {
-      const po = Q.purchaseOrder(req.docId);
-      if (!po || po.status !== 'PENDING_APPROVAL') return;
-      po.status = 'APPROVED';
-      const pr = Q.purchase(po.prId);
-      if (pr) pr.status = 'mh_da_dat_hang';
-      render();
-    },
-    onRejected(req) {
-      const po = Q.purchaseOrder(req.docId);
-      if (!po || po.status !== 'PENDING_APPROVAL') return;
-      const rejectedLvl = req.levels.find((l) => l.status === 'REJECTED');
-      po.status = 'CANCELLED';
-      po.cancelledAt = DB.today;
-      po.cancelledBy = rejectedLvl?.approverId || '';
-      po.cancelReason = `Từ chối tại quy trình phê duyệt nhiều cấp: ${rejectedLvl?.note || ''}`;
-      render();
-    },
-  });
-
-  (function overridePoApprove() {
-    const originalPoApprove = Actions['po-approve-action'];
-    Actions['po-approve-action'] = function (d, el, e) {
-      const po = Q.purchaseOrder(d.id);
-      if (!po || po.status !== 'PENDING_APPROVAL') return;
-      let req = ApprovalEngine.pendingFor('PO', po.id);
-      if (!req) {
-        req = ApprovalEngine.create({ docType: 'PO', docId: po.id, title: `Đơn đặt hàng ${po.id} — ${Q.supplierName(po.supplierId)}`, amount: po.total, note: po.note });
-        if (!req) return;
-      }
-      Modal.close();
-      go('approvals', { tab: 'pending' });
-      const lvl = ApprovalEngine.currentLevelOf(req);
-      Toast.info('Đã chuyển sang quy trình phê duyệt', `${req.id} · Đang chờ: ${approvalRoleName(lvl.role)}`);
-    };
-  })();
+  /* PO không dùng quy trình phê duyệt riêng. Sau khi PR đã được duyệt và
+   * Mua hàng xác nhận báo giá/chọn NCC, PO đi thẳng vào READY_TO_SEND.
+   * Bộ phận Mua hàng có thể Gửi NCC hoặc Hủy PO theo trạng thái hợp lệ. */
 
   /* ---- 8.3 Thanh toán nhà cung cấp ------------------------------------ */
-  ApprovalEngine.registerHandler('PAYMENT', {
-    onApproved(req) {
-      const payload = req.payload || {};
-      const po = Q.purchaseOrder(payload.poId);
-      if (!po) { Toast.err('Không tìm thấy đơn mua', payload.poId); return; }
-      const remain = po.total - po.paid;
-      const amount = Math.max(0, Math.min(payload.amount, remain));
-      if (amount <= 0) { Toast.warn('Đơn hàng đã hết công nợ', `${po.id} không còn dư nợ để ghi nhận thanh toán.`); return; }
-      po.paid = Math.round(po.paid + amount);
-      const id = nextCode('TT-2026-', DB.supplierPayments);
-      DB.supplierPayments.unshift({
-        id, poId: po.id, supplierId: po.supplierId, date: DB.today, amount,
-        method: payload.method, bankRef: payload.bankRef, note: payload.note,
-        createdBy: payload.createdBy, approvalRequestId: req.id,
-      });
-      render();
-      Toast.ok('Đã ghi nhận thanh toán sau khi duyệt xong', `${id} — ${fmtVND(amount)}`);
-    },
-    onRejected(req) {
-      Toast.warn('Yêu cầu thanh toán bị từ chối', req.title);
-    },
-  });
+  /* Kế toán là bộ phận ghi nhận thanh toán. Không ép PAYMENT đi qua một vòng
+   * phê duyệt khác, vì chính role Kế toán lại không có module Approvals và điều
+   * đó tạo lỗi "Không có quyền truy cập". Action supplier-pay-save đã được
+   * PurchaseAPI.wrapActions bọc để persistence KIO và app.js tự ghi sổ ngân hàng.
+   * Nếu sau này cần ngưỡng thanh toán lớn phải duyệt, hãy thiết kế workflow riêng
+   * có role người duyệt khác Kế toán thay vì chặn mọi khoản thanh toán. */
 
-  (function overrideSupplierPaySave() {
-    const originalSupplierPaySave = Actions['supplier-pay-save'];
-    Actions['supplier-pay-save'] = function (d, el, e) {
-      const po = Q.purchaseOrder(d.poid);
-      if (!po) return;
-      const amount = Number($('#payAmount')?.value) || 0;
-      const remain = po.total - po.paid;
-      if (amount <= 0) { Toast.err('Số tiền không hợp lệ', 'Vui lòng nhập số tiền lớn hơn 0.'); return; }
-      if (amount > remain) { Toast.err('Vượt quá dư nợ', `Số tiền nhập (${fmtVND(amount)}) vượt quá nợ còn lại (${fmtVND(remain)}).`); return; }
-      const method = $('#payMethod')?.value || '';
-      const bankRef = $('#payRef')?.value || '';
-      const note = $('#payNote')?.value.trim() || '';
-      const req = ApprovalEngine.create({ docType: 'PAYMENT', docId: po.id, title: `Thanh toán cho ${po.id} — ${Q.supplierName(po.supplierId)}`, amount, note });
-      if (!req) return;
-      req.payload = { poId: po.id, amount, method, bankRef, note, createdBy: DB.currentUser.id };
-      Modal.close();
-      go('approvals', { tab: 'pending' });
-      const lvl = ApprovalEngine.currentLevelOf(req);
-      Toast.info('Đã gửi yêu cầu duyệt thanh toán', `${req.id} · ${fmtVND(amount)} sẽ được ghi vào công nợ sau khi ${approvalRoleName(lvl.role)} duyệt xong.`);
-    };
-  })();
 }
 
 /* ============================================================================
