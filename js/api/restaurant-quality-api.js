@@ -26,6 +26,9 @@ const RestaurantQualityAPI = (() => {
     storeStockTransactions: ['restaurantStoreStockTransactions', RT.storeStockTransactions],
     // Dùng chung master tài khoản ngân hàng của Kế toán – Tài chính.
     bankAccounts: ['bankAccounts', RT.bankAccounts],
+    cashTransactions: ['cashTransactions', RT.cashTransactions],
+    bankTransactions: ['bankTransactions', RT.bankTransactions],
+    fixedAssets: ['fixedAssets', RT.fixedAssets],
   });
   const qualityMap = Object.freeze({
     coa: ['qualityCoa', QT.coa],

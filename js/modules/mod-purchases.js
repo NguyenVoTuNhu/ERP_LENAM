@@ -2515,7 +2515,7 @@ function openPaymentModal(poId) {
     body: `
       <div class="form-grid">
         <div class="field"><label>Số tiền thanh toán (VND) <span class="req">*</span></label>
-          <input class="inp right num" type="text" inputmode="numeric" id="payAmount" data-money="1" value="${remain}" /></div>
+          <input class="inp right num" type="text" inputmode="numeric" id="payAmount" data-money="1" value="${fmtMoneyInput(remain)}" /></div>
         <div class="field"><label>Ngày thanh toán</label><input class="inp" type="date" id="payDate" value="${typeof currentDateYMD==='function'?currentDateYMD():DB.today}" /></div>
         <div class="field"><label>Hình thức thanh toán</label>
           <select class="inp" id="payMethod"><option value="BANK_TRANSFER">Chuyển khoản ngân hàng</option><option value="CASH">Tiền mặt</option></select></div>

@@ -5605,7 +5605,7 @@ window.ERPDataWarmup = (() => {
   const purchaseKeys = () => Object.keys(KIO_CONFIG?.purchaseTables || {});
   const inventoryKeys = () => Object.keys(KIO_CONFIG?.inventoryTables || {});
   const crmKeys = () => Object.keys(KIO_CONFIG?.crmTables || {});
-  const restaurantKeys = ['stores','recipes','orders','replenishments','storeStocks','storeStockTransactions','bankAccounts'];
+  const restaurantKeys = ['stores','recipes','orders','replenishments','storeStocks','storeStockTransactions','bankAccounts','cashTransactions','bankTransactions','fixedAssets'];
   const qualityKeys = ['coa','capa','recalls'];
 
   async function hydrateCaches() {
@@ -5616,6 +5616,8 @@ window.ERPDataWarmup = (() => {
       typeof CRMAPI !== 'undefined' ? CRMAPI : null,
       typeof ProductionAPI !== 'undefined' ? ProductionAPI : null,
       typeof RestaurantQualityAPI !== 'undefined' ? RestaurantQualityAPI : null,
+      typeof HRAPI !== 'undefined' ? HRAPI : null,
+      typeof RNDApi !== 'undefined' ? RNDApi : null,
     ].filter(Boolean)) {
       if (typeof api.bootstrap === 'function') jobs.push(Promise.resolve().then(() => api.bootstrap()));
     }
@@ -5629,7 +5631,7 @@ window.ERPDataWarmup = (() => {
     if (typeof ProductionAPI !== 'undefined') jobs.push(ProductionAPI.ensureFresh(null).then(r=>{ window.SidebarBadges?.markReady?.('production'); return r; }));
     if (typeof InventoryAPI !== 'undefined') jobs.push(InventoryAPI.ensureFresh(['warehouses','materials','products','inventory','inventoryLots']));
     if (typeof CRMAPI !== 'undefined') jobs.push(CRMAPI.ensureFresh(['customers','orders','customerPayments']));
-    if (typeof RestaurantQualityAPI !== 'undefined') jobs.push(RestaurantQualityAPI.ensureFresh(['stores','recipes','orders','storeStocks']));
+    if (typeof RestaurantQualityAPI !== 'undefined') jobs.push(RestaurantQualityAPI.ensureFresh(['stores','recipes','orders','storeStocks','bankAccounts','cashTransactions','bankTransactions','fixedAssets']));
     await Promise.allSettled(jobs);
     if (typeof renderNav === 'function') renderNav();
     // Dashboard đang mở thì cập nhật số thật sau khi critical warm xong.
@@ -5645,6 +5647,8 @@ window.ERPDataWarmup = (() => {
       jobs.push(RestaurantQualityAPI.ensureFresh(restaurantKeys));
       jobs.push(RestaurantQualityAPI.ensureFresh(qualityKeys));
     }
+    if (typeof HRAPI !== 'undefined') jobs.push(HRAPI.ensureFresh(['employees']));
+    if (typeof RNDApi !== 'undefined') jobs.push(RNDApi.ensureFresh(Object.keys(KIO_CONFIG?.rndTables || {})));
     await Promise.allSettled(jobs);
     try { localStorage.setItem(KIO_CONFIG?.storageKeys?.globalWarmupStamp || 'lenam:kio:global-warmup:v1', String(Date.now())); } catch (_) {}
     console.info('[DataWarmup] Dữ liệu ERP đã được warm từ server; chuyển menu sẽ dùng cache chung.');

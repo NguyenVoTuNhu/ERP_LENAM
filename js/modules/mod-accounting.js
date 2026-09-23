@@ -21,13 +21,29 @@
  *  - Chi phí hoạt động khác (lương, điện nước, thuê mặt bằng…)
  * ==========================================================================*/
 
-/* ---------------------------------------------------------------- 0. DATA */
+/* ---------------------------------------------------------------- 0. DATA
+ * Theo đúng cấu trúc của mod-purchases.js: KHÔNG gán cứng dữ liệu demo cho
+ * bất kỳ collection nào được đồng bộ thật với KIO. mod-purchases.js chỉ dùng
+ * `DB.x = DB.x || []` (mảng rỗng) làm lá chắn tránh lỗi khi DB.x chưa tồn tại,
+ * và để nguyên cho PurchaseAPI.bootstrap()/ensureFresh() là nguồn dữ liệu
+ * duy nhất nạp lại các bản ghi thật từ server sau đó — không tự phát minh
+ * dữ liệu ở đây.
+ *
+ * Trước đây file này gán cứng dữ liệu demo bằng `DB.x || [demo...]`. Đoạn đó
+ * chạy ở top-level ngay khi <script> được parse — TRƯỚC CẢ khi bất kỳ
+ * bootstrap()/ensureFresh() nào của RestaurantQualityAPI kịp khôi phục cache
+ * hay gọi server. Vì DB là object mới hoàn toàn ở mỗi lần tải trang, DB.x luôn
+ * là undefined tại thời điểm này — kể cả sau F5 — nên nhánh demo luôn được
+ * gán, ghi đè lên trước khi dữ liệu thật kịp nạp lại. Đó là lý do tài khoản
+ * ngân hàng / tài sản cố định bị "nhảy" về dữ liệu demo ban đầu mỗi lần F5.
+ *
+ * bankAccounts và fixedAssets đã có đầy đủ form Thêm/Sửa nối với
+ * RestaurantQualityAPI.syncRestaurant(['bankAccounts'|'fixedAssets']) (xem
+ * hành động acc-bank-save / acc-asset-save bên dưới), nên không cần seed demo
+ * ở đây — giống hệt cách mod-purchases.js không seed sẵn supplierRefunds. */
 DB.customerPayments = DB.customerPayments || [];
 DB.cashTransactions = DB.cashTransactions || [];   // sổ thu-chi thủ công (không phải công nợ NCC/KH)
-DB.bankAccounts = DB.bankAccounts || [
-  { id: 'BANK-01', name: 'Vietcombank – TK thanh toán chính', bankName: 'Vietcombank', accountNumber: '0071000123456', accountName: 'CÔNG TY LÊ NAM', openingBalance: 850000000, scopeType: 'COMPANY', storeId: '', active: true, isDefault: true },
-  { id: 'BANK-02', name: 'ACB – TK thu hộ đại lý', bankName: 'ACB', accountNumber: '9988776655', accountName: 'CÔNG TY LÊ NAM', openingBalance: 120000000, scopeType: 'COMPANY', storeId: '', active: true, isDefault: false },
-];
+DB.bankAccounts = DB.bankAccounts || [];
 DB.bankTransactions = DB.bankTransactions || [];
 
 /* ---------------------------------------------------------------------------
@@ -115,21 +131,6 @@ DB.fixedAssets = DB.fixedAssets || [
   { id: 'TS-005', name: 'Xe tải giao hàng 51C-123.45', dept: 'Kho vận', purchaseDate: '2018-05-05', cost: 620000000, usefulYears: 10, status: 'active' },
 ];
 DB.accountingSettings = DB.accountingSettings || { corporateTaxRatePct: 20, opexCategories: ['Lương & BHXH', 'Điện nước', 'Thuê mặt bằng', 'Vận chuyển', 'Marketing', 'Khác'] };
-
-/* Nạp một lần dữ liệu Thu tiền khách hàng từ lịch sử hợp đồng đã có, để màn
- * Thu-Chi và Cashflow không trống ngay từ đầu (không tạo nghiệp vụ mới). */
-if (!DB.customerPayments.length) {
-  DB.contracts.forEach((c) => {
-    if (c.paid > 0) {
-      DB.customerPayments.push({
-        id: nextCode('TT-KH-2026-', DB.customerPayments),
-        customerId: c.customerId, contractId: c.id,
-        date: c.signDate, amount: c.paid, method: 'Chuyển khoản',
-        note: `Thu theo hợp đồng ${c.id}`,
-      });
-    }
-  });
-}
 
 /* ------------------------------------------------------------ 1. TÍNH TOÁN */
 const AccFin = {
@@ -1461,6 +1462,7 @@ Views.accounting.after = function () { if ((State.tab || 'dashboard') === 'dashb
 Object.assign(Actions, {
   'acc-cash-add': (d) => openCashTxForm(d.type),
   'acc-cash-save': async (d) => {
+  'acc-cash-save': async (d) => {
     const date = $('#ctxDate')?.value || currentDateYMD();
     const amount = parseMoney($('#ctxAmount')?.value) || 0;
     if (amount <= 0) { Toast.err('Số tiền không hợp lệ', 'Vui lòng nhập số tiền lớn hơn 0.'); return; }
@@ -1517,6 +1519,7 @@ Object.assign(Actions, {
   },
   'acc-bank-tx-add': (d) => openBankTxForm(d.id),
   'acc-bank-tx-save': async (d) => {
+  'acc-bank-tx-save': async (d) => {
     const amount = parseMoney($('#bkTxAmount')?.value) || 0;
     if (amount <= 0) { Toast.err('Số tiền không hợp lệ', 'Vui lòng nhập số tiền lớn hơn 0.'); return; }
     try {
@@ -1530,21 +1533,38 @@ Object.assign(Actions, {
 
   'acc-asset-add': () => openFixedAssetForm(),
   'acc-asset-edit': (d) => openFixedAssetForm(d.id),
-  'acc-asset-save': (d) => {
+  'acc-asset-save': async (d) => {
     const name = $('#faName')?.value.trim();
     const cost = parseMoney($('#faCost')?.value) || 0;
     if (!name || cost <= 0) { Toast.err('Thiếu thông tin', 'Vui lòng nhập tên tài sản và nguyên giá lớn hơn 0.'); return; }
     const payload = { name, dept: $('#faDept')?.value || '', purchaseDate: $('#faDate')?.value || currentDateYMD(), cost, usefulYears: Number($('#faYears')?.value) || 8 };
+    const before = JSON.parse(JSON.stringify(DB.fixedAssets || []));
     if (d.id) {
       Object.assign(DB.fixedAssets.find((a) => a.id === d.id), payload);
     } else {
       DB.fixedAssets.push({ id: nextCode('TS-', DB.fixedAssets), status: 'active', ...payload });
     }
-    Modal.close(); render(); Toast.ok(d.id ? 'Đã cập nhật tài sản' : 'Đã thêm tài sản', name);
+    try {
+      if (typeof RestaurantQualityAPI !== 'undefined') await RestaurantQualityAPI.syncRestaurant(['fixedAssets']);
+      Modal.close(); render(); Toast.ok(d.id ? 'Đã cập nhật tài sản' : 'Đã thêm tài sản', name);
+    } catch (err) {
+      DB.fixedAssets = before;
+      Toast.err('Không lưu được lên server', err?.message || 'Vui lòng thử lại.');
+    }
   },
   'acc-asset-delete': (d) => {
     const a = DB.fixedAssets.find((x) => x.id === d.id); if (!a) return;
-    confirmBox({ title: 'Xóa tài sản cố định', icon: 'fa-trash', okText: 'Xóa', message: `Xóa tài sản <b>${esc(a.name)}</b>?`, onOk: () => { DB.fixedAssets = DB.fixedAssets.filter((x) => x.id !== d.id); render(); Toast.ok('Đã xóa tài sản', a.name); } });
+    confirmBox({ title: 'Xóa tài sản cố định', icon: 'fa-trash', okText: 'Xóa', message: `Xóa tài sản <b>${esc(a.name)}</b>?`, onOk: async () => {
+      const before = JSON.parse(JSON.stringify(DB.fixedAssets || []));
+      try {
+        if (typeof RestaurantQualityAPI !== 'undefined') await RestaurantQualityAPI.deleteRestaurant('fixedAssets', d.id);
+        else DB.fixedAssets = DB.fixedAssets.filter((x) => x.id !== d.id);
+        render(); Toast.ok('Đã xóa tài sản', a.name);
+      } catch (err) {
+        DB.fixedAssets = before;
+        Toast.err('Không xóa được trên server', err?.message || 'Vui lòng thử lại.');
+      }
+    } });
   },
 });
 

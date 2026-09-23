@@ -104,14 +104,29 @@ function approvalMySignature() {
   return (DB.eSignatures || []).find((s) => s.userId === uid);
 }
 function approvalLog(requestId, docType, docId, level, action, note) {
-  DB.approvalLogs.unshift({
+  const entry = {
     id: nextCode('NKPD-', DB.approvalLogs),
     requestId, docType, docId, level, action,
     actorId: DB.currentUser?.userId || DB.currentUser?.id || '',
     actorName: DB.currentUser?.name || '',
     time: new Date().toISOString(),
     note: note || '',
-  });
+  };
+  DB.approvalLogs.unshift(entry);
+
+  // Persistence thật: nhật ký phê duyệt là append-only nên ghi thẳng record
+  // mới lên KIO, không cần đồng bộ lại toàn bộ collection.
+  if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.appendLogs([entry]).catch(() => {});
+
+  // Đồng thời đưa vào nhật ký chung của hệ thống (giống Purchases/CRM) để
+  // Quản trị viên xem được mọi hành động phê duyệt trong 1 màn Audit Log.
+  if (typeof SystemAPI !== 'undefined') {
+    SystemAPI.audit({
+      module: 'APPROVALS', entityType: 'APPROVAL_REQUEST', entityId: requestId,
+      action, description: `${entry.actorName || 'Người dùng'} ${approvalActionLabel(action)} — ${docId || requestId}${note ? ': ' + note : ''}`,
+      newData: { docType, docId, level, action },
+    }).catch(() => {});
+  }
 }
 function approvalIsOverdue(req) {
   return req.status === 'PENDING' && new Date() > new Date(req.dueAt);
@@ -172,6 +187,7 @@ const ApprovalEngine = {
     };
     DB.approvalRequests.unshift(req);
     approvalLog(req.id, docType, req.docId, levels[0].level, 'CREATE', `Tạo yêu cầu phê duyệt${req.amount ? ' — ' + fmtVND(req.amount) : ''}`);
+    if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.scheduleCollections(['requests']);
     return req;
   },
 
@@ -215,6 +231,7 @@ const ApprovalEngine = {
       try { this.handlers[req.docType]?.onApproved?.(req); }
       catch (err) { console.error('[ApprovalEngine] onApproved lỗi:', err); Toast.err('Duyệt xong nhưng áp dụng thất bại', String(err?.message || err)); }
     }
+    if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.scheduleCollections(['requests']);
     return true;
   },
 
@@ -235,6 +252,7 @@ const ApprovalEngine = {
     Toast.warn('Đã từ chối yêu cầu', req.title);
     try { this.handlers[req.docType]?.onRejected?.(req); }
     catch (err) { console.error('[ApprovalEngine] onRejected lỗi:', err); }
+    if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.scheduleCollections(['requests']);
     return true;
   },
 
@@ -244,6 +262,7 @@ const ApprovalEngine = {
     req.status = 'CANCELLED';
     req.completedAt = new Date().toISOString();
     approvalLog(req.id, req.docType, req.docId, req.currentLevel, 'CANCEL', reason || '');
+    if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.scheduleCollections(['requests']);
     return true;
   },
 };
@@ -671,6 +690,14 @@ Object.assign(Actions, {
     if (!levels.length) { Toast.err('Thiếu cấp duyệt', 'Quy trình phải có ít nhất một cấp phê duyệt.'); return; }
     w.slaHours = sla > 0 ? sla : 24;
     w.levels = levels;
+    if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.scheduleCollections(['workflows']);
+    if (typeof SystemAPI !== 'undefined') {
+      SystemAPI.audit({
+        module: 'APPROVALS', entityType: 'APPROVAL_WORKFLOW', entityId: w.id, action: 'UPDATE',
+        description: `${DB.currentUser?.name || 'Người dùng'} cập nhật quy trình phê duyệt ${(APPROVAL_DOC_TYPES[w.docType] || {}).label || w.docType}`,
+        newData: { slaHours: w.slaHours, levels: w.levels },
+      }).catch(() => {});
+    }
     Modal.close(); render();
     Toast.ok('Đã lưu quy trình phê duyệt', `${(APPROVAL_DOC_TYPES[w.docType] || {}).label || w.docType}`);
   },
@@ -682,12 +709,21 @@ Object.assign(Actions, {
     let sig = (DB.eSignatures || []).find((s) => s.userId === uid);
     const code = approvalDjb2(fullName + uid + Date.now());
     const preview = approvalSignText(fullName);
+    const isNew = !sig;
     if (sig) { Object.assign(sig, { fullName, code, preview }); }
     else { sig = { userId: uid, fullName, code, preview, createdAt: new Date().toISOString() }; DB.eSignatures.unshift(sig); }
+    if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.scheduleCollections(['signatures']);
+    if (typeof SystemAPI !== 'undefined') {
+      SystemAPI.audit({
+        module: 'APPROVALS', entityType: 'E_SIGNATURE', entityId: uid, action: isNew ? 'CREATE' : 'UPDATE',
+        description: `${DB.currentUser?.name || 'Người dùng'} ${isNew ? 'đăng ký' : 'cập nhật'} chữ ký điện tử: ${fullName}`,
+      }).catch(() => {});
+    }
     render();
     Toast.ok('Đã lưu chữ ký điện tử', fullName);
   },
 });
+<<<<<<< HEAD
 
 /* ---------------------------------------------------------------------------
  * 8. NỐI PR / PO / THANH TOÁN VÀO QUY TRÌNH PHÊ DUYỆT NHIỀU CẤP
@@ -857,3 +893,5 @@ if (APPROVAL_INTEGRATE_PURCHASE_FLOW) {
  *    vì đổi trạng thái ngay, rồi ApprovalEngine.registerHandler(docType, {
  *    onApproved, onRejected }) để thực thi thay đổi thật khi duyệt xong.
  * ==========================================================================*/
+=======
+>>>>>>> b2989ce7c324b2717c420ccc7c7638a8af6466b1
