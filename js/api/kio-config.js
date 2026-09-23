@@ -74,6 +74,28 @@ const KIO_CONFIG = Object.freeze({
     storeStocks: 'lenam_restaurant_store_stock',
     storeStockTransactions: 'lenam_restaurant_store_stock_transactions',
     bankAccounts: 'lenam_restaurant_bank_accounts',
+    // Kế toán – Tài chính: trước bản này 3 bảng dưới đây không có tên bảng KIO
+    // nào cả, nên acc-cash-save/acc-bank-tx-save/acc-asset-save chỉ ghi vào
+    // DB trong bộ nhớ rồi mất sạch mỗi khi F5.
+    cashTransactions: 'lenam_restaurant_cash_transactions',
+    bankTransactions: 'lenam_restaurant_bank_transactions',
+    fixedAssets: 'lenam_restaurant_fixed_assets',
+  }),
+
+  // NHÂN SỰ (HR) — persistence thật trên KIO; trước bản này DB.employees chỉ
+  // sống trong bộ nhớ nên mọi thay đổi (thêm/sửa/khóa/import NV) mất khi F5.
+  hrTables: Object.freeze({
+    employees: 'lenam_hr_employees',
+  }),
+
+  // R&D — dự án nghiên cứu, công thức thử nghiệm, thử nghiệm, chi phí, duyệt.
+  rndTables: Object.freeze({
+    rndProjects: 'lenam_rnd_projects',
+    rndFormulas: 'lenam_rnd_formulas',
+    rndFormulaVersions: 'lenam_rnd_formula_versions',
+    rndTrials: 'lenam_rnd_trials',
+    rndCosts: 'lenam_rnd_costs',
+    rndApprovals: 'lenam_rnd_approvals',
   }),
 
   // QC/QA — hồ sơ kiểm nghiệm, CAPA, thu hồi sản phẩm.
@@ -81,6 +103,14 @@ const KIO_CONFIG = Object.freeze({
     coa: 'lenam_quality_inspection_records',
     capa: 'lenam_quality_capa',
     recalls: 'lenam_quality_product_recalls',
+  }),
+
+  // PHÊ DUYỆT (APPROVALS) — quy trình nhiều cấp, nhật ký, chữ ký điện tử.
+  approvalTables: Object.freeze({
+    workflows: 'lenam_approval_workflows',
+    requests: 'lenam_approval_requests',
+    logs: 'lenam_approval_logs',
+    signatures: 'lenam_approval_signatures',
   }),
 
   // AUTH / PHÂN QUYỀN / AUDIT — chỉ những actor thực sự thao tác ERP mới có tài khoản.
@@ -105,6 +135,12 @@ const KIO_CONFIG = Object.freeze({
     systemCache: 'lenam:kio:system-cache:v1',
     restaurantCache: 'lenam:kio:restaurant-cache:v1',
     qualityCache: 'lenam:kio:quality-cache:v1',
+    approvalCache: 'lenam:kio:approval-cache:v1',
+    approvalDemoSeed: 'lenam:kio:approval-demo-seeded:20260923-approvals-v1',
+    hrCache: 'lenam:kio:hr-cache:v1',
+    hrDemoSeed: 'lenam:kio:hr-demo-seeded:20260923-hr-tables-v1',
+    rndCache: 'lenam:kio:rnd-cache:v1',
+    rndDemoSeed: 'lenam:kio:rnd-demo-seeded:20260923-rnd-tables-v1',
     globalWarmupStamp: 'lenam:kio:global-warmup:v1',
     authSession: 'lenam:auth:session:v1',
   }),

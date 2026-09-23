@@ -2882,23 +2882,36 @@ const Actions = {
       return;
     }
 
-    // [APPROVAL ENGINE] Nút "Duyệt" không còn đổi trạng thái ngay — nó chỉ
-    // tạo (hoặc mở lại) một yêu cầu trong quy trình phê duyệt nhiều cấp.
-    // Việc đổi PR sang 'mh_da_duyet' chỉ chạy trong handler onApproved của
-    // ApprovalEngine (đăng ký ở cuối file) — tức là SAU KHI đã đi hết mọi
-    // cấp duyệt đã cấu hình. Nếu bị từ chối ở bất kỳ cấp nào, onRejected sẽ
-    // đưa PR về đúng trạng thái "đã từ chối".
-    let req = ApprovalEngine.pendingFor('PR', p.id);
-    if (!req) {
-      req = ApprovalEngine.create({ docType: 'PR', docId: p.id, title: `Đề nghị mua hàng ${p.id}`, amount: p.total, note: p.reason });
-      if (!req) return;
-      p.approvalRequestId = req.id;
-    }
+    // Cập nhật trạng thái PR
+    p.status = 'mh_da_duyet';
+    p.approvedBy = DB.currentUser.id;
+    p.approvedByUserId = DB.currentUser.userId || '';
+    p.approvedByName = DB.currentUser.name || '';
+    p.approvedAt = new Date().toISOString();
+    if (typeof SystemAPI !== 'undefined') SystemAPI.audit({module:'PURCHASE',entityType:'PURCHASE_REQUEST',entityId:p.id,action:'APPROVE',description:`${DB.currentUser.name} phê duyệt ${p.id}`,newData:{status:p.status}});
+
+    // Ghi lịch sử phê duyệt
+    DB.purchaseApprovals.unshift({
+      id: nextCode('PA-', DB.purchaseApprovals),
+      prId: p.id,
+      approverId: DB.currentUser.id,
+      time: DB.today + ' 09:00',
+      action: 'approve',
+      prevStatus: 'mh_cho_duyet',
+      nextStatus: 'mh_da_duyet',
+      note: 'Đã phê duyệt đề nghị mua hàng',
+    });
 
     Modal.close();
-    go('approvals', { tab: 'pending' });
-    const lvl = ApprovalEngine.currentLevelOf(req);
-    Toast.info('Đã chuyển sang quy trình phê duyệt', `${req.id} · Đang chờ: ${approvalRoleName(lvl.role)}`);
+
+    // ⭐ Duyệt xong → tự động chuyển sang Báo giá NCC
+    F('purchases').prId = p.id;
+    go('purchases', { tab: 'quotes' });
+
+    Toast.ok(
+      'Đã phê duyệt Đề nghị mua hàng',
+      `${p.id} · Chuyển sang Báo giá NCC`
+    );
   },
 
   'pr-reject-modal': (d) => {
@@ -2927,10 +2940,6 @@ const Actions = {
       time: DB.today + ' 09:00', action: 'reject', prevStatus: 'mh_cho_duyet', nextStatus: 'mh_tu_choi',
       note: reason,
     });
-    // Nếu PR này đang có một yêu cầu phê duyệt PENDING (đã gửi qua quy trình
-    // nhiều cấp) thì hủy luôn để không treo trong danh sách "Việc cần duyệt".
-    const pendingReq = ApprovalEngine.pendingFor('PR', p.id);
-    if (pendingReq) ApprovalEngine.cancel(pendingReq.id, 'PR bị từ chối trực tiếp ngoài quy trình nhiều cấp');
     Modal.close(); render();
     Toast.warn('Đã từ chối Đề nghị mua', `${p.id} — Lý do: ${reason}`);
   },
@@ -3325,17 +3334,12 @@ const Actions = {
     }
     const po = Q.purchaseOrder(d.id);
     if (!po || po.status !== 'PENDING_APPROVAL') return;
-    // [APPROVAL ENGINE] Cũng như PR: chỉ tạo/mở lại yêu cầu phê duyệt nhiều
-    // cấp. PO chỉ thật sự chuyển 'APPROVED' trong handler onApproved.
-    let req = ApprovalEngine.pendingFor('PO', po.id);
-    if (!req) {
-      req = ApprovalEngine.create({ docType: 'PO', docId: po.id, title: `Đơn đặt hàng ${po.id} — ${Q.supplierName(po.supplierId)}`, amount: po.total, note: po.note });
-      if (!req) return;
-    }
+    po.status = 'APPROVED';
+    const pr = Q.purchase(po.prId);
+    if (pr) pr.status = 'mh_da_dat_hang';
     Modal.close();
-    go('approvals', { tab: 'pending' });
-    const lvl = ApprovalEngine.currentLevelOf(req);
-    Toast.info('Đã chuyển sang quy trình phê duyệt', `${req.id} · Đang chờ: ${approvalRoleName(lvl.role)}`);
+    go('purchases', { tab: 'po' });
+    Toast.ok('Đã duyệt đơn mua hàng', `${po.id} · Có thể gửi cho nhà cung cấp`);
   },
 
   'open-po': (d) => openPOModal(d.id),
@@ -3875,17 +3879,14 @@ const Actions = {
     State.page.purchases = 1; render();
   },
   'supplier-pay-modal': (d) => openPaymentModal(d.id),
-  // [APPROVAL ENGINE] Ghi nhận thanh toán không còn chạy ngay: form chỉ kiểm
-  // tra dữ liệu hợp lệ rồi gửi một yêu cầu phê duyệt nhiều cấp (docType
-  // 'PAYMENT'). po.paid và DB.supplierPayments chỉ được cập nhật trong
-  // handler onApproved (đăng ký ở cuối file) — tức là SAU KHI duyệt xong.
   'supplier-pay-save': (d) => {
     const po = Q.purchaseOrder(d.poid);
     if (!po) return;
-    const amount = parseMoney($('#payAmount')?.value) || 0;
+    const amount = parseMoney($('#payAmount').value) || 0;
     const remain = typeof purchasePayableRemaining==='function' ? purchasePayableRemaining(po) : Math.max(0, Number(po.total || 0) - Number(po.paid || 0));
     if (amount <= 0) { Toast.err('Số tiền không hợp lệ', 'Vui lòng nhập số tiền lớn hơn 0.'); return; }
     if (amount > remain) { Toast.err('Vượt quá dư nợ', `Số tiền nhập (${fmtVND(amount)}) vượt quá nợ còn lại (${fmtVND(remain)}).`); return; }
+    const id = nextCode('TT-2026-', DB.supplierPayments);
     const payerId = $('#payPayer')?.value || '';
     const payer = (DB.employees || []).find(e => String(e.id) === String(payerId));
     const payerName = payer?.name || payer?.fullName || ((String(payerId)===String(DB.currentUser?.userId||DB.currentUser?.id)) ? ((String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||'')) : Q.employeeName(payerId));
@@ -3894,22 +3895,14 @@ const Actions = {
     const bank = (DB.bankAccounts || []).find(b => String(b.id) === String(bankId));
     if (!payerId) { Toast.err('Chưa chọn người thực hiện', 'Vui lòng chọn người thực hiện thanh toán.'); return; }
     if (method === 'BANK_TRANSFER' && !bankId) { Toast.err('Chưa chọn ngân hàng', 'Vui lòng chọn tài khoản ngân hàng dùng để thanh toán.'); return; }
-    const note = $('#payNote')?.value || '';
-    const req = ApprovalEngine.create({ docType: 'PAYMENT', docId: po.id, title: `Thanh toán cho ${po.id} — ${Q.supplierName(po.supplierId)}`, amount, note });
-    if (!req) return;
-    req.payload = {
-      poId: po.id, amount,
-      date: $('#payDate')?.value || (typeof currentDateYMD==='function'?currentDateYMD():DB.today),
-      method: method === 'BANK_TRANSFER' ? 'Chuyển khoản' : 'Tiền mặt',
-      bankId, bankName: bank?.name || bank?.bankName || '', bankAccount: bank?.accountNumber || '',
-      payerId, payerName, bankRef: $('#payRef')?.value || '', note,
-      createdBy: DB.currentUser?.userId || DB.currentUser?.id || '',
-      createdByName: (String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''),
-    };
-    Modal.close();
-    go('approvals', { tab: 'pending' });
-    const lvl = ApprovalEngine.currentLevelOf(req);
-    Toast.info('Đã gửi yêu cầu duyệt thanh toán', `${req.id} · ${fmtVND(amount)} sẽ được ghi vào công nợ sau khi ${approvalRoleName(lvl.role)} duyệt xong.`);
+    po.paid = Math.round(Number(po.paid || 0) + amount);
+    DB.supplierPayments.unshift({
+      id, poId: po.id, supplierId: po.supplierId, date: $('#payDate')?.value || (typeof currentDateYMD==='function'?currentDateYMD():DB.today), amount,
+      method: method === 'BANK_TRANSFER' ? 'Chuyển khoản' : 'Tiền mặt', bankId, bankName: bank?.name || bank?.bankName || '', bankAccount: bank?.accountNumber || '',
+      payerId, payerName, bankRef: $('#payRef')?.value || '', note: $('#payNote')?.value || '', createdBy: DB.currentUser?.userId || DB.currentUser?.id || '', createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''), createdAt: new Date().toISOString(),
+    });
+    Modal.close(); if(State.module==='accounting') go('accounting',{tab:'ap'}); else go('purchases',{tab:'debts'}); render();
+    Toast.ok('Ghi nhận thanh toán thành công', `${id} — ${fmtVND(amount)}`);
   },
   'export-pr': (d) => Exporter.pdf('Yeu-cau-mua-hang-' + d.id),
 
@@ -5141,9 +5134,24 @@ function routeRefreshPlan(module, tab) {
     return { api: typeof RestaurantQualityAPI !== 'undefined' ? RestaurantQualityAPI : null, keys: map[tab] || map.dashboard, deferred: true };
   }
 
-  if (module === 'accounting' && tab === 'banking') {
-    return { api: typeof RestaurantQualityAPI !== 'undefined' ? RestaurantQualityAPI : null, keys: ['stores','bankAccounts'], deferred: true };
-  }
+  if (module === 'accounting') {
+  return {
+    api:
+      typeof RestaurantQualityAPI !== 'undefined'
+        ? RestaurantQualityAPI
+        : null,
+
+    keys: [
+      'stores',
+      'bankAccounts',
+      'bankTransactions',
+      'cashTransactions',
+      'fixedAssets'
+    ],
+
+    deferred: true
+  };
+}
 
   if (module === 'quality') {
     const map = { coa: ['coa'], capa: ['capa'], recall: ['recalls'] };
@@ -5155,6 +5163,96 @@ function routeRefreshPlan(module, tab) {
     return {
       api: typeof ProductionAPI !== 'undefined' ? ProductionAPI : null,
       keys: ['productionOrders', 'productionPlans', 'productionMaterialRequests'],
+    };
+  }
+
+  if (module === 'hr') {
+    return {
+      api: typeof HRAPI !== 'undefined' ? HRAPI : null,
+      keys: ['employees'],
+    };
+  }
+
+  if (module === 'rnd') {
+    const map = {
+      dashboard: ['rndProjects', 'rndApprovals'],
+      projects: ['rndProjects', 'rndApprovals'],
+      formula: ['rndFormulas', 'rndFormulaVersions'],
+      versions: ['rndFormulaVersions', 'rndFormulas'],
+      trials: ['rndTrials', 'rndFormulaVersions'],
+      costs: ['rndCosts', 'rndProjects'],
+      npd: ['rndProjects', 'rndApprovals'],
+      approvals: ['rndProjects', 'rndApprovals'],
+      reports: ['rndProjects', 'rndFormulaVersions', 'rndCosts'],
+    };
+    return {
+      api: typeof RNDApi !== 'undefined' ? RNDApi : null,
+      keys: map[tab] || Object.keys(KIO_CONFIG?.rndTables || {}),
+    };
+  }
+
+  if (module === 'accounting') {
+    const map = {
+      dashboard: [
+        'cashTransactions',
+        'bankAccounts',
+        'bankTransactions',
+        'fixedAssets'
+      ],
+
+      cashflow_inout: [
+        'cashTransactions'
+      ],
+
+      banking: [
+        'bankAccounts',
+        'bankTransactions'
+      ],
+
+      fixed_assets: [
+        'fixedAssets'
+      ],
+
+      ar: [],
+      ap: [],
+      costing: [],
+      tax: [],
+      budget: [],
+      pnl: [
+        'cashTransactions',
+        'bankTransactions'
+      ],
+      balance_sheet: [
+        'bankAccounts',
+        'fixedAssets'
+      ],
+      cashflow: [
+        'cashTransactions',
+        'bankTransactions'
+      ],
+      general_ledger: [
+        'cashTransactions',
+        'bankTransactions',
+        'fixedAssets'
+      ],
+      reports: [
+        'cashTransactions',
+        'bankTransactions',
+        'fixedAssets'
+      ],
+      reports_hub: [
+        'cashTransactions',
+        'bankTransactions',
+        'fixedAssets'
+      ]
+    };
+
+    return {
+      api: typeof RestaurantQualityAPI !== 'undefined'
+        ? RestaurantQualityAPI
+        : null,
+      keys: map[tab] || map.dashboard,
+      deferred: false
     };
   }
 
@@ -5177,7 +5275,7 @@ window.ERPDataWarmup = (() => {
   const purchaseKeys = () => Object.keys(KIO_CONFIG?.purchaseTables || {});
   const inventoryKeys = () => Object.keys(KIO_CONFIG?.inventoryTables || {});
   const crmKeys = () => Object.keys(KIO_CONFIG?.crmTables || {});
-  const restaurantKeys = ['stores','recipes','orders','replenishments','storeStocks','storeStockTransactions','bankAccounts'];
+  const restaurantKeys = ['stores','recipes','orders','replenishments','storeStocks','storeStockTransactions','bankAccounts','cashTransactions','bankTransactions','fixedAssets'];
   const qualityKeys = ['coa','capa','recalls'];
 
   async function hydrateCaches() {
@@ -5188,6 +5286,8 @@ window.ERPDataWarmup = (() => {
       typeof CRMAPI !== 'undefined' ? CRMAPI : null,
       typeof ProductionAPI !== 'undefined' ? ProductionAPI : null,
       typeof RestaurantQualityAPI !== 'undefined' ? RestaurantQualityAPI : null,
+      typeof HRAPI !== 'undefined' ? HRAPI : null,
+      typeof RNDApi !== 'undefined' ? RNDApi : null,
     ].filter(Boolean)) {
       if (typeof api.bootstrap === 'function') jobs.push(Promise.resolve().then(() => api.bootstrap()));
     }
@@ -5201,7 +5301,7 @@ window.ERPDataWarmup = (() => {
     if (typeof ProductionAPI !== 'undefined') jobs.push(ProductionAPI.ensureFresh(null).then(r=>{ window.SidebarBadges?.markReady?.('production'); return r; }));
     if (typeof InventoryAPI !== 'undefined') jobs.push(InventoryAPI.ensureFresh(['warehouses','materials','products','inventory','inventoryLots']));
     if (typeof CRMAPI !== 'undefined') jobs.push(CRMAPI.ensureFresh(['customers','orders','customerPayments']));
-    if (typeof RestaurantQualityAPI !== 'undefined') jobs.push(RestaurantQualityAPI.ensureFresh(['stores','recipes','orders','storeStocks']));
+    if (typeof RestaurantQualityAPI !== 'undefined') jobs.push(RestaurantQualityAPI.ensureFresh(['stores','recipes','orders','storeStocks','bankAccounts','cashTransactions','bankTransactions','fixedAssets']));
     await Promise.allSettled(jobs);
     if (typeof renderNav === 'function') renderNav();
     // Dashboard đang mở thì cập nhật số thật sau khi critical warm xong.
@@ -5217,6 +5317,8 @@ window.ERPDataWarmup = (() => {
       jobs.push(RestaurantQualityAPI.ensureFresh(restaurantKeys));
       jobs.push(RestaurantQualityAPI.ensureFresh(qualityKeys));
     }
+    if (typeof HRAPI !== 'undefined') jobs.push(HRAPI.ensureFresh(['employees']));
+    if (typeof RNDApi !== 'undefined') jobs.push(RNDApi.ensureFresh(Object.keys(KIO_CONFIG?.rndTables || {})));
     await Promise.allSettled(jobs);
     try { localStorage.setItem(KIO_CONFIG?.storageKeys?.globalWarmupStamp || 'lenam:kio:global-warmup:v1', String(Date.now())); } catch (_) {}
     console.info('[DataWarmup] Dữ liệu ERP đã được warm từ server; chuyển menu sẽ dùng cache chung.');
