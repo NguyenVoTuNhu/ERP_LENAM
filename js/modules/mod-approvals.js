@@ -858,7 +858,7 @@ if (APPROVAL_INTEGRATE_PURCHASE_FLOW) {
     Actions['supplier-pay-save'] = function (d, el, e) {
       const po = Q.purchaseOrder(d.poid);
       if (!po) return;
-      const amount = Number($('#payAmount')?.value) || 0;
+      const amount = parseMoney($('#payAmount')?.value) || 0;
       const remain = po.total - po.paid;
       if (amount <= 0) { Toast.err('Số tiền không hợp lệ', 'Vui lòng nhập số tiền lớn hơn 0.'); return; }
       if (amount > remain) { Toast.err('Vượt quá dư nợ', `Số tiền nhập (${fmtVND(amount)}) vượt quá nợ còn lại (${fmtVND(remain)}).`); return; }
