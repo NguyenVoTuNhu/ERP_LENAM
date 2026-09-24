@@ -807,7 +807,8 @@ const InventoryAPI = (() => {
           const purchaseKeysByAction = {
             'warehouse-receipt-save': ['goodsReceipts'],
             'iqc-save-inspection': ['goodsReceipts', 'purchaseOrders'],
-            'inv-return-confirm-issue': ['purchaseOrders'],
+            // inv-return-confirm-issue persist purchaseOrders ngay trong action để
+            // Mua hàng/F5 thấy trạng thái trả NCC tức thời; không schedule trùng.
           };
           const purchaseKeys = purchaseKeysByAction[name];
           if (purchaseKeys && typeof PurchaseAPI !== 'undefined') {

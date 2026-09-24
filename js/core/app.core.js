@@ -158,6 +158,11 @@ const Auth = {
     // các nút thao tác bên trong vẫn kiểm tra permission riêng như cũ.
     if (module === 'production-detail') module = 'production';
 
+    // Các màn chi tiết bán hàng là route con của CRM, không phải module
+    // phân quyền độc lập. Nếu không map về `crm`, Trưởng Kinh doanh có
+    // quyền CRM/SALES_APPROVE vẫn bị chặn khi mở chi tiết đơn hàng.
+    if (module === 'order-detail') module = 'crm';
+
     const role=this.currentRole();
     if (!role) return false;
     const modules=role.modules || {};
@@ -182,6 +187,7 @@ const Auth = {
       ROLE_PRODUCTION:       { module:'production',     tab:'dashboard' },
       ROLE_QC:               { module:'quality',        tab:'dashboard' },
       ROLE_SALES:            { module:'crm',            tab:'dashboard' },
+      ROLE_SALES_MANAGER:    { module:'crm',            tab:'dashboard' },
       ROLE_ACCOUNTING:       { module:'accounting',     tab:'dashboard' },
       ROLE_HR:               { module:'hr',             tab:'dashboard' },
       ROLE_MAINTENANCE:      { module:'maintenance',    tab:'dashboard' },
@@ -219,7 +225,7 @@ const Auth = {
       'warehouse-receipt-save':'INVENTORY_OPERATE','po-goods-receipt-save':'INVENTORY_OPERATE','subcontracting-warehouse':'INVENTORY_OPERATE',
       'material-request':'PURCHASE_PR_CREATE',
       'iqc-save-inspection':'QC_INSPECT','iqc-open-inspection':'QC_VIEW','pqc-open':'QC_VIEW','pqc-save':'QC_INSPECT','po-qc':'QC_INSPECT',
-      'new-po':'PRODUCTION_OPERATE','po-edit':'PRODUCTION_OPERATE','po-edit-save':'PRODUCTION_OPERATE','po-delete':'PRODUCTION_OPERATE','po-approve':'PRODUCTION_OPERATE','po-advance':'PRODUCTION_OPERATE','stage-start':'PRODUCTION_OPERATE','stage-update':'PRODUCTION_OPERATE','stage-save':'PRODUCTION_OPERATE',
+      'new-po':'PRODUCTION_OPERATE','po-edit':'PRODUCTION_OPERATE','po-edit-save':'PRODUCTION_OPERATE','po-delete':'PRODUCTION_OPERATE','po-approve':'PRODUCTION_OPERATE','po-advance':'PRODUCTION_OPERATE','stage-start':'PRODUCTION_OPERATE','stage-update':'PRODUCTION_OPERATE','stage-save':'PRODUCTION_OPERATE','pqc-rework-done':'PRODUCTION_OPERATE',
       'edit-customer':'CRM_OPERATE','save-customer':'CRM_OPERATE','customer-care':'CRM_OPERATE','save-customer-care':'CRM_OPERATE','delete-customer':'CRM_DELETE_CUSTOMER',
       'new-order':'SALES_ORDER_OPERATE','new-order-for':'SALES_ORDER_OPERATE','crm-order-save':'SALES_ORDER_OPERATE','crm-order-edit':'SALES_ORDER_OPERATE','crm-order-edit-save':'SALES_ORDER_OPERATE','crm-order-delete':'SALES_ORDER_OPERATE','crm-customer-pay-modal':'CRM_OPERATE','crm-customer-pay-save':'CRM_OPERATE',
       'crm-order-approve':'SALES_APPROVE','crm-order-reject':'SALES_APPROVE','sales-production-request':'SALES_ORDER_OPERATE','sales-production-request-approve':'SALES_APPROVE',
@@ -881,9 +887,9 @@ function go(module, params = {}) {
     State.tab = params.tab || null;
   }
 
-  const hash = State.tab
-    ? `${module}/${State.tab}`
-    : module;
+  const hash = module === 'production-detail' && params.id
+    ? `${module}/${encodeURIComponent(params.id)}`
+    : (State.tab ? `${module}/${State.tab}` : module);
 
   if (location.hash.replace('#', '') !== hash) {
     try {
@@ -894,10 +900,11 @@ function go(module, params = {}) {
   Pop.close();
   if (window.innerWidth <= 900) closeSidebar();
 
+  // [QC FAST CACHE] IQC/FQC dùng cùng cơ chế điều hướng như Kho:
+  // render ngay từ snapshot đã hydrate trong phiên; scheduleRouteDataRefresh()
+  // chỉ đọc server khi collection chưa fresh/đã hết TTL/được đánh dấu thay đổi.
+  // Không force list.php và không hiện màn 'Đang tải dữ liệu' mỗi lần đổi tab.
   render();
-
-  // [PERFORMANCE] Chỉ refresh dữ liệu server của đúng route vừa mở.
-  // Function nằm ở app.js và không ảnh hưởng khi chưa được nạp.
   if (typeof scheduleRouteDataRefresh === 'function') {
     scheduleRouteDataRefresh(State.module, State.tab);
   }

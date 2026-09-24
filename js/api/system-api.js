@@ -28,8 +28,12 @@ const SystemAPI = (() => {
     { id:'ROLE_WAREHOUSE', name:'Kho', permissions:['INVENTORY_VIEW','INVENTORY_OPERATE','INVENTORY_ADJUST','PURCHASE_PR_CREATE'], modules:{warehouse:'*',purchases:['pr']} },
     { id:'ROLE_PRODUCTION', name:'Sản xuất', permissions:['PRODUCTION_VIEW','PRODUCTION_OPERATE','PRODUCTION_APPROVE','INVENTORY_VIEW','PURCHASE_PR_CREATE'], modules:{production:'*',warehouse:['inventory'],purchases:['pr']} },
     { id:'ROLE_QC', name:'QC / QA', permissions:['QC_VIEW','QC_INSPECT','QC_APPROVE','INVENTORY_VIEW'], modules:{quality:'*',warehouse:['inventory','batches','defects','receipts']} },
-    { id:'ROLE_SALES', name:'Kinh doanh', permissions:['CRM_VIEW','CRM_OPERATE','CRM_DELETE_CUSTOMER','SALES_ORDER_OPERATE','SALES_APPROVE'], modules:{crm:'*'} },
-    { id:'ROLE_ACCOUNTING', name:'Kế toán', permissions:['ACCOUNTING_VIEW','ACCOUNTING_OPERATE','PAYMENT_APPROVE','PURCHASE_VIEW'], modules:{accounting:'*',purchases:['po','debts'],crm:['debts']} },
+    // Kinh doanh làm toàn bộ nghiệp vụ bán hàng hằng ngày nhưng KHÔNG duyệt.
+    // Trưởng phòng Kinh doanh kế thừa toàn bộ quyền Kinh doanh và có thêm quyền duyệt,
+    // tương tự mô hình Mua hàng / Trưởng phòng Mua hàng.
+    { id:'ROLE_SALES', name:'Kinh doanh', permissions:['CRM_VIEW','CRM_OPERATE','CRM_DELETE_CUSTOMER','SALES_ORDER_OPERATE'], modules:{crm:'*'} },
+    { id:'ROLE_SALES_MANAGER', name:'Trưởng phòng Kinh doanh', permissions:['CRM_VIEW','CRM_OPERATE','CRM_DELETE_CUSTOMER','SALES_ORDER_OPERATE','SALES_APPROVE'], modules:{crm:'*',approvals:'*'} },
+    { id:'ROLE_ACCOUNTING', name:'Kế toán', permissions:['ACCOUNTING_VIEW','ACCOUNTING_OPERATE','PAYMENT_APPROVE','PURCHASE_VIEW'], modules:{accounting:'*',purchases:['po','debts','suppliers'],crm:['debts','customers']} },
     { id:'ROLE_HR', name:'Nhân sự', permissions:['HR_VIEW','HR_OPERATE'], modules:{hr:'*'} },
     { id:'ROLE_MAINTENANCE', name:'Bảo trì', permissions:['MAINTENANCE_VIEW','MAINTENANCE_OPERATE'], modules:{maintenance:'*'} },
     { id:'ROLE_LOGISTICS', name:'Logistics', permissions:['LOGISTICS_VIEW','LOGISTICS_OPERATE','CRM_VIEW'], modules:{logistics:'*',crm:['orders']} },
@@ -48,7 +52,8 @@ const SystemAPI = (() => {
     { id:'USR-WAREHOUSE',   empId:'NV-018', username:'kho',        fullName:'Cao Văn Thắng',          dept:'Kho vận',                roleId:'ROLE_WAREHOUSE' },
     { id:'USR-PRODUCTION',  empId:'NV-005', username:'sanxuat',    fullName:'Phạm Quốc Bảo',          dept:'Sản xuất',               roleId:'ROLE_PRODUCTION' },
     { id:'USR-QC',          empId:'NV-015', username:'qc',         fullName:'Ngô Thị Lan',            dept:'QC/ATTP',                roleId:'ROLE_QC' },
-    { id:'USR-SALES',       empId:'NV-002', username:'kinhdoanh',  fullName:'Nguyễn Đức Anh',         dept:'Kinh doanh',             roleId:'ROLE_SALES' },
+    { id:'USR-SALES',       empId:'NV-003', username:'kinhdoanh',  fullName:'Trần Thu Hà',            dept:'Kinh doanh',             roleId:'ROLE_SALES' },
+    { id:'USR-SALES-MGR',   empId:'NV-002', username:'truongkinhdoanh', fullName:'Nguyễn Đức Anh',     dept:'Kinh doanh',             roleId:'ROLE_SALES_MANAGER' },
     { id:'USR-ACCOUNTING',  empId:'NV-022', username:'ketoan',     fullName:'Chu Thị Thanh Thảo',     dept:'Kế toán',                roleId:'ROLE_ACCOUNTING' },
     { id:'USR-HR',          empId:'NV-024', username:'nhansu',     fullName:'Mai Thị Hồng Nhung',     dept:'Hành chính - Nhân sự',   roleId:'ROLE_HR' },
     { id:'USR-MAINTENANCE', empId:'NV-025', username:'baotri',     fullName:'Lâm Văn Trí',            dept:'Bảo trì - Vệ sinh',      roleId:'ROLE_MAINTENANCE' },
@@ -260,7 +265,7 @@ const SystemAPI = (() => {
         <div class="cell-sub" style="margin-top:12px;text-align:center">Tài khoản demo dùng mật khẩu <b>123456</b></div>
         <div class="auth-quick-title">Tài khoản dễ nhớ</div>
         <div class="auth-quick">
-          ${['admin','giamdoc','muahang','truongmuahang','kho','sanxuat','qc','kinhdoanh','ketoan','nhansu','baotri','logistics','cuahang','giacong','rnd'].map(u=>`<button type="button" class="auth-account" data-user="${u}">${u}</button>`).join('')}
+          ${['admin','giamdoc','muahang','truongmuahang','kho','sanxuat','qc','kinhdoanh','truongkinhdoanh','ketoan','nhansu','baotri','logistics','cuahang','giacong','rnd'].map(u=>`<button type="button" class="auth-account" data-user="${u}">${u}</button>`).join('')}
         </div>
       </form></div>`;
       const style=document.createElement('style'); style.id='authStyle'; style.textContent=`

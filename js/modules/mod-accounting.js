@@ -21,28 +21,11 @@
  *  - Chi phí hoạt động khác (lương, điện nước, thuê mặt bằng…)
  * ==========================================================================*/
 
-/* ---------------------------------------------------------------- 0. DATA
- * Theo đúng cấu trúc của mod-purchases.js: KHÔNG gán cứng dữ liệu demo cho
- * bất kỳ collection nào được đồng bộ thật với KIO. mod-purchases.js chỉ dùng
- * `DB.x = DB.x || []` (mảng rỗng) làm lá chắn tránh lỗi khi DB.x chưa tồn tại,
- * và để nguyên cho PurchaseAPI.bootstrap()/ensureFresh() là nguồn dữ liệu
- * duy nhất nạp lại các bản ghi thật từ server sau đó — không tự phát minh
- * dữ liệu ở đây.
- *
- * Trước đây file này gán cứng dữ liệu demo bằng `DB.x || [demo...]`. Đoạn đó
- * chạy ở top-level ngay khi <script> được parse — TRƯỚC CẢ khi bất kỳ
- * bootstrap()/ensureFresh() nào của RestaurantQualityAPI kịp khôi phục cache
- * hay gọi server. Vì DB là object mới hoàn toàn ở mỗi lần tải trang, DB.x luôn
- * là undefined tại thời điểm này — kể cả sau F5 — nên nhánh demo luôn được
- * gán, ghi đè lên trước khi dữ liệu thật kịp nạp lại. Đó là lý do tài khoản
- * ngân hàng / tài sản cố định bị "nhảy" về dữ liệu demo ban đầu mỗi lần F5.
- *
- * bankAccounts và fixedAssets đã có đầy đủ form Thêm/Sửa nối với
- * RestaurantQualityAPI.syncRestaurant(['bankAccounts'|'fixedAssets']) (xem
- * hành động acc-bank-save / acc-asset-save bên dưới), nên không cần seed demo
- * ở đây — giống hệt cách mod-purchases.js không seed sẵn supplierRefunds. */
+/* ---------------------------------------------------------------- 0. DATA */
 DB.customerPayments = DB.customerPayments || [];
 DB.cashTransactions = DB.cashTransactions || [];   // sổ thu-chi thủ công (không phải công nợ NCC/KH)
+// Không seed tài khoản ngân hàng trong source. Master ngân hàng phải được
+// hydrate từ bảng lenam_restaurant_bank_accounts trên KIO/server.
 DB.bankAccounts = DB.bankAccounts || [];
 DB.bankTransactions = DB.bankTransactions || [];
 
@@ -128,6 +111,9 @@ AccountingBank.hydrate();
 // dữ liệu server kịp nạp nên sẽ luôn "nhảy về demo" sau F5.
 DB.fixedAssets = DB.fixedAssets || [];
 DB.accountingSettings = DB.accountingSettings || { corporateTaxRatePct: 20, opexCategories: ['Lương & BHXH', 'Điện nước', 'Thuê mặt bằng', 'Vận chuyển', 'Marketing', 'Khác'] };
+
+/* Thu tiền khách hàng không được sinh từ hợp đồng/demo trong RAM.
+ * DB.customerPayments chỉ nhận dữ liệu thật từ lenam_customer_payments. */
 
 /* ------------------------------------------------------------ 1. TÍNH TOÁN */
 const AccFin = {
@@ -551,6 +537,27 @@ function openBankTxForm(bankId) {
   });
 }
 
+/* ---- Danh sách đối tác để Kế toán đối chiếu công nợ ---- */
+function accSuppliersView() {
+  const f=F('acc-suppliers',{q:''});
+  const q=String(f.q||'').trim().toLowerCase();
+  const list=(DB.suppliers||[]).filter(x=>!q||[x.id,x.name,x.contact,x.phone,x.email,x.taxCode].some(v=>String(v||'').toLowerCase().includes(q)));
+  const rows=list.map(x=>`<tr><td><span class="code">${esc(x.id||'—')}</span></td><td><b>${esc(x.name||'—')}</b></td><td>${esc(x.contact||x.contactName||'—')}</td><td>${esc(x.phone||'—')}</td><td>${esc(x.email||'—')}</td><td>${esc(x.taxCode||x.tax_code||'—')}</td><td>${x.active===false?'<span class="badge gray">Ngừng dùng</span>':'<span class="badge green">Đang giao dịch</span>'}</td></tr>`);
+  return `${pageHead('Danh sách nhà cung cấp','Kế toán xem master NCC dùng chung với Mua hàng để đối chiếu công nợ','')}
+    <div class="card"><div class="toolbar">${searchBox('acc-suppliers','Tìm mã, tên, MST, liên hệ…')}<span class="spacer"></span><span class="chip">${fmtN(list.length)} NCC</span></div>
+    ${tableShell([{t:'Mã NCC'},{t:'Nhà cung cấp'},{t:'Liên hệ'},{t:'Điện thoại'},{t:'Email'},{t:'MST'},{t:'Trạng thái'}],rows,{emptyTitle:'Chưa có nhà cung cấp'})}</div>`;
+}
+
+function accCustomersView() {
+  const f=F('acc-customers',{q:''});
+  const q=String(f.q||'').trim().toLowerCase();
+  const list=(DB.customers||[]).filter(x=>!q||[x.id,x.name,x.contact,x.phone,x.email,x.taxCode].some(v=>String(v||'').toLowerCase().includes(q)));
+  const rows=list.map(x=>`<tr><td><span class="code">${esc(x.id||'—')}</span></td><td><b>${esc(x.name||'—')}</b></td><td>${esc(x.contact||x.contactName||'—')}</td><td>${esc(x.phone||'—')}</td><td>${esc(x.email||'—')}</td><td>${esc(x.taxCode||x.tax_code||'—')}</td><td>${x.active===false?'<span class="badge gray">Ngừng dùng</span>':'<span class="badge green">Đang giao dịch</span>'}</td></tr>`);
+  return `${pageHead('Danh sách khách hàng','Kế toán xem master khách hàng dùng chung với CRM để đối chiếu công nợ phải thu','')}
+    <div class="card"><div class="toolbar">${searchBox('acc-customers','Tìm mã, tên, MST, liên hệ…')}<span class="spacer"></span><span class="chip">${fmtN(list.length)} khách hàng</span></div>
+    ${tableShell([{t:'Mã KH'},{t:'Khách hàng'},{t:'Liên hệ'},{t:'Điện thoại'},{t:'Email'},{t:'MST'},{t:'Trạng thái'}],rows,{emptyTitle:'Chưa có khách hàng'})}</div>`;
+}
+
 /* ---- 2.4 Phải thu — dùng chung dữ liệu CRM, không tạo sổ công nợ song song ---- */
 function accArView() {
   const f = F('acc-ar', {q:'',customerId:'',status:'',from:'',to:''});
@@ -600,10 +607,17 @@ function accApEnsureFreshOnce() {
   __accApHydrating = true;
   Promise.resolve()
     .then(() => PurchaseAPI.bootstrap?.())
-    .then(() => PurchaseAPI.ensureFresh?.(
-      ['purchaseOrders', 'supplierPayments', 'supplierRefunds', 'suppliers'],
-      { force: true }
-    ))
+    .then(async () => {
+      const jobs=[PurchaseAPI.ensureFresh?.(
+        ['purchaseOrders', 'supplierPayments', 'supplierRefunds', 'suppliers'],
+        { force: true }
+      )];
+      if (typeof InventoryAPI !== 'undefined') {
+        await InventoryAPI.bootstrap?.();
+        jobs.push(InventoryAPI.ensureFresh?.(['goodsIssues','materialReturnHistory'], { force:true }));
+      }
+      await Promise.all(jobs.filter(Boolean));
+    })
     .catch((err) => {
       console.warn('[Accounting/AP] Không tải được dữ liệu KIO; giữ snapshot hiện tại:', err);
     })
@@ -1545,7 +1559,7 @@ Object.assign(Actions, {
 
   'acc-asset-add': () => openFixedAssetForm(),
   'acc-asset-edit': (d) => openFixedAssetForm(d.id),
-  'acc-asset-save': async (d) => {
+  'acc-asset-save': (d) => {
     const name = $('#faName')?.value.trim();
     const cost = parseMoney($('#faCost')?.value) || 0;
     if (!name || cost <= 0) { Toast.err('Thiếu thông tin', 'Vui lòng nhập tên tài sản và nguyên giá lớn hơn 0.'); return; }
@@ -1558,27 +1572,11 @@ Object.assign(Actions, {
     } else {
       DB.fixedAssets.push({ id: nextCode('TS-', DB.fixedAssets), status: 'active', ...payload });
     }
-    try {
-      if (typeof RestaurantQualityAPI !== 'undefined') await RestaurantQualityAPI.syncRestaurant(['fixedAssets']);
-      Modal.close(); render(); Toast.ok(d.id ? 'Đã cập nhật tài sản' : 'Đã thêm tài sản', name);
-    } catch (err) {
-      DB.fixedAssets = before;
-      Toast.err('Không lưu được lên server', err?.message || 'Vui lòng thử lại.');
-    }
+    Modal.close(); render(); Toast.ok(d.id ? 'Đã cập nhật tài sản' : 'Đã thêm tài sản', name);
   },
   'acc-asset-delete': (d) => {
     const a = DB.fixedAssets.find((x) => x.id === d.id); if (!a) return;
-    confirmBox({ title: 'Xóa tài sản cố định', icon: 'fa-trash', okText: 'Xóa', message: `Xóa tài sản <b>${esc(a.name)}</b>?`, onOk: async () => {
-      const before = JSON.parse(JSON.stringify(DB.fixedAssets || []));
-      try {
-        if (typeof RestaurantQualityAPI !== 'undefined') await RestaurantQualityAPI.deleteRestaurant('fixedAssets', d.id);
-        else DB.fixedAssets = DB.fixedAssets.filter((x) => x.id !== d.id);
-        render(); Toast.ok('Đã xóa tài sản', a.name);
-      } catch (err) {
-        DB.fixedAssets = before;
-        Toast.err('Không xóa được trên server', err?.message || 'Vui lòng thử lại.');
-      }
-    } });
+    confirmBox({ title: 'Xóa tài sản cố định', icon: 'fa-trash', okText: 'Xóa', message: `Xóa tài sản <b>${esc(a.name)}</b>?`, onOk: () => { DB.fixedAssets = DB.fixedAssets.filter((x) => x.id !== d.id); render(); Toast.ok('Đã xóa tài sản', a.name); } });
   },
 });
 

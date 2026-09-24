@@ -339,7 +339,7 @@ Views['production-detail'] = function (params) {
           ${infoItem('Người phụ trách', esc(Q.employeeName(p.managerId)))}
           ${infoItem('Cấp nguyên liệu', `<span class="badge ${materialState.tone}">${esc(materialState.label)}</span>${materialState.req ? `<div class="cell-sub"><span class="code">${esc(materialState.req.id)}</span></div>` : ''}`)}
           ${infoItem('Nguồn lệnh', p.planId ? `Kế hoạch <span class="code">${esc(p.planId)}</span>` : p.orderId ? `Đơn bán <span class="code">${esc(p.orderId)}</span>` : 'Tạo thủ công')}
-          ${infoItem('Nhập kho TP', finishedReceipt ? `<span class="badge green">Đã nhập</span><div class="cell-sub"><span class="code">${esc(finishedReceipt.id)}</span></div>` : (p.status==='lsx_dang_qc' ? '<span class="badge orange">Chờ QC · chưa tính tồn</span>' : p.status==='lsx_hoan_thanh' ? '<span class="badge red">QC không đạt · không nhập tồn</span>' : '<span class="badge slate">Chưa đến bước</span>'))}
+          ${infoItem('Nhập kho TP', finishedReceipt ? `<span class="badge green">Đã nhập kho</span><div class="cell-sub"><span class="code">${esc(finishedReceipt.id)}</span></div>` : (p.status==='lsx_da_nhap_kho' ? '<span class="badge green">Đã nhập kho</span>' : p.status==='lsx_dang_qc' ? '<span class="badge orange">Chờ QC · chưa tính tồn</span>' : p.status==='lsx_hoan_thanh' ? '<span class="badge orange">Chờ nhập kho</span>' : '<span class="badge slate">Chưa đến bước</span>'))}
           ${infoItem('Tổng giờ máy', fmtDec(totalHours) + ' giờ')}
         </div>
       </div>
@@ -420,7 +420,7 @@ Views['production-detail'] = function (params) {
     <div class="card-body">
       <div class="kanban">
         ${p.stages.map((s, i) => {
-          const pct = p.qty ? Math.round((s.qtyDone / p.qty) * 100) : 0;
+          const pct = p.qty ? (isProcessQcStage(p,i) ? Math.round((s.qtyDone / p.qty) * 1000) / 10 : Math.round((s.qtyDone / p.qty) * 100)) : 0;
           const canStart = s.status === 'pending' && (i === 0 || p.stages[i - 1].status === 'done');
           return `<div class="kcol ${s.status}">
             <div class="kcol-head">
@@ -429,7 +429,7 @@ Views['production-detail'] = function (params) {
               <span style="margin-left:auto"><i class="fa-solid ${STAGE_ICON[s.name]}" style="color:var(--text-3)"></i></span>
             </div>
             <div class="kcol-body">
-              <div>${s.status === 'done' ? '<span class="badge green">Hoàn tất</span>' : s.status === 'doing' ? '<span class="badge blue">Đang chạy</span>' : '<span class="badge slate">Chờ</span>'}</div>
+              <div>${s.status === 'done' ? '<span class="badge green">Hoàn tất</span>' : s.status === 'doing' ? (()=>{ const q=s.processQc||{}; const pending=Number(q.pendingReworkQty||(q.status==='FAILED'?q.lastFailQty:0)||0); const ready=Number(q.readyRetestQty||0); return isProcessQcStage(p,i) && pending>0 ? `<span class="badge red">Chờ sửa/tái chế ${fmtN(pending)} ${esc(p.unit||'')}</span>` : isProcessQcStage(p,i) && ready>0 ? `<span class="badge orange">Chờ QC tái kiểm ${fmtN(ready)} ${esc(p.unit||'')}</span>` : '<span class="badge blue">Đang chạy</span>'; })() : '<span class="badge slate">Chờ</span>'}</div>
               <div class="kfield"><i class="fa-solid fa-user"></i>${esc(Q.employeeName(s.leadId))}</div>
               <div class="kfield"><i class="fa-solid fa-robot"></i>${esc(s.machine)}</div>
               ${(() => {
@@ -450,7 +450,7 @@ Views['production-detail'] = function (params) {
             </div>
             <div class="kcol-foot">
               ${s.status === 'done' ? '<button class="btn btn-xs" disabled style="width:100%"><i class="fa-solid fa-check"></i>Đã xong</button>'
-                : s.status === 'doing' ? (isFinalQcStage(p, i) ? `<button class="btn btn-xs btn-primary" style="width:100%" data-act="po-qc" data-id="${p.id}"><i class="fa-solid fa-clipboard-check"></i>Mở QC thành phẩm</button>` : isProcessQcStage(p,i) ? `<button class="btn btn-xs" disabled style="width:100%"><i class="fa-solid fa-vial-circle-check"></i>Chờ QC bán thành phẩm</button>` : `<button class="btn btn-xs btn-primary" style="width:100%" data-act="stage-update" data-id="${p.id}" data-i="${i}"><i class="fa-solid fa-pen"></i>Ghi nhận sản lượng</button>`)
+                : s.status === 'doing' ? (isFinalQcStage(p, i) ? `<button class="btn btn-xs btn-primary" style="width:100%" data-act="po-qc" data-id="${p.id}"><i class="fa-solid fa-clipboard-check"></i>Mở QC thành phẩm</button>` : isProcessQcStage(p,i) ? (()=>{ const q=s.processQc||{}; const pending=Number(q.pendingReworkQty||(q.status==='FAILED'?q.lastFailQty:0)||0); const ready=Number(q.readyRetestQty||0); return pending>0 ? `<button class="btn btn-xs btn-warning" style="width:100%" data-act="pqc-rework-done" data-id="${p.id}" data-i="${i}"><i class="fa-solid fa-screwdriver-wrench"></i>Xác nhận đã sửa/tái chế ${fmtN(pending)}</button>` : ready>0 ? `<button class="btn btn-xs" disabled style="width:100%"><i class="fa-solid fa-rotate"></i>Chờ QC tái kiểm ${fmtN(ready)}</button>` : `<button class="btn btn-xs" disabled style="width:100%"><i class="fa-solid fa-vial-circle-check"></i>Chờ QC bán thành phẩm</button>`; })() : `<button class="btn btn-xs btn-primary" style="width:100%" data-act="stage-update" data-id="${p.id}" data-i="${i}"><i class="fa-solid fa-pen"></i>Ghi nhận sản lượng</button>`)
                 : canStart ? `<button class="btn btn-xs" style="width:100%" data-act="stage-start" data-id="${p.id}" data-i="${i}"><i class="fa-solid fa-play"></i>${isProcessQcStage(p,i)?'Chuyển QC bán thành phẩm':'Bắt đầu'}</button>`
                 : '<button class="btn btn-xs" disabled style="width:100%">Chờ công đoạn trước</button>'}
             </div>
@@ -527,15 +527,14 @@ function openStageModal(poId, index) {
         <div class="field"><label>Máy / trạm <span class="req">*</span></label>
           <input class="inp" id="stMachine" value="${esc(s.machine)}" /></div>
       </div>
-      <div class="field"><label>Ghi chú <span class="req">*</span></label>
+      <div class="field"><label>Ghi chú <span class="muted">(không bắt buộc)</span></label>
         <textarea class="inp" id="stNote" rows="2" placeholder="Ví dụ: dừng 30 phút thay dao phay…"></textarea></div>
       <div style="font-size:12.3px;color:var(--text-3);background:var(--surface-2);border-radius:var(--r);padding:10px 12px">
         <i class="fa-solid fa-circle-info" style="color:var(--primary)"></i>
         Mỗi lần ghi nhận sẽ <b>cộng dồn</b> vào sản lượng đã hoàn thành. Chỉ khi tổng đạt đúng <b>${fmtN(qtyPlan)} ${esc(p.unit)}</b> thì công đoạn mới hoàn tất.
       </div>`,
     foot: `<button class="btn" data-act="modal-close">Hủy</button>
-           <button class="btn" data-act="stage-save" data-id="${p.id}" data-i="${index}" data-full="0"><i class="fa-solid fa-floppy-disk"></i>Lưu sản lượng</button>
-           <button class="btn btn-primary" data-act="stage-save" data-id="${p.id}" data-i="${index}" data-full="1"><i class="fa-solid fa-check-double"></i>Hoàn tất công đoạn</button>`,
+           <button class="btn btn-primary" data-act="stage-save" data-id="${p.id}" data-i="${index}"><i class="fa-solid fa-floppy-disk"></i>Lưu sản lượng</button>`,
   });
 }
 
