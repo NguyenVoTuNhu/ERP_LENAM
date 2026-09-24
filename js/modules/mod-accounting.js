@@ -123,13 +123,10 @@ const AccountingBank = (() => {
 })();
 window.AccountingBank = AccountingBank;
 AccountingBank.hydrate();
-DB.fixedAssets = DB.fixedAssets || [
-  { id: 'TS-001', name: 'Kho lạnh 0-4°C KL-01', dept: 'Kho vận', purchaseDate: '2021-03-10', cost: 480000000, usefulYears: 10, status: 'active' },
-  { id: 'TS-002', name: 'Máy xay công nghiệp XD-200', dept: 'Sản xuất', purchaseDate: '2020-06-01', cost: 260000000, usefulYears: 8, status: 'active' },
-  { id: 'TS-003', name: 'Nồi nấu inox 2 lớp 300L (x2)', dept: 'Sản xuất', purchaseDate: '2019-11-15', cost: 180000000, usefulYears: 8, status: 'active' },
-  { id: 'TS-004', name: 'Máy ép khuôn thủy lực KH-2', dept: 'Sản xuất', purchaseDate: '2022-02-20', cost: 210000000, usefulYears: 8, status: 'active' },
-  { id: 'TS-005', name: 'Xe tải giao hàng 51C-123.45', dept: 'Kho vận', purchaseDate: '2018-05-05', cost: 620000000, usefulYears: 10, status: 'active' },
-];
+// fixedAssets đọc/ghi thật qua RestaurantQualityAPI (bảng lenam_restaurant_fixed_assets).
+// Không gán demo cứng ở đây — cùng lý do như bankAccounts ở trên: đoạn này chạy trước khi
+// dữ liệu server kịp nạp nên sẽ luôn "nhảy về demo" sau F5.
+DB.fixedAssets = DB.fixedAssets || [];
 DB.accountingSettings = DB.accountingSettings || { corporateTaxRatePct: 20, opexCategories: ['Lương & BHXH', 'Điện nước', 'Thuê mặt bằng', 'Vận chuyển', 'Marketing', 'Khác'] };
 
 /* ------------------------------------------------------------ 1. TÍNH TOÁN */
@@ -1470,20 +1467,37 @@ Object.assign(Actions, {
     const method = $('#ctxMethod')?.value || 'CASH';
     const bankId = method === 'BANK_TRANSFER' ? ($('#ctxBank')?.value || '') : '';
     if (method === 'BANK_TRANSFER' && !bankId) { Toast.err('Chưa chọn ngân hàng','Vui lòng chọn tài khoản ngân hàng cho khoản chuyển khoản.'); return; }
+    // Phải có danh sách thật từ server trước khi sinh mã: nếu DB.cashTransactions còn rỗng
+    // thì mã SQ-2026-001 sẽ trùng bản ghi đã có trên server và bị ghi đè khi đồng bộ.
+    try { if (typeof RestaurantQualityAPI !== 'undefined') await RestaurantQualityAPI.ensureFresh(['cashTransactions','bankAccounts'], {force:false}); } catch(err) {}
     const row = { id: nextCode('SQ-2026-', DB.cashTransactions), type: d.type, date, amount, category, note, method: method==='BANK_TRANSFER'?'Chuyển khoản':'Tiền mặt', bankId, createdBy: DB.currentUser?.id || '' };
     DB.cashTransactions.unshift(row);
     try {
       if (bankId) await AccountingBank.record({ bankId, type:d.type==='THU'?'IN':'OUT', date, amount, note, sourceType:'CASH_TX', sourceId:row.id });
+      // Trước đây bước này bị thiếu: sổ thu-chi chỉ nằm trong RAM nên mất khi F5.
+      if (typeof RestaurantQualityAPI !== 'undefined') await RestaurantQualityAPI.syncRestaurant(['cashTransactions']);
       Modal.close(); render();
       Toast.ok('Đã ghi nhận', `${d.type === 'THU' ? 'Thu' : 'Chi'} ${fmtVND(amount)} · ${note}`);
     } catch(err) {
       DB.cashTransactions = (DB.cashTransactions||[]).filter(x=>x.id!==row.id);
-      Toast.err('Không lưu được giao dịch ngân hàng', err?.message || 'Vui lòng thử lại.');
+      if (bankId) { try { await AccountingBank.removeBySource('CASH_TX', row.id); } catch(_) {} }
+      Toast.err('Không lưu được giao dịch', err?.message || 'Vui lòng thử lại.');
     }
   },
-  'acc-cash-delete': (d) => {
-    DB.cashTransactions = DB.cashTransactions.filter((t) => t.id !== d.id);
-    render(); Toast.ok('Đã xóa giao dịch');
+  'acc-cash-delete': async (d) => {
+    const before = JSON.parse(JSON.stringify(DB.cashTransactions || []));
+    const target = before.find((t) => t.id === d.id);
+    if (!target) return;
+    try {
+      if (typeof RestaurantQualityAPI !== 'undefined') await RestaurantQualityAPI.deleteRestaurant('cashTransactions', d.id);
+      else DB.cashTransactions = DB.cashTransactions.filter((t) => t.id !== d.id);
+      // Khoản thu/chi chuyển khoản đã ghi một dòng vào sổ ngân hàng — xóa cùng.
+      if (target.bankId) await AccountingBank.removeBySource('CASH_TX', d.id);
+      render(); Toast.ok('Đã xóa giao dịch');
+    } catch (err) {
+      DB.cashTransactions = before;
+      Toast.err('Không xóa được trên server', err?.message || 'Vui lòng thử lại.');
+    }
   },
 
   'acc-bank-add': async () => {
@@ -1536,6 +1550,8 @@ Object.assign(Actions, {
     const cost = parseMoney($('#faCost')?.value) || 0;
     if (!name || cost <= 0) { Toast.err('Thiếu thông tin', 'Vui lòng nhập tên tài sản và nguyên giá lớn hơn 0.'); return; }
     const payload = { name, dept: $('#faDept')?.value || '', purchaseDate: $('#faDate')?.value || currentDateYMD(), cost, usefulYears: Number($('#faYears')?.value) || 8 };
+    // Cần danh sách thật từ server trước khi sinh mã TS-xxx / tìm tài sản để sửa.
+    try { if (typeof RestaurantQualityAPI !== 'undefined') await RestaurantQualityAPI.ensureFresh(['fixedAssets'], {force:false}); } catch(err) {}
     const before = JSON.parse(JSON.stringify(DB.fixedAssets || []));
     if (d.id) {
       Object.assign(DB.fixedAssets.find((a) => a.id === d.id), payload);

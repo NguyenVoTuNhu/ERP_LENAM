@@ -20,7 +20,7 @@ const HRAPI = (() => {
   const SEED_KEY = KIO_CONFIG.storageKeys.hrDemoSeed;
 
   let booted = false;
-  let seedStarted = false;
+  let seedPromise = null;
   let syncChain = Promise.resolve();
   let syncTimer = null;
   let lastLoaded = 0;
@@ -46,27 +46,37 @@ const HRAPI = (() => {
 
   // Migration/seed chỉ chạy một lần. Nếu server đã có nhân sự (dù chỉ 1 người),
   // KHÔNG tự seed lại demo — server rỗng lúc đó là trạng thái hợp lệ.
-  async function seedIfNeeded() {
-    if (seedStarted) return;
-    seedStarted = true;
-    if (storageGet(SEED_KEY) === '1') return;
-    try {
-      const remote = await KioStore.listCollection(TABLE);
-      if (Array.isArray(remote) && remote.length) {
-        DB.employees = remote;
-        lastLoaded = Date.now();
-      } else if (Array.isArray(DB.employees) && DB.employees.length) {
-        await KioStore.syncCollection(TABLE, clone(DB.employees));
-        lastLoaded = Date.now();
-        console.info(`[HRAPI] Đã seed ${DB.employees.length} nhân sự demo lên KIO (lần đầu).`);
+  // Trả về true nếu lần gọi này đã thay DB.employees (để caller biết cần render lại).
+  // Dùng một Promise dùng chung: nếu 2 nơi gọi ensureFresh cùng lúc trong lần chạy
+  // đầu tiên thì nơi thứ hai phải ĐỢI seed xong, không được đọc bảng rỗng rồi ghi
+  // đè mảng demo đang được seed.
+  function seedIfNeeded() {
+    if (seedPromise) return seedPromise;
+    seedPromise = (async () => {
+      if (storageGet(SEED_KEY) === '1') return false;
+      try {
+        let applied = false;
+        const remote = await KioStore.listCollection(TABLE);
+        if (Array.isArray(remote) && remote.length) {
+          DB.employees = remote;
+          lastLoaded = Date.now();
+          applied = true;
+        } else if (Array.isArray(DB.employees) && DB.employees.length) {
+          await KioStore.syncCollection(TABLE, clone(DB.employees));
+          lastLoaded = Date.now();
+          console.info(`[HRAPI] Đã seed ${DB.employees.length} nhân sự demo lên KIO (lần đầu).`);
+        }
+        storageSet(SEED_KEY, '1');
+        writeCache();
+        return applied;
+      } catch (err) {
+        // Không đánh dấu đã seed nếu request lỗi — thử lại ở lần gọi sau.
+        seedPromise = null;
+        console.warn('[HRAPI] Seed nhân sự lần đầu thất bại; giữ dữ liệu hiện tại:', err);
+        return false;
       }
-      storageSet(SEED_KEY, '1');
-      writeCache();
-    } catch (err) {
-      // Không đánh dấu đã seed nếu request lỗi — thử lại ở lần bootstrap sau.
-      seedStarted = false;
-      console.warn('[HRAPI] Seed nhân sự lần đầu thất bại; giữ dữ liệu hiện tại:', err);
-    }
+    })();
+    return seedPromise;
   }
 
   async function bootstrap() {
@@ -84,8 +94,8 @@ const HRAPI = (() => {
   // dùng chung cho mọi API — HR chỉ có một collection nên keys không dùng tới.
   async function ensureFresh(keys, { force = false } = {}) {
     await bootstrap();
-    await seedIfNeeded();
-    if (!force && lastLoaded && Date.now() - lastLoaded < REFRESH_TTL) return {};
+    const seeded = await seedIfNeeded();
+    if (!force && lastLoaded && Date.now() - lastLoaded < REFRESH_TTL) return seeded ? { employees: true } : {};
     try {
       const rows = await KioStore.listCollection(TABLE, { force });
       if (Array.isArray(rows)) {

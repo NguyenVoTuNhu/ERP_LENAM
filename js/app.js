@@ -5331,6 +5331,52 @@ window.DashboardDataSync = (() => {
   return { hydrate, refresh, isHydrated: () => hydrated };
 })();
 
+/* ============================================================================
+ * MULTI-SOURCE ROUTE DATA
+ * ----------------------------------------------------------------------------
+ * Một số màn hình (Kế toán, BI, R&D...) cần dữ liệu từ NHIỀU API cùng lúc.
+ * routeMultiPlan() gói các API đó thành một "nguồn" duy nhất có bootstrap() /
+ * ensureFresh() giống một API đơn, để cả boot() (F5) lẫn scheduleRouteDataRefresh()
+ * (chuyển menu) dùng chung mà không cần sửa.
+ * ========================================================================== */
+function routeApis() {
+  return {
+    hr: typeof HRAPI !== 'undefined' ? HRAPI : null,
+    rnd: typeof RNDApi !== 'undefined' ? RNDApi : null,
+    crm: typeof CRMAPI !== 'undefined' ? CRMAPI : null,
+    purchase: typeof PurchaseAPI !== 'undefined' ? PurchaseAPI : null,
+    inventory: typeof InventoryAPI !== 'undefined' ? InventoryAPI : null,
+    production: typeof ProductionAPI !== 'undefined' ? ProductionAPI : null,
+    restaurant: typeof RestaurantQualityAPI !== 'undefined' ? RestaurantQualityAPI : null,
+  };
+}
+
+function routeMultiSource(parts, { after } = {}) {
+  const list = (parts || []).filter(p => p && p.api && Array.isArray(p.keys) && p.keys.length);
+  return {
+    async bootstrap() {
+      await Promise.allSettled(list.map(p => (typeof p.api.bootstrap === 'function' ? p.api.bootstrap() : null)));
+      return true;
+    },
+    async ensureFresh(_keys, { force = false } = {}) {
+      const results = await Promise.allSettled(list.map(p => p.api.ensureFresh(p.keys, { force })));
+      const changed = {};
+      for (const r of results) {
+        if (r.status === 'fulfilled' && r.value && typeof r.value === 'object') Object.assign(changed, r.value);
+      }
+      if (typeof after === 'function') { try { after(changed); } catch (_) {} }
+      return changed;
+    },
+  };
+}
+
+// spec: { apiName: [keys...] } — apiName là khóa trong routeApis().
+function routeMultiPlan(spec, { deferred = true, after } = {}) {
+  const apis = routeApis();
+  const parts = Object.entries(spec).map(([name, keys]) => ({ api: apis[name], keys }));
+  return { api: routeMultiSource(parts, { after }), keys: parts.flatMap(p => p.keys), deferred };
+}
+
 function routeRefreshPlan(module, tab) {
   if (module === 'purchases') {
     const map = {
@@ -5473,6 +5519,64 @@ function routeRefreshPlan(module, tab) {
 
   if (module === 'accounting' && tab === 'banking') {
     return { api: typeof RestaurantQualityAPI !== 'undefined' ? RestaurantQualityAPI : null, keys: ['stores','bankAccounts'], deferred: true };
+  }
+
+  // ==========================================================================
+  // NHÂN SỰ / R&D / BI / KẾ TOÁN
+  // --------------------------------------------------------------------------
+  // Trước đây routeRefreshPlan KHÔNG có nhánh nào cho 4 phân hệ này (chỉ có
+  // accounting/ap và accounting/banking), nên khi F5 boot() không nạp lại dữ
+  // liệu từ KIO: DB.* giữ nguyên dữ liệu demo trong data.js / mod-rnd.js /
+  // mod-accounting.js — trông như "quay về lúc mở index.html".
+  // ==========================================================================
+  if (module === 'hr') {
+    return routeMultiPlan({ hr: ['employees'] });
+  }
+
+  if (module === 'rnd') {
+    return routeMultiPlan({
+      rnd: Object.keys(KIO_CONFIG?.rndTables || {}),
+      hr: ['employees'],                      // tên người phụ trách dự án
+      inventory: ['materials', 'products'],   // giá thành công thức
+    });
+  }
+
+  if (module === 'accounting') {
+    const t = tab || 'dashboard';
+    const specByTab = {
+      cashflow_inout: { restaurant: ['stores', 'bankAccounts', 'cashTransactions'] },
+      fixed_assets: { restaurant: ['fixedAssets'] },
+      ar: { crm: ['customers', 'orders', 'customerPayments'] },
+      costing: { production: ['productionOrders'], inventory: ['materials', 'products', 'semiFinishedProducts'] },
+      budget: { purchase: ['purchases'] },
+    };
+    // Các màn tổng hợp (dashboard, P&L, cân đối, lưu chuyển tiền, sổ cái, thuế...)
+    // cộng dữ liệu từ nhiều phân hệ nên cần đủ nguồn.
+    const fullSpec = {
+      restaurant: ['stores', 'bankAccounts', 'cashTransactions', 'fixedAssets'],
+      crm: ['customers', 'orders', 'customerPayments'],
+      purchase: ['purchases', 'purchaseOrders', 'supplierPayments', 'supplierRefunds', 'suppliers'],
+      inventory: ['materials', 'products', 'semiFinishedProducts', 'inventory'],
+    };
+    return routeMultiPlan(specByTab[t] || fullSpec, {
+      // Giao dịch ngân hàng nằm trong bankAccounts[].transactions; DB.bankTransactions
+      // chỉ là bản sao runtime nên phải dựng lại sau mỗi lần nạp.
+      after: () => { window.AccountingBank?.hydrate?.(); },
+    });
+  }
+
+  if (module === 'bi') {
+    // BI chỉ đọc: mỗi tab nạp đúng các collection mà hàm tính số liệu của tab đó dùng.
+    const specByTab = {
+      finance: { crm: ['customers', 'orders', 'customerPayments'], purchase: ['purchaseOrders', 'supplierPayments', 'suppliers'] },
+      warehouse: { inventory: ['inventory', 'materials', 'semiFinishedProducts', 'products'] },
+      production: { production: ['productionOrders'], inventory: ['products', 'materials'] },
+      sales: { crm: ['customers', 'orders'], inventory: ['products'] },
+      restaurant: { restaurant: ['stores', 'recipes', 'orders'], inventory: ['materials'], hr: ['employees'] },
+      hr: { hr: ['employees'] },
+    };
+    const spec = specByTab[tab];
+    return spec ? routeMultiPlan(spec) : null;
   }
 
   if (module === 'quality') {
