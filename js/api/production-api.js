@@ -192,7 +192,8 @@ const ProductionAPI = (() => {
         status:st.status||'pending', qtyDone:Number(st.qtyDone||0), hours:Number(st.hours||0),
         leadId:st.leadId||'', machine:st.machine||'', note:st.note||'', start:st.start||'', end:st.end||'',
         actualStartedAt:st.actualStartedAt||'', processQc:st.processQc||null,
-        processQcHistory:Array.isArray(st.processQcHistory)?st.processQcHistory:[]
+        processQcHistory:Array.isArray(st.processQcHistory)?st.processQcHistory:[],
+        processQcReworkHistory:Array.isArray(st.processQcReworkHistory)?st.processQcReworkHistory:[]
       },
       updatedAt:new Date().toISOString()
     };
@@ -204,7 +205,7 @@ const ProductionAPI = (() => {
       const i=Number(r?.stageIndex); const st=(po.stages||[])[i];
       if(!st) continue;
       const x=r.stage||{};
-      for(const k of ['status','qtyDone','hours','leadId','machine','note','start','end','actualStartedAt','processQc','processQcHistory']){
+      for(const k of ['status','qtyDone','hours','leadId','machine','note','start','end','actualStartedAt','processQc','processQcHistory','processQcReworkHistory']){
         if(x[k]!==undefined) st[k]=clone(x[k]);
       }
       if(r.orderStatus) po.status=r.orderStatus;

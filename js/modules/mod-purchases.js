@@ -131,6 +131,9 @@ const tabs =
     .pending
     .includes(p.status);
 
+  const pendingApprovalReq = (DB.approvalRequests || []).find(r => r.docType === 'PR' && r.docId === p.id && r.status === 'PENDING');
+  const pendingApprovalLevel = pendingApprovalReq ? (pendingApprovalReq.levels || []).find(l => Number(l.level) === Number(pendingApprovalReq.currentLevel)) : null;
+
   /* Danh sách vật tư thuộc PR */
   const materialHtml = (p.items || []).length
     ? p.items.map((it) => `
@@ -214,6 +217,7 @@ const tabs =
 
       <td>
         ${badge(p.status)}
+        ${pendingApprovalLevel ? `<div class="cell-sub" style="margin-top:4px;color:var(--orange);font-weight:700">Chờ cấp ${pendingApprovalLevel.level}: ${esc(approvalRoleName(pendingApprovalLevel.role))}</div>` : ''}
       </td>
 
       <td>
@@ -492,50 +496,9 @@ const tabs =
     if (normalizedOldPo && typeof PurchaseAPI !== 'undefined' && PurchaseAPI.scheduleCollections) {
       PurchaseAPI.scheduleCollections(['purchaseOrders']);
     }
-    // Tự phục hồi PO nếu báo giá đã được xác nhận/chọn NCC nhưng lần ghi trước
-    // bị snapshot server cũ ghi đè. Trường hợp điển hình: YCM-2026-0073.
-    // Không tạo trùng: mỗi quote chỉ sinh PO khi chưa có PO tham chiếu quoteId.
-    let recoveredPo = false;
-    (DB.supplierQuotations || []).forEach((quote) => {
-      if (!(quote?.selected && (quote.confirmed || quote.confirmedAt))) return;
-      if ((DB.purchaseOrders || []).some((po) => po.quoteId === quote.id && po.status !== 'CANCELLED')) return;
-
-      const selectedItems = (quote.items || []).filter((item) => item.selected !== false);
-      if (!selectedItems.length) return;
-      const pr = Q.purchase(quote.prId);
-      const poId = nextCode('PO-2026-', DB.purchaseOrders || []);
-      const poItems = selectedItems.map((item) => ({ ...item, receivedQty: Number(item.receivedQty || 0) }));
-      const subtotal = poItems.reduce((sum, item) => sum + Number(item.amount || (Number(item.qty || 0) * Number(item.price || 0))), 0);
-      const vatRate = 10;
-      const vat = Math.round(subtotal * vatRate / 100);
-
-      DB.purchaseOrders.unshift({
-        id: poId,
-        prId: quote.prId,
-        quoteId: quote.id,
-        supplierId: quote.supplierId,
-        date: quote.confirmedAt || quote.date || DB.today,
-        expectedDate: addDays(quote.confirmedAt || quote.date || DB.today, Number(quote.leadTimeDays || 7)),
-        status: 'READY_TO_SEND',
-        paymentTerm: quote.paymentTerm || 'Theo báo giá nhà cung cấp',
-        note: pr?.reason || quote.note || 'Khôi phục từ báo giá NCC đã xác nhận',
-        createdBy: quote.createdBy || '',
-        createdByName: quote.createdByName || '',
-        items: poItems,
-        subtotal,
-        vatRate,
-        vat,
-        total: subtotal + vat,
-        paid: 0,
-      });
-      if (pr) pr.status = 'mh_da_dat_hang';
-      recoveredPo = true;
-    });
-
-    if (recoveredPo && typeof PurchaseAPI !== 'undefined' && PurchaseAPI.scheduleCollections) {
-      PurchaseAPI.scheduleCollections(['purchaseOrders', 'purchases']);
-      setTimeout(() => Toast?.ok?.('Đã khôi phục đơn đặt hàng', 'PO được tạo lại từ báo giá NCC đã xác nhận trước đó.'), 0);
-    }
+    // [REAL SERVER] Chỉ render dữ liệu PO đã tồn tại trên server.
+    // Không tự tạo/khôi phục PO từ báo giá khi mở màn hình; đặc biệt PO đã hủy
+    // phải giữ nguyên Đã hủy và không được sinh một PO mới ngoài ý muốn.
 
     const list = DB.purchaseOrders.filter((po) => {
       const returnedQty = (DB.goodsIssues || [])
@@ -553,9 +516,15 @@ const tabs =
     const pg = paged(list, 'purchases');
     const suppliers = DB.suppliers.map((s) => [s.id, s.name]);
 
-    const poReturnQty = (po) => (DB.goodsIssues || [])
-      .filter(x => x.type === 'RETURN_OUT' && (x.refDoc === po.id || x.poId === po.id))
-      .reduce((sum, issue) => sum + (issue.items || []).reduce((n, item) => n + Number(item.qty || 0), 0), 0);
+    const poReturnQty = (po) => {
+      const issuedQty = (DB.goodsIssues || [])
+        .filter(x => x.type === 'RETURN_OUT' && (x.refDoc === po.id || x.poId === po.id))
+        .reduce((sum, issue) => sum + (issue.items || []).reduce((n, item) => n + Number(item.qty || 0), 0), 0);
+      // returnedQty được ghi ngay trên PO và persist vào lenam_purchase_orders khi Kho
+      // xác nhận xuất trả. Nhờ vậy Mua hàng/F5 không phụ thuộc việc đã mở Tồn kho
+      // để hydrate goodsIssues trước đó.
+      return Math.max(Number(po.returnedQty || 0), issuedQty);
+    };
     const poReceivedQty = (po) => (po.items || []).reduce((sum, item) => sum + Number(item.receivedQty || 0), 0);
     const poStatusHtml = (po) => {
       const returned = poReturnQty(po);
@@ -2299,7 +2268,7 @@ function openQuotationModal(prId) {
   });
 }
 
-function openPOEditRequest(id) {
+async function openPOEditRequest(id) {
   const po = Q.purchaseOrder(id);
   if (!po) return;
   if (!['DRAFT', 'READY_TO_SEND'].includes(po.status)) {
@@ -2313,6 +2282,8 @@ function openPOEditRequest(id) {
   }
 
   // Giữ PR gốc làm lịch sử. Khi lưu sẽ tạo một PR mới chỉ cho các dòng của PO đang sửa.
+  if (typeof PurchasePRMasterData !== 'undefined') await PurchasePRMasterData.ensure();
+
   State.prEditingPoId = po.id;
   State.prEditingPrId = sourcePr.id;
   State.prEditingSupplierId = po.supplierId || '';
@@ -2359,7 +2330,9 @@ function purchaseReturnGrossValue(po) {
     const vatRate = Number(item.vatRate != null ? item.vatRate : (po.vatRate || 0));
     total += qty * price * (1 + vatRate / 100);
   }
-  return Math.round(total);
+  // Kho ghi tổng giá trị trả ngay trên PO và persist vào lenam_purchase_orders.
+  // Nhờ vậy Kế toán tính được NCC phải hoàn lại ngay cả khi goodsIssues chưa được hydrate.
+  return Math.max(Math.round(total), Math.round(Number(po.returnedGrossValue || 0)));
 }
 function purchasePaidAmount(po) {
   const hist = (DB.supplierPayments || []).filter(p => String(p.poId) === String(po?.id)).reduce((s,p)=>s+Number(p.amount||0),0);
@@ -2381,7 +2354,8 @@ function openPOModal(id) {
   const receipts = [...Q.receiptsOfPo(id)].sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')) || String(b.id||'').localeCompare(String(a.id||'')));
   const payments = [...Q.paymentsOfPo(id)].sort((a,b)=>String(b.createdAt||b.date||'').localeCompare(String(a.createdAt||a.date||'')) || String(b.id||'').localeCompare(String(a.id||'')));
   const returns = (DB.goodsIssues || []).filter(x => x.type === 'RETURN_OUT' && (x.refDoc === id || x.poId === id)).sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')) || String(b.id||'').localeCompare(String(a.id||'')));
-  const returnedQty = returns.reduce((sum,r)=>sum+(r.items||[]).reduce((n,it)=>n+Number(it.qty||0),0),0);
+  const returnedQtyFromIssues = returns.reduce((sum,r)=>sum+(r.items||[]).reduce((n,it)=>n+Number(it.qty||0),0),0);
+  const returnedQty = Math.max(Number(po.returnedQty || 0), returnedQtyFromIssues);
   const receivedQty = (po.items||[]).reduce((sum,it)=>sum+Number(it.receivedQty||0),0);
   const returnedValue = purchaseReturnGrossValue(po);
   const paidValue = purchasePaidAmount(po);
@@ -2515,7 +2489,7 @@ function openPaymentModal(poId) {
     body: `
       <div class="form-grid">
         <div class="field"><label>Số tiền thanh toán (VND) <span class="req">*</span></label>
-          <input class="inp right num" type="text" inputmode="numeric" id="payAmount" data-money="1" value="${fmtMoneyInput(remain)}" /></div>
+          <input class="inp right num" type="text" inputmode="numeric" id="payAmount" data-money="1" value="${remain}" /></div>
         <div class="field"><label>Ngày thanh toán</label><input class="inp" type="date" id="payDate" value="${typeof currentDateYMD==='function'?currentDateYMD():DB.today}" /></div>
         <div class="field"><label>Hình thức thanh toán</label>
           <select class="inp" id="payMethod"><option value="BANK_TRANSFER">Chuyển khoản ngân hàng</option><option value="CASH">Tiền mặt</option></select></div>

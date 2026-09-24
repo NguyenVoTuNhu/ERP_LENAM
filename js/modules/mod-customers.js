@@ -33,6 +33,7 @@ function filterCustomers() {
 }
 
 Views.customers = function () {
+  const canOperateCustomer = typeof Auth === 'undefined' || Auth.hasPermission('CRM_OPERATE');
   const f = F('customers', { q: '', group: '', status: '', owner: '', opportunity: '' });
   const list = filterCustomers();
   const pg = paged(list, 'customers');
@@ -54,7 +55,7 @@ Views.customers = function () {
       <td>${customerOpportunityBadge(c.opportunityStatus || 'UNDEFINED')}<div class="cell-sub">${esc(c.opportunityNote || '')}</div></td>
       <td>${badge(c.status)}</td>
       <td class="center">
-        <button
+        ${canOperateCustomer ? `<button
           class="btn btn-sm btn-cskh"
           data-act="customer-care"
           data-customer-id="${c.id}"
@@ -62,7 +63,7 @@ Views.customers = function () {
           title="Nhật ký chăm sóc khách hàng">
           <i class="fa-solid fa-comments"></i>
           ${careCount > 0 ? `${careCount} lượt` : 'Chưa có'}
-        </button>
+        </button>` : `<span class="muted">${careCount > 0 ? `${careCount} lượt` : '—'}</span>`}
       </td>
       <td>${rowActions([
         { act: 'open-customer', data: `data-id="${c.id}"`, icon: 'fa-eye', title: 'Xem chi tiết' },
@@ -75,9 +76,9 @@ Views.customers = function () {
 
   return `
   ${pageHead('Quản lý khách hàng', `Tổng ${DB.customers.length} khách hàng · Doanh số lũy kế ${fmtShort(DB.customers.reduce((s, c) => s + (typeof SalesCRM !== 'undefined' ? SalesCRM.revenueOfCustomer(c.id) : Q.revenueOf(c.id)), 0))}`, `
-    <button class="btn" data-act="import-data" data-what="khách hàng"><i class="fa-solid fa-file-import"></i>Import</button>
+    ${canOperateCustomer ? '<button class="btn" data-act="import-data" data-what="khách hàng"><i class="fa-solid fa-file-import"></i>Import</button>' : ''}
     <button class="btn" data-act="export-customers"><i class="fa-solid fa-file-export"></i>Export</button>
-    <button class="btn btn-primary" data-act="edit-customer"><i class="fa-solid fa-plus"></i>Thêm khách hàng</button>
+    ${canOperateCustomer ? '<button class="btn btn-primary" data-act="edit-customer"><i class="fa-solid fa-plus"></i>Thêm khách hàng</button>' : ''}
   `)}
 
   <div class="grid g-auto-sm" style="margin-bottom:14px">
@@ -480,8 +481,8 @@ function openCustomerDrawer(id) {
     wide: true,
     body: customerDrawerBody(c),
     foot: `<button class="btn" data-act="drawer-close">Đóng</button>
-           <button class="btn" data-act="edit-customer" data-id="${c.id}"><i class="fa-solid fa-pen"></i>Sửa thông tin</button>
-           <button class="btn btn-primary" data-act="new-order-for" data-id="${c.id}"><i class="fa-solid fa-cart-plus"></i>Tạo đơn hàng bán</button>`,
+           ${(typeof Auth === 'undefined' || Auth.hasPermission('CRM_OPERATE')) ? `<button class="btn" data-act="edit-customer" data-id="${c.id}"><i class="fa-solid fa-pen"></i>Sửa thông tin</button>` : ''}
+           ${(typeof Auth === 'undefined' || Auth.hasPermission('SALES_ORDER_OPERATE')) ? `<button class="btn btn-primary" data-act="new-order-for" data-id="${c.id}"><i class="fa-solid fa-cart-plus"></i>Tạo đơn hàng bán</button>` : ''}`,
     onMount: () => drawCustomerChart(c),
   });
 }

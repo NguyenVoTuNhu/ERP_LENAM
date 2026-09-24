@@ -54,12 +54,12 @@ DB.approvalWorkflows = DB.approvalWorkflows || [
     ] },
   { id: 'WF-DISCOUNT', docType: 'DISCOUNT', name: 'Giảm giá',          slaHours: 24,
     levels: [
-      { level: 1, role: 'ROLE_SALES', label: 'Kinh doanh duyệt', minAmount: 0 },
+      { level: 1, role: 'ROLE_SALES_MANAGER', label: 'Trưởng phòng Kinh doanh duyệt', minAmount: 0 },
       { level: 2, role: 'ROLE_DIRECTOR', label: 'Ban giám đốc duyệt (mức giảm lớn)', minAmount: 10 },
     ] },
   { id: 'WF-CANCEL', docType: 'ORDER_CANCEL', name: 'Hủy đơn hàng',    slaHours: 24,
     levels: [
-      { level: 1, role: 'ROLE_SALES', label: 'Kinh doanh duyệt', minAmount: 0 },
+      { level: 1, role: 'ROLE_SALES_MANAGER', label: 'Trưởng phòng Kinh doanh duyệt', minAmount: 0 },
     ] },
   { id: 'WF-ISSUE',  docType: 'SPECIAL_ISSUE', name: 'Xuất kho đặc biệt', slaHours: 12,
     levels: [
@@ -73,7 +73,7 @@ DB.approvalWorkflows = DB.approvalWorkflows || [
     ] },
   { id: 'WF-RETURN', docType: 'RETURN_EXCHANGE', name: 'Đổi trả hàng', slaHours: 24,
     levels: [
-      { level: 1, role: 'ROLE_SALES', label: 'Kinh doanh duyệt', minAmount: 0 },
+      { level: 1, role: 'ROLE_SALES_MANAGER', label: 'Trưởng phòng Kinh doanh duyệt', minAmount: 0 },
       { level: 2, role: 'ROLE_ACCOUNTING', label: 'Kế toán đối chiếu công nợ', minAmount: 0 },
     ] },
 ];
@@ -89,6 +89,49 @@ function approvalWorkflowOf(docType) { return DB.approvalWorkflows.find((w) => w
 function approvalActiveLevels(workflow, amount) {
   return (workflow.levels || []).filter((l) => Number(amount || 0) >= Number(l.minAmount || 0)).sort((a, b) => a.level - b.level);
 }
+
+// Giá trị PR dùng cho phân cấp duyệt phải lấy từ dữ liệu nghiệp vụ thật.
+// Không chỉ tin p.total vì các PR cũ có thể chưa lưu/đã lưu sai total.
+function approvalPrAmount(pr) {
+  if (!pr) return 0;
+  const itemTotal = (pr.items || []).reduce((sum, item) => {
+    const amount = Number(item.amount || 0);
+    if (amount > 0) return sum + amount;
+    const qty = Number(item.qty || 0);
+    const price = Number(item.expectedPrice || item.price || 0);
+    return sum + (qty * price);
+  }, 0);
+  return Math.max(Number(pr.total || 0), itemTotal);
+}
+
+// Nếu một yêu cầu PR pending được tạo từ dữ liệu cũ với thiếu cấp duyệt,
+// bổ sung lại các cấp theo ngưỡng hiện tại trước khi cho duyệt tiếp.
+function approvalEnsurePrLevels(req, pr) {
+  if (!req || req.docType !== 'PR' || !pr) return false;
+  const wf = approvalWorkflowOf('PR');
+  if (!wf) return false;
+  const amount = approvalPrAmount(pr);
+  req.amount = amount;
+  const active = approvalActiveLevels(wf, amount);
+  const existing = new Map((req.levels || []).map(l => [Number(l.level), l]));
+  let changed = false;
+  active.forEach(level => {
+    if (existing.has(Number(level.level))) return;
+    (req.levels ||= []).push({
+      level: level.level, role: level.role, label: level.label, status: 'PENDING',
+      approverId: '', approverName: '', time: '', note: '', signature: '',
+    });
+    changed = true;
+  });
+  req.levels.sort((a,b)=>Number(a.level)-Number(b.level));
+  return changed;
+}
+
+async function persistApprovalServer(keys = ['approvalRequests','approvalLogs']) {
+  if (typeof PurchaseAPI === 'undefined' || typeof PurchaseAPI.syncCollections !== 'function') return true;
+  await PurchaseAPI.syncCollections(keys);
+  return true;
+}
 function approvalDjb2(str) {
   let h = 5381;
   for (let i = 0; i < str.length; i++) h = ((h * 33) ^ str.charCodeAt(i)) >>> 0;
@@ -103,30 +146,18 @@ function approvalMySignature() {
   const uid = DB.currentUser?.userId || DB.currentUser?.id || '';
   return (DB.eSignatures || []).find((s) => s.userId === uid);
 }
-function approvalLog(requestId, docType, docId, level, action, note) {
-  const entry = {
+function approvalLog(requestId, docType, docId, level, action, note, extra = {}) {
+  DB.approvalLogs.unshift({
     id: nextCode('NKPD-', DB.approvalLogs),
     requestId, docType, docId, level, action,
     actorId: DB.currentUser?.userId || DB.currentUser?.id || '',
     actorName: DB.currentUser?.name || '',
     time: new Date().toISOString(),
     note: note || '',
-  };
-  DB.approvalLogs.unshift(entry);
-
-  // Persistence thật: nhật ký phê duyệt là append-only nên ghi thẳng record
-  // mới lên KIO, không cần đồng bộ lại toàn bộ collection.
-  if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.appendLogs([entry]).catch(() => {});
-
-  // Đồng thời đưa vào nhật ký chung của hệ thống (giống Purchases/CRM) để
-  // Quản trị viên xem được mọi hành động phê duyệt trong 1 màn Audit Log.
-  if (typeof SystemAPI !== 'undefined') {
-    SystemAPI.audit({
-      module: 'APPROVALS', entityType: 'APPROVAL_REQUEST', entityId: requestId,
-      action, description: `${entry.actorName || 'Người dùng'} ${approvalActionLabel(action)} — ${docId || requestId}${note ? ': ' + note : ''}`,
-      newData: { docType, docId, level, action },
-    }).catch(() => {});
-  }
+    signature: extra.signature || '',
+    roleId: (Auth.currentRole() || {}).id || '',
+    roleName: (Auth.currentRole() || {}).name || '',
+  });
 }
 function approvalIsOverdue(req) {
   return req.status === 'PENDING' && new Date() > new Date(req.dueAt);
@@ -187,7 +218,6 @@ const ApprovalEngine = {
     };
     DB.approvalRequests.unshift(req);
     approvalLog(req.id, docType, req.docId, levels[0].level, 'CREATE', `Tạo yêu cầu phê duyệt${req.amount ? ' — ' + fmtVND(req.amount) : ''}`);
-    if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.scheduleCollections(['requests']);
     return req;
   },
 
@@ -210,6 +240,9 @@ const ApprovalEngine = {
   approve(requestId, { note = '', signature = '' } = {}) {
     const req = DB.approvalRequests.find((r) => r.id === requestId);
     if (!req || req.status !== 'PENDING') { Toast.err('Không thể duyệt', 'Yêu cầu không ở trạng thái chờ duyệt.'); return false; }
+    // PR cũ có thể được tạo request khi total chưa chính xác. Trước mỗi lần duyệt
+    // phải đối chiếu lại giá trị thật để không bỏ sót cấp Ban giám đốc >= 50 triệu.
+    if (req.docType === 'PR') approvalEnsurePrLevels(req, Q.purchase(req.docId));
     if (!this.canAct(req)) { Toast.err('Không có quyền duyệt', 'Vai trò hiện tại không thuộc cấp duyệt hiện tại của yêu cầu này.'); return false; }
     const lvl = this.currentLevelOf(req);
     lvl.status = 'APPROVED';
@@ -218,10 +251,19 @@ const ApprovalEngine = {
     lvl.time = new Date().toISOString();
     lvl.note = note;
     lvl.signature = signature || approvalSignText(DB.currentUser?.name || '');
-    approvalLog(req.id, req.docType, req.docId, lvl.level, 'APPROVE', note);
+    approvalLog(req.id, req.docType, req.docId, lvl.level, 'APPROVE', note, { signature: lvl.signature });
     const remaining = (req.levels || []).filter((l) => l.level > lvl.level);
     if (remaining.length) {
       req.currentLevel = remaining[0].level;
+      if (req.docType === 'PR') {
+        const pr = Q.purchase(req.docId);
+        if (pr) {
+          pr.approvalRequestId = req.id;
+          pr.approvalCurrentLevel = remaining[0].level;
+          pr.approvalCurrentRole = remaining[0].role;
+          pr.approvalCurrentLabel = remaining[0].label || approvalRoleName(remaining[0].role);
+        }
+      }
       Toast.ok('Đã duyệt cấp ' + lvl.level, `Chuyển sang cấp duyệt tiếp theo: ${approvalRoleName(remaining[0].role)}`);
     } else {
       req.status = 'APPROVED';
@@ -231,7 +273,6 @@ const ApprovalEngine = {
       try { this.handlers[req.docType]?.onApproved?.(req); }
       catch (err) { console.error('[ApprovalEngine] onApproved lỗi:', err); Toast.err('Duyệt xong nhưng áp dụng thất bại', String(err?.message || err)); }
     }
-    if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.scheduleCollections(['requests']);
     return true;
   },
 
@@ -252,7 +293,6 @@ const ApprovalEngine = {
     Toast.warn('Đã từ chối yêu cầu', req.title);
     try { this.handlers[req.docType]?.onRejected?.(req); }
     catch (err) { console.error('[ApprovalEngine] onRejected lỗi:', err); }
-    if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.scheduleCollections(['requests']);
     return true;
   },
 
@@ -262,7 +302,6 @@ const ApprovalEngine = {
     req.status = 'CANCELLED';
     req.completedAt = new Date().toISOString();
     approvalLog(req.id, req.docType, req.docId, req.currentLevel, 'CANCEL', reason || '');
-    if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.scheduleCollections(['requests']);
     return true;
   },
 };
@@ -424,17 +463,18 @@ function approvalsLogsView() {
   const pg = paged(list, 'approvalsLogs', 15);
   const rows = pg.items.map((l) => `<tr>
     <td class="num">${fmtDateTimeVN(l.time)}</td>
-    <td>${cell2(esc(l.actorName || '—'), approvalActionLabel(l.action))}</td>
+    <td>${cell2(esc(l.actorName || '—'), `${approvalActionLabel(l.action)}${l.roleName ? ' · ' + esc(l.roleName) : ''}`)}</td>
     <td>${approvalDocTypeChip(l.docType)}</td>
     <td>${l.requestId ? `<span class="code" data-act="approval-view" data-id="${esc(l.requestId)}" style="cursor:pointer">${esc(l.requestId)}</span>` : '—'}${l.docId ? `<div class="cell-sub">${esc(l.docId)}</div>` : ''}</td>
     <td>${esc(l.note || '—')}</td>
+    <td class="right">${rowActions([{act:'approval-log-view',data:`data-id="${esc(l.id)}"`,icon:'fa-eye',title:'Xem chi tiết nhật ký'}])}</td>
   </tr>`);
   return `<div class="card">
     <div class="toolbar">
       ${searchBox('approvalsLogs', 'Tìm theo mã chứng từ, người thực hiện, ghi chú…')}
       ${selectFilter('approvalsLogs', 'docType', APPROVAL_DOC_TYPE_LIST.map((dt) => [dt, APPROVAL_DOC_TYPES[dt].label]), 'Tất cả loại chứng từ')}
     </div>
-    ${tableShell([{ t: 'Thời gian', w: '160px' }, { t: 'Người thực hiện / Hành động' }, { t: 'Loại chứng từ' }, { t: 'Yêu cầu / Tham chiếu' }, { t: 'Ghi chú' }], rows, { emptyTitle: 'Chưa có nhật ký phê duyệt' })}
+    ${tableShell([{ t: 'Thời gian', w: '160px' }, { t: 'Người thực hiện / Hành động' }, { t: 'Loại chứng từ' }, { t: 'Yêu cầu / Tham chiếu' }, { t: 'Ghi chú' }, {t:'',w:'70px'}], rows, { emptyTitle: 'Chưa có nhật ký phê duyệt' })}
     ${pagiHTML('approvalsLogs', pg, 'dòng nhật ký')}
   </div>`;
 }
@@ -502,7 +542,6 @@ Views.approvals = function approvalsMainView() {
     signature: approvalsSignatureView,
   }[tab] || approvalsDashboardView;
   return `${pageHead('Quy trình phê duyệt', 'Phân quyền theo cấp · Nhật ký phê duyệt · Chữ ký điện tử · Cảnh báo quá hạn', approvalsHeadActions())}
-    ${moduleTabs(APPROVALS_TABS, tab)}
     ${bodyFn()}`;
 };
 
@@ -591,6 +630,29 @@ function openApprovalActionModal(id, kind) {
   }
 }
 
+
+function openApprovalLogDetail(id) {
+  const log = (DB.approvalLogs || []).find((x) => x.id === id);
+  if (!log) return;
+  const req = (DB.approvalRequests || []).find((r) => r.id === log.requestId);
+  Modal.open({
+    title: `Chi tiết nhật ký · ${esc(log.id)}`,
+    sub: `${approvalActionLabel(log.action)} · ${esc(log.actorName || '—')}`,
+    body: `<div class="detail-list">
+      <div class="detail-row"><span class="muted">Thời gian</span><strong>${fmtDateTimeVN(log.time)}</strong></div>
+      <div class="detail-row"><span class="muted">Người thực hiện</span><strong>${esc(log.actorName || '—')}</strong></div>
+      <div class="detail-row"><span class="muted">Vai trò</span><strong>${esc(log.roleName || approvalRoleName(log.roleId) || '—')}</strong></div>
+      <div class="detail-row"><span class="muted">Hành động</span><strong>${esc(approvalActionLabel(log.action))}</strong></div>
+      <div class="detail-row"><span class="muted">Cấp duyệt</span><strong>${log.level ? `Cấp ${log.level}` : '—'}</strong></div>
+      <div class="detail-row"><span class="muted">Yêu cầu</span><strong>${log.requestId ? `<span class="code">${esc(log.requestId)}</span>` : '—'}</strong></div>
+      <div class="detail-row"><span class="muted">Chứng từ</span><strong>${esc(log.docId || '—')}</strong></div>
+      <div class="detail-row"><span class="muted">Ghi chú</span><strong>${esc(log.note || '—')}</strong></div>
+      ${log.signature ? `<div class="detail-row"><span class="muted">Chữ ký điện tử</span><strong style="font-style:italic">${esc(log.signature)}</strong></div>` : ''}
+    </div>`,
+    foot: `<button class="btn" data-act="modal-close">Đóng</button>${req ? `<button class="btn btn-primary" data-act="approval-view" data-id="${esc(req.id)}"><i class="fa-solid fa-file-lines"></i>Xem yêu cầu</button>` : ''}`
+  });
+}
+
 function openWorkflowEditForm(id) {
   const w = DB.approvalWorkflows.find((x) => x.id === id);
   if (!w) return;
@@ -622,7 +684,7 @@ function openWorkflowEditForm(id) {
  * -------------------------------------------------------------------------*/
 Object.assign(Actions, {
   'approval-new': () => openApprovalNewForm(),
-  'approval-new-save': () => {
+  'approval-new-save': async () => {
     const docType = $('#apNewType')?.value || '';
     const docId = $('#apNewDocId')?.value.trim() || '';
     const title = $('#apNewTitle')?.value.trim() || '';
@@ -630,28 +692,73 @@ Object.assign(Actions, {
     const note = $('#apNewNote')?.value.trim() || '';
     const req = ApprovalEngine.create({ docType, docId, title, amount, note });
     if (!req) return;
+    try {
+      await persistApprovalServer(['approvalRequests','approvalLogs']);
+    } catch (err) {
+      DB.approvalRequests = (DB.approvalRequests || []).filter(r => r.id !== req.id);
+      DB.approvalLogs = (DB.approvalLogs || []).filter(l => l.requestId !== req.id);
+      Toast.err('Không lưu được yêu cầu duyệt', String(err?.message || err));
+      return;
+    }
     Modal.close();
     go('approvals', { tab: 'pending' });
     Toast.ok('Đã tạo yêu cầu phê duyệt', `${req.id} · Cấp duyệt đầu tiên: ${approvalRoleName(req.levels[0].role)}`);
   },
   'approval-view': (d) => openApprovalDetail(d.id),
+  'approval-log-view': (d) => openApprovalLogDetail(d.id),
   'approval-approve': (d) => openApprovalActionModal(d.id, 'approve'),
   'approval-reject': (d) => openApprovalActionModal(d.id, 'reject'),
-  'approval-approve-save': (d) => {
+  'approval-approve-save': async (d) => {
     if (!$('#apSigConfirm')?.checked) { Toast.err('Chưa xác nhận chữ ký', 'Vui lòng tick xác nhận sử dụng chữ ký điện tử trước khi duyệt.'); return; }
     const note = $('#apNote')?.value.trim() || '';
     const signature = $('#apSigText')?.value.trim() || '';
-    if (ApprovalEngine.approve(d.id, { note, signature })) { Modal.close(); render(); }
+    const req = (DB.approvalRequests || []).find(r => r.id === d.id);
+    const reqSnapshot = req ? JSON.parse(JSON.stringify(req)) : null;
+    const pr = req?.docType === 'PR' ? Q.purchase(req.docId) : null;
+    const prSnapshot = pr ? JSON.parse(JSON.stringify(pr)) : null;
+    if (!ApprovalEngine.approve(d.id, { note, signature })) return;
+    // Phản hồi UI ngay; việc ghi server vẫn được await và rollback nếu thất bại.
+    Modal.close(); render();
+    try {
+      await persistApprovalServer(['approvalRequests','approvalLogs','purchases']);
+    } catch (err) {
+      if (req && reqSnapshot) Object.assign(req, reqSnapshot);
+      if (pr && prSnapshot) Object.assign(pr, prSnapshot);
+      render();
+      Toast.err('Không lưu được kết quả duyệt', String(err?.message || err));
+      return;
+    }
   },
-  'approval-reject-save': (d) => {
+  'approval-reject-save': async (d) => {
     const reason = $('#apReason')?.value.trim() || '';
-    if (ApprovalEngine.reject(d.id, { reason })) { Modal.close(); render(); }
+    const req = (DB.approvalRequests || []).find(r => r.id === d.id);
+    const reqSnapshot = req ? JSON.parse(JSON.stringify(req)) : null;
+    const pr = req?.docType === 'PR' ? Q.purchase(req.docId) : null;
+    const prSnapshot = pr ? JSON.parse(JSON.stringify(pr)) : null;
+    if (!ApprovalEngine.reject(d.id, { reason })) return;
+    Modal.close(); render();
+    try {
+      await persistApprovalServer(['approvalRequests','approvalLogs','purchases']);
+    } catch (err) {
+      if (req && reqSnapshot) Object.assign(req, reqSnapshot);
+      if (pr && prSnapshot) Object.assign(pr, prSnapshot);
+      render();
+      Toast.err('Không lưu được kết quả từ chối', String(err?.message || err));
+      return;
+    }
   },
   'approval-cancel': (d) => {
     confirmBox({
       title: 'Hủy yêu cầu phê duyệt', icon: 'fa-ban', okText: 'Hủy yêu cầu',
       message: `Hủy yêu cầu <b>${esc(d.id)}</b>? Yêu cầu sẽ không thể tiếp tục xử lý.`,
-      onOk: () => { ApprovalEngine.cancel(d.id, 'Người đề nghị hủy yêu cầu'); render(); Toast.ok('Đã hủy yêu cầu', d.id); },
+      onOk: async () => {
+        const req = (DB.approvalRequests || []).find(r => r.id === d.id);
+        const snap = req ? JSON.parse(JSON.stringify(req)) : null;
+        if (!ApprovalEngine.cancel(d.id, 'Người đề nghị hủy yêu cầu')) return;
+        try { await persistApprovalServer(['approvalRequests','approvalLogs']); }
+        catch (err) { if (req && snap) Object.assign(req, snap); Toast.err('Không lưu được trạng thái hủy', String(err?.message || err)); return; }
+        render(); Toast.ok('Đã hủy yêu cầu', d.id);
+      },
     });
   },
   'approval-remind': (d) => Toast.info('Đã gửi nhắc duyệt', `Thông báo nhắc duyệt cho yêu cầu ${d.id} đã được ghi nhận (bản demo).`),
@@ -690,14 +797,6 @@ Object.assign(Actions, {
     if (!levels.length) { Toast.err('Thiếu cấp duyệt', 'Quy trình phải có ít nhất một cấp phê duyệt.'); return; }
     w.slaHours = sla > 0 ? sla : 24;
     w.levels = levels;
-    if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.scheduleCollections(['workflows']);
-    if (typeof SystemAPI !== 'undefined') {
-      SystemAPI.audit({
-        module: 'APPROVALS', entityType: 'APPROVAL_WORKFLOW', entityId: w.id, action: 'UPDATE',
-        description: `${DB.currentUser?.name || 'Người dùng'} cập nhật quy trình phê duyệt ${(APPROVAL_DOC_TYPES[w.docType] || {}).label || w.docType}`,
-        newData: { slaHours: w.slaHours, levels: w.levels },
-      }).catch(() => {});
-    }
     Modal.close(); render();
     Toast.ok('Đã lưu quy trình phê duyệt', `${(APPROVAL_DOC_TYPES[w.docType] || {}).label || w.docType}`);
   },
@@ -709,17 +808,209 @@ Object.assign(Actions, {
     let sig = (DB.eSignatures || []).find((s) => s.userId === uid);
     const code = approvalDjb2(fullName + uid + Date.now());
     const preview = approvalSignText(fullName);
-    const isNew = !sig;
     if (sig) { Object.assign(sig, { fullName, code, preview }); }
     else { sig = { userId: uid, fullName, code, preview, createdAt: new Date().toISOString() }; DB.eSignatures.unshift(sig); }
-    if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.scheduleCollections(['signatures']);
-    if (typeof SystemAPI !== 'undefined') {
-      SystemAPI.audit({
-        module: 'APPROVALS', entityType: 'E_SIGNATURE', entityId: uid, action: isNew ? 'CREATE' : 'UPDATE',
-        description: `${DB.currentUser?.name || 'Người dùng'} ${isNew ? 'đăng ký' : 'cập nhật'} chữ ký điện tử: ${fullName}`,
-      }).catch(() => {});
-    }
     render();
     Toast.ok('Đã lưu chữ ký điện tử', fullName);
   },
 });
+
+/* ---------------------------------------------------------------------------
+ * 8. NỐI PR / PO / THANH TOÁN VÀO QUY TRÌNH PHÊ DUYỆT NHIỀU CẤP
+ * ----------------------------------------------------------------------------
+ * Nguyên tắc: nút "Duyệt" gốc KHÔNG còn đổi trạng thái ngay — nó chỉ TẠO
+ * (hoặc mở lại) một yêu cầu trong ApprovalEngine. Việc đổi trạng thái thật
+ * (PR -> mh_da_duyet, PO -> APPROVED, ghi nhận thanh toán vào
+ * DB.supplierPayments…) chỉ chạy trong onApproved — tức là SAU KHI đã đi hết
+ * mọi cấp duyệt đã cấu hình. Nếu bị từ chối ở bất kỳ cấp nào, onRejected sẽ
+ * đưa chứng từ về đúng trạng thái "đã từ chối" như luồng cũ.
+ *
+ * File này ghi đè (override) 3 action đã có sẵn trong app.js:
+ *   Actions['pr-approve-action'], Actions['supplier-pay-save']
+ * Việc override chỉ có tác dụng nếu mod-approvals.js được nạp SAU app.js
+ * (xem mục 9 — hướng dẫn thứ tự nạp — ngay bên dưới).
+ *
+ * Muốn TẮT phần tích hợp này (chỉ giữ quy trình phê duyệt độc lập ở mục
+ * "Tạo yêu cầu phê duyệt" như trước, không đụng vào PR/PO/Thanh toán) thì
+ * đổi APPROVAL_INTEGRATE_PURCHASE_FLOW thành false.
+ * -------------------------------------------------------------------------*/
+const APPROVAL_INTEGRATE_PURCHASE_FLOW = true;
+
+if (APPROVAL_INTEGRATE_PURCHASE_FLOW) {
+
+  /* ---- 8.1 Đề nghị mua hàng (PR) ------------------------------------- */
+  ApprovalEngine.registerHandler('PR', {
+    onApproved(req) {
+      const p = Q.purchase(req.docId);
+      if (!p || p.status !== 'mh_cho_duyet') return; // đã bị xử lý bằng cách khác trong lúc chờ duyệt
+      const lastLvl = req.levels[req.levels.length - 1];
+      p.status = 'mh_da_duyet';
+      p.approvedBy = lastLvl.approverId;
+      p.approvedByUserId = lastLvl.approverId;
+      p.approvedByName = lastLvl.approverName;
+      p.approvedAt = lastLvl.time;
+      p.approvalRequestId = req.id;
+      p.approvalCurrentLevel = '';
+      p.approvalCurrentRole = '';
+      p.approvalCurrentLabel = '';
+      if (typeof SystemAPI !== 'undefined') {
+        SystemAPI.audit({ module: 'PURCHASE', entityType: 'PURCHASE_REQUEST', entityId: p.id, action: 'APPROVE', description: `${lastLvl.approverName} phê duyệt ${p.id} qua quy trình ${req.levels.length} cấp`, newData: { status: p.status } });
+      }
+      DB.purchaseApprovals.unshift({ id: nextCode('PA-', DB.purchaseApprovals), prId: p.id, approverId: lastLvl.approverId, time: DB.today + ' 09:00', action: 'approve', prevStatus: 'mh_cho_duyet', nextStatus: 'mh_da_duyet', note: 'Đã phê duyệt qua quy trình phê duyệt nhiều cấp' });
+
+      // IMPORTANT: mod-approvals override action duyệt sau khi PurchaseAPI đã wrap
+      // các action Purchase, vì vậy thay đổi PR ở đây phải tự đánh dấu dirty +
+      // đồng bộ KIO. Nếu không, đổi tài khoản/refresh sẽ nạp snapshot server cũ
+      // và PR quay lại Chờ duyệt.
+      if (typeof PurchaseAPI !== 'undefined' && PurchaseAPI.scheduleCollections) {
+        PurchaseAPI.scheduleCollections(['purchases'], 0);
+      }
+
+      F('purchases').prId = p.id;
+      render();
+    },
+    onRejected(req) {
+      const p = Q.purchase(req.docId);
+      if (!p || p.status !== 'mh_cho_duyet') return;
+      const rejectedLvl = req.levels.find((l) => l.status === 'REJECTED');
+      p.status = 'mh_tu_choi';
+      p.rejectedByUserId = rejectedLvl?.approverId || '';
+      p.rejectedByName = rejectedLvl?.approverName || '';
+      p.rejectedAt = rejectedLvl?.time || new Date().toISOString();
+      p.approvalCurrentLevel = '';
+      p.approvalCurrentRole = '';
+      p.approvalCurrentLabel = '';
+      DB.purchaseApprovals.unshift({ id: nextCode('PA-', DB.purchaseApprovals), prId: p.id, approverId: rejectedLvl?.approverId || '', time: DB.today + ' 09:00', action: 'reject', prevStatus: 'mh_cho_duyet', nextStatus: 'mh_tu_choi', note: rejectedLvl?.note || '' });
+      if (typeof SystemAPI !== 'undefined') SystemAPI.audit({ module: 'PURCHASE', entityType: 'PURCHASE_REQUEST', entityId: p.id, action: 'REJECT', description: `${rejectedLvl?.approverName || ''} từ chối ${p.id}: ${rejectedLvl?.note || ''}`, newData: { status: p.status } });
+      if (typeof PurchaseAPI !== 'undefined' && PurchaseAPI.scheduleCollections) {
+        PurchaseAPI.scheduleCollections(['purchases'], 0);
+      }
+      render();
+    },
+  });
+
+  (function overridePrApprove() {
+    const originalPrApprove = Actions['pr-approve-action'];
+    Actions['pr-approve-action'] = async function (d, el, e) {
+      const p = Q.purchase(d.id);
+      if (!p) return;
+      // Nhánh trạng thái legacy giữ nguyên.
+      if (p.status === 'PENDING_APPROVAL') { return originalPrApprove.call(this, d, el, e); }
+      if (p.status !== 'mh_cho_duyet') { Toast.err('Không thể duyệt', 'Đề nghị mua hàng không ở trạng thái Chờ duyệt.'); return; }
+
+      const amount = approvalPrAmount(p);
+      let req = ApprovalEngine.pendingFor('PR', p.id);
+      let created = false;
+      if (!req) {
+        req = ApprovalEngine.create({ docType: 'PR', docId: p.id, title: `Đề nghị mua hàng ${p.id}`, amount, note: p.reason });
+        if (!req) return;
+        p.approvalRequestId = req.id;
+        created = true;
+      } else {
+        approvalEnsurePrLevels(req, p);
+      }
+
+      // Với PR >= 50 triệu, request bắt buộc phải có cấp Ban giám đốc.
+      if (amount >= 50000000 && !(req.levels || []).some(l => l.role === 'ROLE_DIRECTOR')) {
+        Toast.err('Thiếu cấp duyệt Ban giám đốc', `${p.id} có giá trị ${fmtVND(amount)} nhưng chưa tạo được cấp duyệt 2. Vui lòng thử lại.`);
+        return;
+      }
+
+      try {
+        await persistApprovalServer(['approvalRequests','approvalLogs','purchases']);
+      } catch (err) {
+        if (created) {
+          DB.approvalRequests = (DB.approvalRequests || []).filter(r => r.id !== req.id);
+          DB.approvalLogs = (DB.approvalLogs || []).filter(l => l.requestId !== req.id);
+          if (p.approvalRequestId === req.id) p.approvalRequestId = '';
+        }
+        Toast.err('Không lưu được yêu cầu duyệt', String(err?.message || err));
+        return;
+      }
+
+      Modal.close();
+      go('approvals', { tab: 'pending' });
+      const lvl = ApprovalEngine.currentLevelOf(req);
+      Toast.info('Đã chuyển sang quy trình phê duyệt', `${req.id} · ${fmtVND(amount)} · Đang chờ: ${approvalRoleName(lvl.role)}`);
+    };
+  })();
+
+  /* Nút "Từ chối" cũ của PR vẫn thao tác trực tiếp trên PR — nếu PR đó đang
+   * có một yêu cầu phê duyệt PENDING thì hủy luôn yêu cầu đó để tránh treo
+   * một yêu cầu không còn ý nghĩa trong danh sách "Việc cần duyệt". */
+  (function overridePrRejectSave() {
+    const originalPrRejectSave = Actions['pr-reject-save'];
+    Actions['pr-reject-save'] = function (d, el, e) {
+      const before = Q.purchase(d.id)?.status;
+      const result = originalPrRejectSave.call(this, d, el, e);
+      const p = Q.purchase(d.id);
+      if (p && before === 'mh_cho_duyet' && p.status === 'mh_tu_choi') {
+        const req = ApprovalEngine.pendingFor('PR', p.id);
+        if (req) ApprovalEngine.cancel(req.id, 'PR bị từ chối trực tiếp ngoài quy trình nhiều cấp');
+      }
+      return result;
+    };
+  })();
+
+  /* ---- 8.2 Đơn đặt hàng (PO) ------------------------------------------ */
+  /* PO không dùng quy trình phê duyệt riêng. Sau khi PR đã được duyệt và
+   * Mua hàng xác nhận báo giá/chọn NCC, PO đi thẳng vào READY_TO_SEND.
+   * Bộ phận Mua hàng có thể Gửi NCC hoặc Hủy PO theo trạng thái hợp lệ. */
+
+  /* ---- 8.3 Thanh toán nhà cung cấp ------------------------------------ */
+  /* Kế toán là bộ phận ghi nhận thanh toán. Không ép PAYMENT đi qua một vòng
+   * phê duyệt khác, vì chính role Kế toán lại không có module Approvals và điều
+   * đó tạo lỗi "Không có quyền truy cập". Action supplier-pay-save đã được
+   * PurchaseAPI.wrapActions bọc để persistence KIO và app.js tự ghi sổ ngân hàng.
+   * Nếu sau này cần ngưỡng thanh toán lớn phải duyệt, hãy thiết kế workflow riêng
+   * có role người duyệt khác Kế toán thay vì chặn mọi khoản thanh toán. */
+
+}
+
+/* ============================================================================
+ * 9. HƯỚNG DẪN TÍCH HỢP VÀO DỰ ÁN (THỨ TỰ NẠP SCRIPT LÀ ĐIỂM QUAN TRỌNG NHẤT)
+ * ----------------------------------------------------------------------------
+ * QUAN TRỌNG — SỬA LẠI so với hướng dẫn trước: file này PHẢI được nạp SAU
+ * js/app.js, KHÔNG phải trước. Lý do: biến `Actions` được khai báo bằng
+ * `const Actions = {...}` bên trong app.js; các dòng `Object.assign(Actions,
+ * ...)` và việc override Actions['pr-approve-action'] / ['po-approve-action']
+ * / ['supplier-pay-save'] ở mục 7 và mục 8 phía trên chỉ chạy được khi
+ * `Actions` đã tồn tại. Nếu nạp trước app.js sẽ bị lỗi
+ * "Cannot access 'Actions' before initialization" và toàn bộ app không chạy.
+ *
+ * 1) Lưu file này vào: js/modules/mod-approvals.js
+ * 2) Trong index.html, thêm đúng MỘT dòng — đặt SAU dòng nạp js/app.js
+ *    (đặt cạnh các file cùng kiểu "gắn thêm sau app.js" đã có sẵn trong dự án
+ *    là js/modules/mod-accounting.js, mod-logistics.js, mod-rnd-actions.js):
+ *
+ *      <script src="js/app.js?v=20260915-lg46"></script>
+ *
+ *      <script src="js/modules/mod-approvals.js?v=20260915-approvals1"></script>
+ *      <script src="js/modules/mod-accounting.js?v=20260915-bomflow1"></script>
+ *      <script src="js/modules/mod-logistics.js?v=20260915-lg46"></script>
+ *      <script src="js/modules/mod-rnd-actions.js?v=20260915-rnd1"></script>
+ *
+ *    (Thứ tự giữa mod-approvals.js và 3 file mod-accounting/mod-logistics/
+ *    mod-rnd-actions không quan trọng — chúng độc lập với nhau. Chỉ cần cả 4
+ *    file này nằm SAU app.js.)
+ * 3) Không cần sửa gì thêm ở app.core.js — mục "Phê duyệt" đã có sẵn trong
+ *    NAV với đúng 6 tab con: Tổng quan / Việc cần duyệt / Quy trình phê
+ *    duyệt / Nhật ký phê duyệt / Cảnh báo quá hạn / Chữ ký điện tử.
+ * 4) Phạm vi đã nối sẵn (mục 8, bật bằng APPROVAL_INTEGRATE_PURCHASE_FLOW):
+ *      - Nút "Duyệt" của Đề nghị mua hàng (PR) → tạo/mở yêu cầu phê duyệt
+ *        thay vì đổi trạng thái ngay; PR chỉ chuyển "Đã duyệt" sau khi xong
+ *        hết các cấp. Từ chối ở PR module cũ cũng tự hủy yêu cầu đang treo.
+ *      - Nút "Duyệt" của Đơn đặt hàng (PO) → tương tự PR.
+ *      - Nút lưu Thanh toán NCC (modal "Ghi nhận thanh toán" ở PO) → không
+ *        ghi thẳng vào DB.supplierPayments nữa mà tạo yêu cầu duyệt; số
+ *        tiền/PO/hình thức thanh toán được lưu tạm trong `req.payload` và
+ *        chỉ thực sự cộng vào công nợ NCC khi duyệt xong tất cả các cấp.
+ *    Các luồng khác (Giảm giá, Chi tiền, Hủy đơn hàng, Xuất kho đặc biệt,
+ *    Sản xuất ngoài định mức, Đổi trả hàng) chưa có nút bấm riêng trong các
+ *    module tương ứng của dự án hiện tại, nên vẫn dùng qua nút chung "Tạo
+ *    yêu cầu phê duyệt" ở màn Phê duyệt. Muốn nối trực tiếp vào một nút cụ
+ *    thể (ví dụ nút "Hủy đơn hàng" trong CRM), làm đúng khuôn mẫu ở mục 8:
+ *    lưu action gốc lại, viết action mới gọi ApprovalEngine.create(...) thay
+ *    vì đổi trạng thái ngay, rồi ApprovalEngine.registerHandler(docType, {
+ *    onApproved, onRejected }) để thực thi thay đổi thật khi duyệt xong.
+ * ==========================================================================*/

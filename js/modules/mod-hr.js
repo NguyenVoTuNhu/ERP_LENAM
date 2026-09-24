@@ -342,7 +342,6 @@ function saveEmployeeForm() {
     if (!e) { Toast.err('Không tìm thấy nhân sự', formId); return; }
     Object.assign(e, { name, dept, position, contractType, status, phone, email, joinDate, gender, salary });
     SEARCH_INDEX = null;
-    if (typeof HRAPI !== 'undefined') HRAPI.scheduleSync();
     Modal.close();
     render();
     Toast.ok('Đã cập nhật hồ sơ nhân sự', `${e.id} · ${name}`);
@@ -350,7 +349,6 @@ function saveEmployeeForm() {
     const id = nextCode('NV-', DB.employees, 3);
     DB.employees.push({ id, name, dept, position, contractType, status, phone, email, joinDate, gender, salary, active: true });
     SEARCH_INDEX = null;
-    if (typeof HRAPI !== 'undefined') HRAPI.scheduleSync();
     Modal.close();
     render();
     Toast.ok('Đã thêm nhân sự mới', `${id} · ${name}`);
@@ -372,7 +370,6 @@ function toggleEmployeeActive(id) {
       : `Mở khóa hồ sơ <b>${esc(e.id)} · ${esc(e.name)}</b> để tiếp tục sử dụng bình thường?`,
     onOk: () => {
       e.active = !willLock;
-      if (typeof HRAPI !== 'undefined') HRAPI.scheduleSync();
       render();
       Toast.ok(e.active ? 'Đã mở khóa nhân sự' : 'Đã khóa / ngừng sử dụng nhân sự', `${e.id} · ${e.name}`);
     },
@@ -481,11 +478,7 @@ function importEmployeesFromFile(file) {
       box.innerHTML = `Đã thêm mới <b>${result.created}</b> · cập nhật <b>${result.updated}</b> · bỏ qua <b>${result.skipped}</b> dòng lỗi.`
         + (result.errors.length ? `<div style="margin-top:6px;color:var(--red)">${result.errors.slice(0, 5).map(esc).join('<br>')}</div>` : '');
     }
-    if (result.created || result.updated) {
-      SEARCH_INDEX = null;
-      if (typeof HRAPI !== 'undefined') HRAPI.scheduleSync();
-      render();
-    }
+    if (result.created || result.updated) { SEARCH_INDEX = null; render(); }
     Toast.ok('Đã xử lý file import', `Thêm mới ${result.created} · Cập nhật ${result.updated} · Lỗi ${result.skipped}`);
   };
   reader.onerror = () => Toast.err('Không đọc được file', 'Vui lòng thử lại.');

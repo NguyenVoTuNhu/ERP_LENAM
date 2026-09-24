@@ -993,7 +993,7 @@ function supplierDrawerBody(supplier){
   }
   return tabs+`<div style="padding:17px 18px">${inner}</div>`;
 }
-function openSupplierDrawer(id){ const s=Q.supplier(id); if(!s)return; State.supplierTab=State.supplierTab||'overview'; Drawer.open({title:`<div style="display:flex;align-items:center;gap:11px">${avatarHTML(s.name,'lg')}<span>${esc(s.name)}<div style="font-size:12.5px;font-weight:500;color:var(--text-3);margin-top:2px">${esc(s.id)} · ${esc(s.group||'Nhà cung cấp')}</div></span></div>`,wide:true,body:supplierDrawerBody(s),foot:`<button class="btn" data-act="drawer-close">Đóng</button><button class="btn" data-act="supplier-edit" data-id="${esc(s.id)}"><i class="fa-solid fa-pen"></i>Sửa thông tin</button>`}); }
+function openSupplierDrawer(id){ const s=Q.supplier(id); if(!s)return; State.supplierTab=State.supplierTab||'overview'; const canEdit=typeof Auth==='undefined'||Auth.hasPermission('PURCHASE_SUPPLIER_MANAGE'); Drawer.open({title:`<div style="display:flex;align-items:center;gap:11px">${avatarHTML(s.name,'lg')}<span>${esc(s.name)}<div style="font-size:12.5px;font-weight:500;color:var(--text-3);margin-top:2px">${esc(s.id)} · ${esc(s.group||'Nhà cung cấp')}</div></span></div>`,wide:true,body:supplierDrawerBody(s),foot:`<button class="btn" data-act="drawer-close">Đóng</button>${canEdit?`<button class="btn" data-act="supplier-edit" data-id="${esc(s.id)}"><i class="fa-solid fa-pen"></i>Sửa thông tin</button>`:''}`}); }
 
 Views.suppliers = function () {
   const f = F('suppliers', { q: '', group: '' });
@@ -1034,7 +1034,8 @@ Views.suppliers = function () {
         0
       ) / ratedSupplierCount
     : 0;
-  return `${pageHead('Nhà cung cấp', 'Đối tác nguyên liệu đậu nành, phụ gia, bao bì, nước sạch, vận chuyển và dịch vụ của Lê Nam', '<button class="btn btn-primary" data-act="enterprise-action" data-key="suppliers"><i class="fa-solid fa-plus"></i>Thêm nhà cung cấp</button>')}
+  const canManageSupplier=typeof Auth==='undefined'||Auth.hasPermission('PURCHASE_SUPPLIER_MANAGE');
+  return `${pageHead('Nhà cung cấp', 'Đối tác nguyên liệu đậu nành, phụ gia, bao bì, nước sạch, vận chuyển và dịch vụ của Lê Nam', canManageSupplier?'<button class="btn btn-primary" data-act="enterprise-action" data-key="suppliers"><i class="fa-solid fa-plus"></i>Thêm nhà cung cấp</button>':'')}
   <div class="grid g-auto-sm" style="margin-bottom:14px">
     ${mkpi(
       'Tổng nhà cung cấp',
@@ -2489,8 +2490,12 @@ function openIncomingInspectionModal(receiptId) {
  * ========================================================================== */
 function processQcStatusHtml(stage) {
   const q = stage?.processQc || {};
+  const legacyPending = q.status === 'FAILED' ? Math.max(0, Number(q.lastFailQty || 0)) : 0;
+  const pending = Math.max(0, Number(q.pendingReworkQty ?? legacyPending));
+  const ready = Math.max(0, Number(q.readyRetestQty || 0));
   if (stage?.status === 'done' || q.status === 'PASSED') return '<span class="badge green">Đạt</span>';
-  if (q.status === 'FAILED') return '<span class="badge red">Không đạt / chờ xử lý</span>';
+  if (pending > 0 || q.status === 'REWORK_PENDING' || q.status === 'FAILED') return `<span class="badge red">Chờ sửa/tái chế${pending?` ${fmtN(pending)}`:''}</span>`;
+  if (ready > 0 || q.status === 'READY_RETEST') return `<span class="badge orange">Chờ tái kiểm${ready?` ${fmtN(ready)}`:''}</span>`;
   if (Number(stage?.qtyDone || 0) > 0 || q.status === 'IN_PROGRESS') return '<span class="badge blue">Đang kiểm</span>';
   return '<span class="badge orange">Chờ kiểm</span>';
 }
@@ -2512,33 +2517,46 @@ function processInspectionView() {
   const f = F('quality-pqc', { q:'', status:'' });
   const q = String(f.q || '').toLowerCase().trim();
   let list = processInspectionRows().filter(x => {
-    const status = x.stage.status === 'done' ? 'PASSED' : (x.stage.processQc?.status || 'PENDING');
+    const sq=x.stage.processQc||{};
+    const legacyPending=sq.status==='FAILED'?Math.max(0,Number(sq.lastFailQty||0)):0;
+    const pending=Math.max(0,Number(sq.pendingReworkQty??legacyPending));
+    const ready=Math.max(0,Number(sq.readyRetestQty||0));
+    const status = x.stage.status === 'done' ? 'PASSED' : pending>0?'REWORK_PENDING':ready>0?'READY_RETEST':(sq.status || 'PENDING');
     if (f.status && status !== f.status) return false;
     if (q && ![x.po.id,x.po.productName,x.po.productId,x.stage.name,x.stage.operationId,Q.employeeName(x.stage.leadId)].some(v=>String(v||'').toLowerCase().includes(q))) return false;
     return true;
   }).sort((a,b)=>String(b.po.id).localeCompare(String(a.po.id),'vi',{numeric:true}) || b.index-a.index);
   const pg = paged(list,'quality-pqc');
   const rows = pg.items.map(({po,stage,index}) => {
-    const remaining = Math.max(0, Number(stage.qtyPlan||po.qty||0)-Number(stage.qtyDone||0));
+    const plan=Number(stage.qtyPlan||po.qty||0);
+    const passed=Number(stage.qtyDone||0);
+    const qv=stage.processQc||{};
+    const legacyPending=qv.status==='FAILED'?Math.max(0,Number(qv.lastFailQty||0)):0;
+    const pending=Math.max(0,Number(qv.pendingReworkQty??legacyPending));
+    const ready=Math.max(0,Number(qv.readyRetestQty||0));
+    const remaining = Math.max(0, plan-passed);
     const hist = stage.processQcHistory || [];
     const last = hist.length ? hist[hist.length-1] : null;
     return `<tr class="clickable" data-act="pqc-open" data-id="${esc(po.id)}" data-i="${index}">
       <td>${cell2(`<span class="code">${esc(po.id)}</span>`, esc(po.productName||po.productId))}</td>
       <td>${cell2(`<b>${esc(stage.name)}</b>`, esc(stage.operationId||'PROCESS_QC'))}</td>
-      <td class="right num">${fmtN(stage.qtyDone||0)} / ${fmtN(stage.qtyPlan||po.qty||0)} ${esc(po.unit||'')}</td>
+      <td class="right num">${fmtN(passed)} / ${fmtN(plan)} ${esc(po.unit||'')}</td>
       <td class="right num">${fmtN(remaining)} ${esc(po.unit||'')}</td>
-      <td>${processQcStatusHtml(stage)}</td>
-      <td>${last ? cell2(esc(last.inspectorName||Q.employeeName(last.inspectorId)||'QC'), fmtDate(String(last.inspectedAt||'').slice(0,10))) : '<span class="muted">—</span>'}</td>
+      <td>${processQcStatusHtml(stage)}${pending?`<div class="muted" style="margin-top:3px">Lỗi chờ sửa: ${fmtN(pending)}</div>`:''}${ready?`<div class="muted" style="margin-top:3px">Sẵn sàng tái kiểm: ${fmtN(ready)}</div>`:''}</td>
+      <td>${last ? cell2(esc(last.inspectorName||Q.employeeName(last.inspectorId)||'QC'), `${last.inspectionType==='RETEST'?'Tái kiểm':'Kiểm lần đầu'} · ${fmtDate(String(last.inspectedAt||'').slice(0,10))}`) : '<span class="muted">—</span>'}</td>
       <td class="right">${rowActions([{act:'pqc-open',data:`data-id="${esc(po.id)}" data-i="${index}"`,icon:'fa-vial-circle-check',title:'Kiểm tra bán thành phẩm'}])}</td>
     </tr>`;
   });
-  return `${pageHead('Kiểm tra bán thành phẩm','QC giữa quy trình sản xuất. Kết quả chỉ quyết định có được đi công đoạn tiếp theo; không nhập kho thành phẩm.','')}
+  const reworkCount=list.filter(x=>{const q=x.stage.processQc||{};return Number(q.pendingReworkQty||(q.status==='FAILED'?q.lastFailQty:0)||0)>0}).length;
+  const retestCount=list.filter(x=>Number(x.stage.processQc?.readyRetestQty||0)>0).length;
+  return `${pageHead('Kiểm tra bán thành phẩm','QC giữa quy trình sản xuất. Hàng lỗi phải sửa/tái chế và tái kiểm đạt trước khi đi công đoạn tiếp theo.','')}
     <div class="grid g-auto-sm" style="margin-bottom:14px">
-      ${mkpi('Chờ / đang kiểm',list.filter(x=>x.stage.status!=='done' && x.stage.processQc?.status!=='FAILED').length,'fa-clock','orange')}
+      ${mkpi('Chờ / đang kiểm',list.filter(x=>x.stage.status!=='done' && !Number(x.stage.processQc?.pendingReworkQty||0) && !Number(x.stage.processQc?.readyRetestQty||0)).length,'fa-clock','orange')}
+      ${mkpi('Chờ sửa / tái chế',reworkCount,'fa-screwdriver-wrench','red')}
+      ${mkpi('Chờ tái kiểm',retestCount,'fa-rotate','orange')}
       ${mkpi('Đạt',list.filter(x=>x.stage.status==='done').length,'fa-circle-check','green')}
-      ${mkpi('Không đạt',list.filter(x=>x.stage.processQc?.status==='FAILED').length,'fa-circle-xmark','red')}
     </div>
-    <div class="card"><div class="toolbar">${searchBox('quality-pqc','Tìm LSX, thành phẩm, công đoạn QC…')}${selectFilter('quality-pqc','status',[['PENDING','Chờ kiểm'],['FAILED','Không đạt / chờ xử lý'],['PASSED','Đạt']],'Tất cả kết quả')}${(f.q||f.status)?'<button class="btn btn-sm" data-act="clear-filter" data-key="quality-pqc"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>':''}<span class="spacer"></span><span class="chip">${fmtN(list.length)} checkpoint QC</span></div>
+    <div class="card"><div class="toolbar">${searchBox('quality-pqc','Tìm LSX, thành phẩm, công đoạn QC…')}${selectFilter('quality-pqc','status',[['PENDING','Chờ kiểm'],['IN_PROGRESS','Đang kiểm'],['REWORK_PENDING','Chờ sửa/tái chế'],['READY_RETEST','Chờ tái kiểm'],['PASSED','Đạt']],'Tất cả kết quả')}${(f.q||f.status)?'<button class="btn btn-sm" data-act="clear-filter" data-key="quality-pqc"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>':''}<span class="spacer"></span><span class="chip">${fmtN(list.length)} checkpoint QC</span></div>
       ${tableShell([{t:'LSX / Thành phẩm'},{t:'Công đoạn QC'},{t:'Đã đạt / Kế hoạch',cls:'right'},{t:'Còn phải đạt',cls:'right'},{t:'Kết quả'},{t:'Lần kiểm gần nhất'},{t:'',cls:'right'}],rows,{emptyTitle:'Chưa có bán thành phẩm chờ kiểm',emptyDesc:'Khi LSX đi tới một công đoạn PROCESS_QC, checkpoint sẽ tự xuất hiện tại đây.'})}${pagiHTML('quality-pqc',pg,'checkpoint QC')}
     </div>`;
 }
@@ -2547,35 +2565,51 @@ function openProcessInspectionModal(poId, index) {
   const po = Q.po(poId); if (!po) return;
   const stage = (po.stages || [])[Number(index)];
   if (!stage || typeof isProcessQcStage !== 'function' || !isProcessQcStage(po, Number(index))) return;
-  const readonly = stage.status === 'done' || !Auth.hasPermission('QC_INSPECT');
   const plan = Number(stage.qtyPlan || po.qty || 0);
   const passed = Number(stage.qtyDone || 0);
-  const remain = Math.max(0, plan - passed);
-  const history = stage.processQcHistory || [];
-  const historyRows = history.slice().reverse().map(h=>`<tr><td>${typeof fmtDateTime==='function' ? fmtDateTime(h.inspectedAt) : esc(String(h.inspectedAt||'').replace('T',' ').slice(0,16))}</td><td>${esc(h.inspectorName||Q.employeeName(h.inspectorId)||'QC')}</td><td class="right num">${fmtN(h.passQty||0)}</td><td class="right num">${fmtN(h.failQty||0)}</td><td>${Number(h.failQty||0)>0?'<span class="badge red">Có lỗi</span>':'<span class="badge green">Đạt</span>'}</td><td>${esc(h.note||'—')}</td></tr>`).join('');
+  const q = stage.processQc || {};
+  const legacyPending = q.status === 'FAILED' ? Math.max(0, Number(q.lastFailQty || 0)) : 0;
+  const pending = Math.max(0, Number(q.pendingReworkQty ?? legacyPending));
+  const ready = Math.max(0, Number(q.readyRetestQty || 0));
+  const uninspected = Math.max(0, Number(q.uninspectedQty ?? (plan - passed - pending - ready)));
+  const isRetest = ready > 0;
+  const maxCheck = isRetest ? ready : uninspected;
+  const readonly = stage.status === 'done' || !Auth.hasPermission('QC_INSPECT') || (pending > 0 && ready <= 0);
+  const history = (stage.processQcHistory || []).filter(h=>h && h.eventType !== 'REWORK');
+  const historyRows = history.slice().reverse().map((h,revIdx)=>`<tr><td class="center">${fmtN(h.inspectionNo || (history.length-revIdx))}</td><td>${h.inspectionType==='RETEST'?'<span class="badge orange">Tái kiểm</span>':'<span class="badge blue">Kiểm lần đầu</span>'}</td><td>${typeof fmtDateTime==='function' ? fmtDateTime(h.inspectedAt) : esc(String(h.inspectedAt||'').replace('T',' ').slice(0,16))}</td><td>${esc(h.inspectorName||Q.employeeName(h.inspectorId)||'QC')}</td><td class="right num">${fmtN(h.checkedQty ?? (Number(h.passQty||0)+Number(h.failQty||0)))}</td><td class="right num">${fmtN(h.passQty||0)}</td><td class="right num">${fmtN(h.failQty||0)}</td><td>${esc(h.note||'—')}</td></tr>`).join('');
+  const reworks = stage.processQcReworkHistory || [];
+  const reworkRows = reworks.slice().reverse().map(h=>`<tr><td>${typeof fmtDateTime==='function'?fmtDateTime(h.reworkedAt):esc(String(h.reworkedAt||'').replace('T',' ').slice(0,16))}</td><td>${esc(h.userName||Q.employeeName(h.userId)||'Sản xuất')}</td><td class="right num">${fmtN(h.qty||0)} ${esc(po.unit||'')}</td></tr>`).join('');
+  const stateNote = pending > 0 && ready <= 0
+    ? `<div class="note-box warn" style="margin-bottom:14px"><b>Đang chờ Sản xuất sửa/tái chế ${fmtN(pending)} ${esc(po.unit||'')}.</b> QC chỉ được tái kiểm sau khi Sản xuất xác nhận đã xử lý xong phần lỗi.</div>`
+    : isRetest
+      ? `<div class="note-box" style="margin-bottom:14px"><b>Tái kiểm ${fmtN(ready)} ${esc(po.unit||'')} đã sửa/tái chế.</b> Chỉ phần tái kiểm đạt mới được cộng vào tổng sản lượng đạt QC.</div>`
+      : `<div class="note-box" style="margin-bottom:14px"><b>QC bán thành phẩm không nhập kho.</b> Nếu phát hiện lỗi, phần lỗi sẽ chuyển sang Sản xuất sửa/tái chế; công đoạn tiếp theo vẫn bị khóa.</div>`;
   Modal.open({
-    title:`Kiểm tra bán thành phẩm · ${stage.name}`,
+    title:`${isRetest?'Tái kiểm':'Kiểm tra'} bán thành phẩm · ${stage.name}`,
     sub:`${po.id} · ${po.productName} · Kế hoạch ${fmtN(plan)} ${po.unit||''}`,
     size:'lg',
     body:`<div class="info-grid" style="margin-bottom:14px">
       ${infoItem('Lệnh sản xuất',`<span class="code">${esc(po.id)}</span>`)}
       ${infoItem('Công đoạn',esc(stage.name))}
       ${infoItem('Đã đạt QC',`<b>${fmtN(passed)} / ${fmtN(plan)} ${esc(po.unit||'')}</b>`)}
-      ${infoItem('Còn phải đạt',`<b>${fmtN(remain)} ${esc(po.unit||'')}</b>`)}
+      ${infoItem('Chưa kiểm lần đầu',`<b>${fmtN(uninspected)} ${esc(po.unit||'')}</b>`)}
+      ${infoItem('Chờ sửa/tái chế',`<b style="color:${pending?'var(--red)':'inherit'}">${fmtN(pending)} ${esc(po.unit||'')}</b>`)}
+      ${infoItem('Sẵn sàng tái kiểm',`<b>${fmtN(ready)} ${esc(po.unit||'')}</b>`)}
       ${infoItem('Người phụ trách SX',esc(Q.employeeName(stage.leadId)))}
       ${infoItem('Trạng thái',processQcStatusHtml(stage))}
     </div>
-    <div class="note-box" style="margin-bottom:14px"><b>QC bán thành phẩm không nhập kho.</b> Hàng đạt mới được cộng vào sản lượng đạt của checkpoint. Nếu có hàng lỗi, LSX giữ tại công đoạn này để xử lý / tái kiểm; công đoạn tiếp theo chưa được mở.</div>
+    ${stateNote}
     ${readonly ? '' : `<div class="form-grid cols-2">
-      <div class="field"><label>Số lượng đạt lần này *</label><input class="inp right num" id="pqcPass" type="number" min="0" max="${remain}" step="0.0001" value="" placeholder="Tối đa ${fmtN(remain)}"></div>
-      <div class="field"><label>Số lượng không đạt lần này *</label><input class="inp right num" id="pqcFail" type="number" min="0" max="${remain}" step="0.0001" value="0"></div>
+      <div class="field"><label>${isRetest?'Số lượng đạt tái kiểm':'Số lượng đạt lần này'} *</label><input class="inp right num" id="pqcPass" type="number" min="0" max="${maxCheck}" step="0.0001" value="" placeholder="Tối đa ${fmtN(maxCheck)}"></div>
+      <div class="field"><label>${isRetest?'Số lượng vẫn lỗi':'Số lượng không đạt lần này'} *</label><input class="inp right num" id="pqcFail" type="number" min="0" max="${maxCheck}" step="0.0001" value="0"></div>
       <div class="field"><label>Người kiểm</label><input class="inp" value="${esc(DB.currentUser?.name||'QC/QA')}" disabled></div>
       <div class="field"><label>Ngày kiểm</label><input class="inp" value="${esc(currentDateYMD())}" disabled></div>
-      <div class="field" style="grid-column:1/-1"><label>Ghi chú</label><textarea class="inp" id="pqcNote" rows="3" placeholder="Kết quả, nguyên nhân lỗi, hướng xử lý / tái kiểm…"></textarea></div>
+      <div class="field" style="grid-column:1/-1"><label>Ghi chú</label><textarea class="inp" id="pqcNote" rows="3" placeholder="${isRetest?'Kết quả sau sửa/tái chế…':'Nguyên nhân lỗi, hướng xử lý…'}"></textarea></div>
     </div>`}
-    <div class="form-sec-title" style="margin-top:14px">Lịch sử kiểm tra</div>
-    ${tableShell([{t:'Thời gian'},{t:'Người kiểm'},{t:'Đạt',cls:'right'},{t:'Lỗi',cls:'right'},{t:'Kết quả'},{t:'Ghi chú'}],historyRows,{emptyTitle:'Chưa có lần kiểm nào'})}`,
-    foot:`<button class="btn" data-act="modal-close">Đóng</button>${readonly?'':`<button class="btn btn-primary" data-act="pqc-save" data-id="${esc(po.id)}" data-i="${Number(index)}"><i class="fa-solid fa-vial-circle-check"></i>Lưu kết quả QC</button>`}`
+    <div class="form-sec-title" style="margin-top:14px">Lịch sử kiểm tra / tái kiểm</div>
+    ${tableShell([{t:'Lần',cls:'center'},{t:'Loại'},{t:'Thời gian'},{t:'Người kiểm'},{t:'SL kiểm',cls:'right'},{t:'Đạt',cls:'right'},{t:'Lỗi',cls:'right'},{t:'Ghi chú'}],historyRows,{emptyTitle:'Chưa có lần kiểm nào'})}
+    ${reworks.length?`<div class="form-sec-title" style="margin-top:14px">Lịch sử sửa / tái chế</div>${tableShell([{t:'Thời gian'},{t:'Người xác nhận'},{t:'Số lượng',cls:'right'}],reworkRows,{emptyTitle:'Chưa có lần sửa/tái chế'})}`:''}`,
+    foot:`<button class="btn" data-act="modal-close">Đóng</button>${readonly?'':`<button class="btn btn-primary" data-act="pqc-save" data-id="${esc(po.id)}" data-i="${Number(index)}"><i class="fa-solid fa-vial-circle-check"></i>${isRetest?'Lưu kết quả tái kiểm':'Lưu kết quả QC'}</button>`}`
   });
 }
 

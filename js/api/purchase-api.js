@@ -265,7 +265,6 @@ const PurchaseAPI = (() => {
     'quote-save-supplier': () => ['supplierQuotations'],
     'quote-select-winner': () => ['supplierQuotations', 'purchases', 'purchaseOrders'],
     'po-approve-action': () => ['purchaseOrders'],
-    'po-cancel': () => ['purchaseOrders'],
     'po-change-status': () => ['purchaseOrders'],
     'po-evaluate-supplier-save': () => ['supplierEvaluations'],
     'supplier-evaluation-save': () => ['supplierEvaluations'],

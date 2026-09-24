@@ -440,14 +440,13 @@ Views.inventory = function () {
     const child = `<tr class="inventory-lot-child"><td colspan="5" style="padding:0 14px 14px 28px;background:var(--surface-2)">
       <div style="border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-top:10px">
       ${tableShell(
-        [{t:'Lô hệ thống'},{t:'Lô sản phẩm'},{t:'Số lượng',cls:'right'},{t:'Ngày nhập'},{t:'Hạn sử dụng'},{t:stockTab==='raw'?'Tham chiếu PO':'Tham chiếu'},{t:'Kho'},{t:'Kệ / vị trí'},{t:'',cls:'right',w:'70px'}],
+        [{t:'Lô hệ thống'},{t:'Số lượng',cls:'right'},{t:'Ngày nhập'},{t:'Hạn sử dụng'},{t:stockTab==='raw'?'Tham chiếu PO':'Tham chiếu'},{t:'Kho'},{t:'Kệ / vị trí'},{t:'',cls:'right',w:'70px'}],
         lotRows.map(row => {
           const lot = Q.lot(row.lotId);
           const receipt = (DB.goodsReceipts || []).find(r => (r.items || []).some(i => i.lotId === row.lotId || i.lotNumber === lot?.lotNumber));
           const receiptDate = receipt?.date || String(row.lastUpdated||'').slice(0,10);
           return `<tr class="clickable" data-act="inv-stock-lot-view" data-productid="${row.productId}" data-lotid="${row.lotId}">
             <td><span class="code">${esc(lot?.lotNumber || '—')}</span></td>
-            <td>${esc(lot?.supplierLot || '—')}</td>
             <td class="right strong num">${fmtN(Number(row.qtyPending||0)>0 && Number(row.qtyOnHand||0)<=0 ? Number(row.qtyPending||0) : Number(row.qtyOnHand||0))} ${esc(row.unit || item?.unit || '')}${Number(row.qtyPending||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--orange)">${Number(row.qtyOnHand||0)>0 ? `Chờ QC: ${fmtN(row.qtyPending)} ${esc(row.unit || item?.unit || '')} · chưa tính vào tồn` : 'Đang chờ kiểm tra chất lượng · chưa tính vào tồn'}</div>` : ''}${Number(row.qtyRejected||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--red)">Lô nhập ${fmtN(Number(row.receivedQty||0) || (Number(row.qtyOnHand||0)+Number(row.qtyRejected||0)))} ${esc(row.unit || item?.unit || '')} có ${fmtN(row.qtyRejected)} không đạt · chờ trả NCC</div>` : ''}${Number(row.qtyReserved||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--blue)">${reservationLinks(row.productId, row.lotId, row.unit || item?.unit || '') || `${fmtN(row.qtyReserved)} ${esc(row.unit || item?.unit || '')} đang giữ chỗ · chờ xác nhận xuất bán`}</div>` : ''}</td>
             <td class="num">${fmtDate(receiptDate)}</td>
             <td class="num">${lot?.expiryDate ? fmtDate(lot.expiryDate) : '—'}</td>
@@ -574,7 +573,6 @@ function openInventoryStockLotDetail(productId, lotId) {
       <div class="info-grid" style="margin-bottom:16px">
         ${infoItem('Số lượng tồn', `<b class="num">${fmtDec(row.qtyOnHand,3)} ${esc(row.unit || item?.unit || '')}</b>`)}
         ${infoItem('Lô hệ thống', `<span class="code">${esc(lot?.lotNumber || '—')}</span>`)}
-        ${infoItem('Lô sản phẩm', esc(lot?.supplierLot || '—'))}
         ${infoItem('Ngày sản xuất', lot?.mfgDate ? fmtDate(lot.mfgDate) : '—')}
         ${infoItem('Hạn sử dụng', lot?.expiryDate ? fmtDate(lot.expiryDate) : '—')}
         ${infoItem('Khu', esc(Q.warehouseName(row.warehouseId)))}
@@ -743,7 +741,6 @@ Views['inv-overview'] = function () {
       <td><span class="chip">${esc(wh ? wh.name : inv.warehouseId)}</span></td>
       <td class="muted" style="font-size:12px">${esc(loc ? loc.name : inv.locationId)}</td>
       <td>${lot ? `<span class="code" style="font-size:11px">${lot.lotNumber}</span>` : '—'}</td>
-      <td>${lot ? `<span class="code" style="font-size:11px">${esc(lot.supplierLot || '—')}</span>` : '—'}</td>
       <td class="num">${lot ? fmtDate(lot.mfgDate) : '—'}</td>
       <td>${expBadge || (lot ? fmtDate(lot.expiryDate) : '—')}</td>
       <td class="right strong num">${fmtDec(inv.qtyOnHand, 2)} ${esc(inv.unit)}</td>
@@ -788,7 +785,7 @@ Views['inv-overview'] = function () {
     </div>
     ${tableShell(
       [{ t: 'Mã hàng', w: '90px' }, { t: 'Tên hàng' }, { t: 'Kho' }, { t: 'Vị trí', cls: 'hide-sm' },
-       { t: 'Lô hệ thống', cls: 'hide-sm' }, { t: 'Lô NCC', cls: 'hide-sm' }, { t: 'NSX' }, { t: 'HSD / Còn lại' },
+       { t: 'Lô hệ thống', cls: 'hide-sm' }, { t: 'NSX' }, { t: 'HSD / Còn lại' },
        { t: 'On Hand', cls: 'right' }, { t: 'Reserved', cls: 'right hide-sm' }, { t: 'Available', cls: 'right' }],
       rows, { emptyTitle: 'Không có dữ liệu tồn kho', emptyDesc: 'Hãy nhập kho để bắt đầu theo dõi tồn kho.' })}
     ${pagiHTML('inv-overview', pg, 'bản ghi')}
@@ -969,7 +966,7 @@ Views['inv-issues'] = function () {
     }
     if(x.kind==='return'){
       const r=x.r;const lot=Q.lot(r.lotId);
-      return `<tr><td><span class="code">${esc(r.id)}</span><div class="cell-sub">Yêu cầu trả</div></td><td><span class="badge red">Chờ xuất trả NCC</span></td><td>${fmtDate(r.requestedDate)}</td><td>${esc(Q.warehouseName(r.warehouseId))}</td><td><span class="code">${esc(r.poId)}</span></td><td>${cell2(esc(Q.material(r.materialId)?.name||r.materialId),`Lô HT: ${esc(lot?.lotNumber||'—')} · Lô NCC: ${esc(r.supplierLot||'—')}`)}</td><td class="right strong num">${fmtN(r.qty)} ${esc(r.unit||'')}</td><td><span class="badge orange">Chờ kho xác nhận</span></td><td class="right">${rowActions([{act:'open-po',data:`data-id="${r.poId}"`,icon:'fa-eye',title:'Xem chi tiết đơn hàng'},{act:'inv-return-confirm-issue',data:`data-id="${r.id}"`,icon:'fa-arrow-right-from-bracket',title:'Xác nhận xuất trả'}])}</td></tr>`;
+      return `<tr><td><span class="code">${esc(r.id)}</span><div class="cell-sub">Yêu cầu trả</div></td><td><span class="badge red">Chờ xuất trả NCC</span></td><td>${fmtDate(r.requestedDate)}</td><td>${esc(Q.warehouseName(r.warehouseId))}</td><td><span class="code">${esc(r.poId)}</span></td><td>${cell2(esc(Q.material(r.materialId)?.name||r.materialId),`Lô HT: ${esc(lot?.lotNumber||'—')}`)}</td><td class="right strong num">${fmtN(r.qty)} ${esc(r.unit||'')}</td><td><span class="badge orange">Chờ kho xác nhận</span></td><td class="right">${rowActions([{act:'open-po',data:`data-id="${r.poId}"`,icon:'fa-eye',title:'Xem chi tiết đơn hàng'},{act:'inv-return-confirm-issue',data:`data-id="${r.id}"`,icon:'fa-arrow-right-from-bracket',title:'Xác nhận xuất trả'}])}</td></tr>`;
     }
     const gi=x.gi;const total=(gi.items||[]).reduce((n,i)=>n+Number(i.qty||0),0);
     const pendingSales = gi.type==='SALES_ISSUE' && gi.status==='PENDING_CONFIRMATION';
@@ -1282,7 +1279,7 @@ function receiptPoDetailHtml(po, date) {
     <div class="form-sec-title"><i class="fa-solid fa-boxes-packing"></i>Nguyên liệu nhập kho</div>
     <div class="tbl-wrap" style="border:1px solid var(--border);border-radius:var(--r)">
       <table class="line-tbl">
-        <thead><tr><th>Nguyên liệu</th><th class="right">SL đặt</th><th class="right">Đã nhập</th><th class="right">Nhập lần này</th><th>Lô hệ thống</th><th>Lô sản phẩm / NCC <span class="req">*</span></th><th>NSX</th><th>HSD</th></tr></thead>
+        <thead><tr><th>Nguyên liệu</th><th class="right">SL đặt</th><th class="right">Đã nhập</th><th class="right">Nhập lần này</th><th>Lô hệ thống</th><th>NSX</th><th>HSD</th></tr></thead>
         <tbody>
           ${(po.items || []).map((it) => {
             const remain = Math.max(0, Number(it.qty || 0) - Number(it.receivedQty || 0));
@@ -1293,7 +1290,6 @@ function receiptPoDetailHtml(po, date) {
               <td class="right num muted">${fmtN(it.receivedQty || 0)}</td>
               <td class="right"><input class="inp right num po-gr-qty" data-mid="${esc(it.materialId)}" type="number" min="0" max="${remain}" value="${remain}" style="width:100px" ${remain <= 0 ? 'disabled' : ''}></td>
               <td><input class="inp po-gr-lot" data-mid="${esc(it.materialId)}" value="${esc(lotNo)}" style="min-width:190px;background:var(--surface-2)" readonly title="Lô hệ thống tự sinh, không được chỉnh sửa"></td>
-              <td><input class="inp po-gr-supplier-lot" data-mid="${esc(it.materialId)}" value="" placeholder="Bắt buộc · VD: NCC-LOT-0907" required style="min-width:165px" title="Nhập lô thực tế in trên bao bì/chứng từ NCC; có thể trùng giữa nhiều đợt nhập"></td>
               <td><input class="inp po-gr-mfg" data-mid="${esc(it.materialId)}" type="date" value="${date}" style="width:135px"></td>
               <td><input class="inp po-gr-exp" data-mid="${esc(it.materialId)}" type="date" value="${addDays(date, 365)}" style="width:135px"></td>
             </tr>`;
@@ -1301,7 +1297,7 @@ function receiptPoDetailHtml(po, date) {
         </tbody>
       </table>
     </div>
-    <div class="muted" style="font-size:11.8px;margin-top:8px"><i class="fa-solid fa-circle-info"></i> <b>Lô hệ thống</b> tự sinh theo Mã PO - Mã SP - YYMMDD - Đợt và bị khóa. <b>Lô sản phẩm / NCC</b> bắt buộc nhập. Mã lô NCC có thể giống nhau giữa các sản phẩm khác nhau. Chỉ xem là trùng thật khi cùng tên sản phẩm, cùng danh mục, cùng NSX và HSD.</div>`;
+    <div class="muted" style="font-size:11.8px;margin-top:8px"><i class="fa-solid fa-circle-info"></i> <b>Lô hệ thống</b> tự sinh theo Mã PO - Mã SP - YYMMDD - Đợt và bị khóa. Tạm thời hệ thống chỉ sử dụng lô hệ thống.</div>`;
 }
 
 function openNewReceiptModal(preselectedPoId = '') {
@@ -1387,7 +1383,7 @@ function openPoReceiptHistory(poId) {
       <div class="form-sec-title"><i class="fa-solid fa-box"></i>Chi tiết nguyên liệu</div>
       ${tableShell([{t:'Nguyên liệu'},{t:'SL đặt',cls:'right'},{t:'Đã nhập',cls:'right'}], (po.items||[]).map(i => `<tr><td>${cell2(esc(i.name), esc(i.materialId))}</td><td class="right num">${fmtN(i.qty)} ${esc(i.unit)}</td><td class="right num strong">${fmtN(i.receivedQty||0)} ${esc(i.unit)}</td></tr>`))}
       <div class="form-sec-title" style="margin-top:16px"><i class="fa-solid fa-clock-rotate-left"></i>Lịch sử nhập kho</div>
-      ${tableShell([{t:'Phiếu nhập'},{t:'Ngày'},{t:'Người nhập'},{t:'Nguyên liệu'},{t:'Số lượng nhập',cls:'right'},{t:'Lô hệ thống'},{t:'Lô SP/NCC'},{t:'QC'}], receipts.flatMap(r => (r.items||[]).map(i => `<tr><td><span class="code">${r.id}</span></td><td class="num">${fmtDate(r.date)}</td><td>${esc(Q.employeeName(r.receivedBy))}</td><td>${esc(i.name)}</td><td class="right num strong">${fmtN(i.qty)} ${esc(i.unit)}</td><td><span class="code">${esc(i.lotNumber||'—')}</span></td><td>${esc(i.supplierLot||'—')}</td><td>${r.inspectionStatus === 'PASSED' ? '<span class="badge green">Đạt</span>' : r.inspectionStatus === 'FAILED' || r.inspectionStatus === 'PARTIAL_FAILED' ? '<span class="badge red">Có lỗi</span>' : '<span class="badge orange">Chờ kiểm</span>'}</td></tr>`)), {emptyTitle:'Chưa có lịch sử nhập kho'})}
+      ${tableShell([{t:'Phiếu nhập'},{t:'Ngày'},{t:'Người nhập'},{t:'Nguyên liệu'},{t:'Số lượng nhập',cls:'right'},{t:'Lô hệ thống'},{t:'QC'}], receipts.flatMap(r => (r.items||[]).map(i => `<tr><td><span class="code">${r.id}</span></td><td class="num">${fmtDate(r.date)}</td><td>${esc(Q.employeeName(r.receivedBy))}</td><td>${esc(i.name)}</td><td class="right num strong">${fmtN(i.qty)} ${esc(i.unit)}</td><td><span class="code">${esc(i.lotNumber||'—')}</span></td><td>${r.inspectionStatus === 'PASSED' ? '<span class="badge green">Đạt</span>' : r.inspectionStatus === 'FAILED' || r.inspectionStatus === 'PARTIAL_FAILED' ? '<span class="badge red">Có lỗi</span>' : '<span class="badge orange">Chờ kiểm</span>'}</td></tr>`)), {emptyTitle:'Chưa có lịch sử nhập kho'})}
       <div class="form-sec-title" style="margin-top:16px"><i class="fa-solid fa-rotate-left"></i>Lịch sử đổi trả</div>
       ${tableShell([{t:'Phiếu xuất trả'},{t:'Ngày'},{t:'Nguyên liệu'},{t:'Số lượng trả',cls:'right'},{t:'Lô hệ thống'},{t:'Lý do'}], returns.flatMap(r => (r.items||[]).map(i => `<tr><td><span class="code">${r.id}</span></td><td>${fmtDate(r.date)}</td><td>${esc(Q.material(i.productId)?.name || i.productId)}</td><td class="right num">${fmtN(i.qty)} ${esc(i.unit||'')}</td><td><span class="code">${esc(Q.lot(i.lotId)?.lotNumber || i.lotId || '—')}</span></td><td class="muted">${esc(r.note||'')}</td></tr>`)), {emptyTitle:'Chưa phát sinh đổi trả'})}`,
     foot: `<button class="btn" data-act="modal-close">Đóng</button>${po.status === 'PARTIAL_RECEIVED' ? `<button class="btn btn-primary" data-act="inv-new-receipt" data-poid="${po.id}"><i class="fa-solid fa-plus"></i>Nhập tiếp</button>` : ''}`,
@@ -1451,7 +1447,7 @@ function openIssueDetailModal(id) {
   Modal.open({title:`Chi tiết phiếu xuất ${gi.id}`,sub:`${Q.warehouseName(gi.warehouseId)} · ${fmtDate(gi.date)}`,size:'lg',body:`
     <div class="info-grid">${infoItem('Loại xuất',esc(({PRODUCTION_ISSUE:'Xuất sản xuất',SUBCONTRACT_ISSUE:'Xuất gia công',SALES_ISSUE:'Xuất bán hàng',ADJUSTMENT_OUT:'Xuất điều chỉnh',TRANSFER_OUT:'Xuất chuyển kho',RETURN_OUT:'Xuất trả NCC'}[gi.type]||gi.type)))}${infoItem('Khu xuất',esc(Q.warehouseName(gi.warehouseId)))}${infoItem('Chứng từ tham chiếu',esc(gi.refDoc||'—'))}${infoItem('Người lập',esc(Q.employeeName(gi.createdBy)))}</div>
     <div class="form-sec-title" style="margin-top:16px"><i class="fa-solid fa-box-open"></i>Chi tiết hàng xuất</div>
-    ${tableShell([{t:'Mã hàng'},{t:'Tên hàng'},{t:'Lô hệ thống'},{t:'Lô NCC'},{t:'Kệ'},{t:'Số lượng',cls:'right'}],(gi.items||[]).map(i=>{const lot=Q.lot(i.lotId);const item=Q.material(i.productId)||Q.product(i.productId);return `<tr><td><span class="code">${esc(i.productId)}</span></td><td>${esc(item?.name||i.productId)}</td><td><span class="code">${esc(lot?.lotNumber||'—')}</span></td><td>${esc(lot?.supplierLot||'—')}</td><td>${esc(Q.locationName(i.locationId)||'—')}</td><td class="right strong num">${fmtDec(i.qty,3)} ${esc(i.unit||'')}</td></tr>`; }))}
+    ${tableShell([{t:'Mã hàng'},{t:'Tên hàng'},{t:'Lô hệ thống'},{t:'Kệ'},{t:'Số lượng',cls:'right'}],(gi.items||[]).map(i=>{const lot=Q.lot(i.lotId);const item=Q.material(i.productId)||Q.product(i.productId);return `<tr><td><span class="code">${esc(i.productId)}</span></td><td>${esc(item?.name||i.productId)}</td><td><span class="code">${esc(lot?.lotNumber||'—')}</span></td><td>${esc(Q.locationName(i.locationId)||'—')}</td><td class="right strong num">${fmtDec(i.qty,3)} ${esc(i.unit||'')}</td></tr>`; }))}
     <div class="field" style="margin-top:14px"><label>Ghi chú</label><div class="inp" style="height:auto;min-height:42px">${esc(gi.note||'—')}</div></div>`,foot:'<button class="btn" data-act="modal-close">Đóng</button>'});
 }
 
@@ -2344,7 +2340,11 @@ Views['warehouse-production-plan'] = function () {
 };
 
 /* ========================================================================== 
- * UI34 — Hàng lỗi & hàng trả về: subtab ngang chuẩn, click dòng xem chi tiết.
+ * UI34 — Hàng lỗi & hàng trả về.
+ * Hàng trả về gồm cả:
+ *   1) hàng khách trả đang nằm tại kho RETURNED;
+ *   2) nguyên liệu QC đầu vào không đạt đang/chờ xuất trả NCC.
+ * Dữ liệu yêu cầu trả NCC lấy trực tiếp từ lenam_material_return_requests/history.
  * ======================================================================= */
 Views['inv-defects'] = function () {
   const f = F('inv-defects', { subtab:'defective', q:'' });
@@ -2352,32 +2352,92 @@ Views['inv-defects'] = function () {
   const q = String(f.q || '').toLowerCase().trim();
   const defectWhIds = new Set((DB.warehouses||[]).filter(w=>w.type==='DEFECTIVE').map(w=>w.id));
   const returnWhIds = new Set((DB.warehouses||[]).filter(w=>w.type==='RETURNED').map(w=>w.id));
-  const sourceIds = subtab === 'returned' ? returnWhIds : defectWhIds;
-  let rowsData=(DB.inventory||[]).filter(r=>sourceIds.has(r.warehouseId)&&Number(r.qtyOnHand||0)>0);
-  if(q) rowsData=rowsData.filter(r=>{
+
+  const defectRows=(DB.inventory||[])
+    .filter(r=>defectWhIds.has(r.warehouseId)&&Number(r.qtyOnHand||0)>0)
+    .map(r=>({kind:'defective',date:String(r.lastUpdated||''),inventory:r}));
+
+  // Hàng khách trả: tồn vật lý trong kho RETURNED.
+  const customerReturnRows=(DB.inventory||[])
+    .filter(r=>returnWhIds.has(r.warehouseId)&&Number(r.qtyOnHand||0)>0)
+    .map(r=>({kind:'customer_return',date:String(r.lastUpdated||''),inventory:r}));
+
+  // Hàng QC đầu vào không đạt: vẫn phải xuất hiện tại Hàng trả về ngay từ lúc tạo YCT,
+  // kể cả khi Kho chưa xác nhận xuất trả NCC.
+  const supplierReqIds=new Set();
+  const supplierReturnRows=(DB.materialReturnRequests||[]).map(r=>{
+    supplierReqIds.add(r.id);
+    return {kind:'supplier_return',date:String(r.completedAt||r.requestedDate||''),request:r};
+  });
+  // Tương thích dữ liệu lịch sử cũ: nếu đã có history nhưng request không còn trong RAM/server snapshot.
+  (DB.materialReturnHistory||[]).forEach(h=>{
+    if(!supplierReqIds.has(h.id)) supplierReturnRows.push({kind:'supplier_return_history',date:String(h.date||''),history:h});
+  });
+
+  let rowsData=subtab==='returned'?[...supplierReturnRows,...customerReturnRows]:defectRows;
+
+  if(q) rowsData=rowsData.filter(entry=>{
+    if(entry.kind==='supplier_return'||entry.kind==='supplier_return_history'){
+      const r=entry.request||entry.history||{};
+      const mat=Q.material(r.materialId), lot=Q.lot(r.lotId), po=Q.purchaseOrder(r.poId);
+      const supplier=(DB.suppliers||[]).find(s=>s.id===(r.supplierId||po?.supplierId));
+      return [r.id,r.poId,r.receiptId,r.issueId,r.materialId,mat?.name,lot?.lotNumber,r.supplierLot,supplier?.name,r.reason,r.status]
+        .some(v=>String(v||'').toLowerCase().includes(q));
+    }
+    const r=entry.inventory||{};
     const p=Q.product(r.productId)||Q.material(r.productId),lot=Q.lot(r.lotId),wh=(DB.warehouses||[]).find(w=>w.id===r.warehouseId);
     return [r.productId,p?.name,lot?.lotNumber,r.sourceId,r.productionOrderId,wh?.name].some(v=>String(v||'').toLowerCase().includes(q));
   });
-  rowsData.sort((a,b)=>String(b.lastUpdated||'').localeCompare(String(a.lastUpdated||'')));
-  const rows=rowsData.map(r=>{
+  rowsData.sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
+
+  const rows=rowsData.map(entry=>{
+    if(entry.kind==='supplier_return'||entry.kind==='supplier_return_history'){
+      const r=entry.request||entry.history||{};
+      const mat=Q.material(r.materialId), lot=Q.lot(r.lotId), po=Q.purchaseOrder(r.poId);
+      const supplier=(DB.suppliers||[]).find(s=>s.id===(r.supplierId||po?.supplierId));
+      const wh=(DB.warehouses||[]).find(w=>w.id===r.warehouseId);
+      const loc=(DB.warehouseLocations||[]).find(l=>l.id===r.locationId);
+      const done=(r.status==='COMPLETED'||r.status==='RETURNED'||!!r.issueId);
+      const statusHtml=done?'<span class="badge green">Đã xuất trả NCC</span>':'<span class="badge orange">Chờ kho xác nhận</span>';
+      const lotText=`Lô HT: ${esc(lot?.lotNumber||'—')}`;
+      const poHtml=r.poId?`<button type="button" class="ref-link compact" data-act="open-po" data-id="${esc(r.poId)}" title="Mở PO ${esc(r.poId)}"><span class="code">${esc(r.poId)}</span><i class="fa-solid fa-arrow-up-right-from-square"></i></button>`:'<span class="muted">—</span>';
+      return `<tr class="clickable" data-act="inv-supplier-return-detail" data-id="${esc(r.id||'')}">
+        <td>${cell2(`<span class="code">${esc(r.materialId||'—')}</span>`,esc(mat?.name||r.materialId||'—'))}</td>
+        <td><span class="badge purple">Trả NCC</span><div class="cell-sub">${esc(supplier?.name||'Nhà cung cấp')}</div></td>
+        <td>${cell2(`<span class="code">${esc(lot?.lotNumber||'—')}</span>`,lotText)}</td>
+        <td>${esc(wh?.name||Q.warehouseName(r.warehouseId)||'—')}<div class="cell-sub">${esc(loc?.name||'')}</div></td>
+        <td class="right strong num">${fmtN(r.qty||0)} ${esc(r.unit||mat?.unit||'')}</td>
+        <td>${poHtml}<div class="cell-sub">${esc(r.id||'')}</div></td>
+        <td>${statusHtml}</td><td>${fmtDate(String(r.completedAt||r.requestedDate||r.date||'').slice(0,10))}</td></tr>`;
+    }
+
+    const r=entry.inventory||{};
     const p=Q.product(r.productId)||Q.material(r.productId), lot=Q.lot(r.lotId), wh=(DB.warehouses||[]).find(w=>w.id===r.warehouseId), loc=(DB.warehouseLocations||[]).find(l=>l.id===r.locationId);
-    const ref=subtab==='returned'?(r.sourceId||lot?.salesOrderId||'—'):(r.productionOrderId||r.sourceId||lot?.productionOrderId||'—');
-    const refAct=ref&&ref!=='—'?(subtab==='returned'?'open-order':'open-production-order'):'';
-    const refHtml=refAct?`<button type="button" class="ref-link compact" data-act="${refAct}" data-id="${esc(ref)}" title="Mở ${subtab==='returned'?'đơn hàng':'lệnh sản xuất'} ${esc(ref)}"><span class="code">${esc(ref)}</span><i class="fa-solid fa-arrow-up-right-from-square"></i></button>`:'<span class="muted">—</span>';
-    const typeBadge=subtab==='returned'?'<span class="badge orange">Hàng trả về</span>':'<span class="badge red">Hàng lỗi</span>';
+    const isReturned=entry.kind==='customer_return';
+    const ref=isReturned?(r.sourceId||lot?.salesOrderId||'—'):(r.productionOrderId||r.sourceId||lot?.productionOrderId||'—');
+    const refAct=ref&&ref!=='—'?(isReturned?'open-order':'open-production-order'):'';
+    const refHtml=refAct?`<button type="button" class="ref-link compact" data-act="${refAct}" data-id="${esc(ref)}" title="Mở ${isReturned?'đơn hàng':'lệnh sản xuất'} ${esc(ref)}"><span class="code">${esc(ref)}</span><i class="fa-solid fa-arrow-up-right-from-square"></i></button>`:'<span class="muted">—</span>';
+    const typeBadge=isReturned?'<span class="badge orange">Khách trả</span>':'<span class="badge red">Hàng lỗi</span>';
     return `<tr class="clickable" data-act="inv-exception-detail" data-product="${esc(r.productId)}" data-lotid="${esc(r.lotId||'')}" data-warehouse="${esc(r.warehouseId)}">
       <td>${cell2(`<span class="code">${esc(r.productId)}</span>`,esc(p?.name||r.productId))}</td><td>${typeBadge}</td><td><span class="code">${esc(lot?.lotNumber||'—')}</span></td>
       <td>${esc(wh?.name||'—')}<div class="cell-sub">${esc(loc?.name||'')}</div></td><td class="right strong num">${fmtN(r.qtyOnHand||0)} ${esc(r.unit||p?.unit||'')}</td>
-      <td>${refHtml}</td><td>${fmtDate(String(r.lastUpdated||'').slice(0,10))}</td></tr>`;
+      <td>${refHtml}</td><td>${isReturned?'<span class="badge blue">Đang lưu kho</span>':'<span class="badge red">Cách ly</span>'}</td><td>${fmtDate(String(r.lastUpdated||'').slice(0,10))}</td></tr>`;
   }).join('');
+
   const defectQty=(DB.inventory||[]).filter(r=>defectWhIds.has(r.warehouseId)).reduce((s,r)=>s+Number(r.qtyOnHand||0),0);
-  const returnQty=(DB.inventory||[]).filter(r=>returnWhIds.has(r.warehouseId)).reduce((s,r)=>s+Number(r.qtyOnHand||0),0);
-  const activeCount=rowsData.length;
+  const customerReturnQty=(DB.inventory||[]).filter(r=>returnWhIds.has(r.warehouseId)).reduce((s,r)=>s+Number(r.qtyOnHand||0),0);
+  const supplierReturnQty=(DB.materialReturnRequests||[]).reduce((s,r)=>s+Number(r.qty||0),0);
+  const pendingSupplierReturns=(DB.materialReturnRequests||[]).filter(r=>r.status==='PENDING_WAREHOUSE').length;
   const tabs=`<div class="tabs" style="margin-bottom:14px"><button class="tab ${subtab==='defective'?'active':''}" data-act="inv-exception-tab" data-tab="defective"><i class="fa-solid fa-triangle-exclamation"></i>Hàng lỗi</button><button class="tab ${subtab==='returned'?'active':''}" data-act="inv-exception-tab" data-tab="returned"><i class="fa-solid fa-rotate-left"></i>Hàng trả về</button></div>`;
-  return `${pageHead('Hàng lỗi & hàng trả về','Quản lý tồn cách ly theo lô, vị trí và chứng từ nguồn; không tính vào tồn thành phẩm khả dụng.')}
+
+  const kpis=subtab==='returned'
+    ? `${mkpi('Khách trả đang lưu kho',fmtN(customerReturnQty),'fa-box-open','orange')}${mkpi('SL trả NCC',fmtN(supplierReturnQty),'fa-truck-arrow-right','purple')}${mkpi('Chờ xuất trả NCC',fmtN(pendingSupplierReturns),'fa-clock','blue')}`
+    : `${mkpi('Hàng lỗi',fmtN(defectQty),'fa-triangle-exclamation','red')}${mkpi('Lô hàng lỗi',fmtN(rowsData.length),'fa-boxes-stacked','blue')}`;
+
+  return `${pageHead('Hàng lỗi & hàng trả về','Theo dõi hàng cách ly, hàng khách trả và nguyên liệu QC không đạt cần/đã xuất trả nhà cung cấp.')}
     ${tabs}
-    <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Hàng lỗi',fmtN(defectQty),'fa-triangle-exclamation','red')}${mkpi('Hàng trả về',fmtN(returnQty),'fa-rotate-left','orange')}${mkpi(subtab==='returned'?'Lô hàng trả':'Lô hàng lỗi',fmtN(activeCount),'fa-boxes-stacked','blue')}</div>
-    <div class="card"><div class="card-head"><div><h3>${subtab==='returned'?'Hàng trả về':'Hàng lỗi'}</h3><p>Click vào dòng để xem chi tiết. Mã tham chiếu có thể bấm để mở chứng từ nguồn.</p></div><div>${searchBox('inv-defects','Tìm mã hàng, lô, đơn hàng, LSX…')}</div></div>
-      ${tableShell([{t:'Thành phẩm'},{t:'Phân loại'},{t:'Lô'},{t:'Kho / vị trí'},{t:'Số lượng',cls:'right'},{t:subtab==='returned'?'Tham chiếu đơn bán':'Tham chiếu LSX'},{t:'Ngày ghi nhận'}],rows,{emptyTitle:subtab==='returned'?'Chưa có hàng khách trả':'Chưa có thành phẩm lỗi',emptyDesc:subtab==='returned'?'Hàng trả sẽ xuất hiện khi hoàn thành đơn bán và khai báo số lượng khách trả.':'Sản phẩm QC không đạt sẽ tự chuyển vào đây.'})}
+    <div class="grid g-auto-sm" style="margin-bottom:14px">${kpis}</div>
+    <div class="card"><div class="card-head"><div><h3>${subtab==='returned'?'Hàng trả về':'Hàng lỗi'}</h3><p>${subtab==='returned'?'Yêu cầu trả NCC xuất hiện ngay sau QC không đạt. Thao tác xuất trả vẫn thực hiện tại Kho → Xuất kho.':'Click vào dòng để xem chi tiết hàng lỗi.'}</p></div><div>${searchBox('inv-defects','Tìm mã hàng, lô, PO, YCT, đơn bán…')}</div></div>
+      ${tableShell([{t:'Hàng hóa'},{t:'Phân loại'},{t:'Lô'},{t:'Kho / vị trí'},{t:'Số lượng',cls:'right'},{t:subtab==='returned'?'Tham chiếu':'Tham chiếu LSX'},{t:'Trạng thái'},{t:'Ngày ghi nhận'}],rows,{emptyTitle:subtab==='returned'?'Chưa có hàng trả về':'Chưa có thành phẩm lỗi',emptyDesc:subtab==='returned'?'Hàng khách trả và nguyên liệu QC không đạt cần trả NCC sẽ xuất hiện tại đây.':'Sản phẩm QC không đạt sẽ tự chuyển vào đây.'})}
     </div>`;
 };

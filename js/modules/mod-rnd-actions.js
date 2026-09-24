@@ -81,10 +81,8 @@ Actions['rnd-project-save'] = (d) => {
     const id = nextCode('RND-2026-', DB.rndProjects);
     DB.rndProjects.unshift({ id, ...payload, stage: 'CONCEPT', status: 'ACTIVE', actualLaunchDate: '' });
     DB.rndApprovals.unshift({ id: nextCode('DUYET-2026-', DB.rndApprovals), projectId: id, stage: 'CONCEPT', status: 'PENDING', approverId: '', date: currentDateYMD(), note: 'Chờ duyệt ý tưởng ban đầu.' });
-    if (typeof RNDApi !== 'undefined') RNDApi.scheduleSync(['rndProjects', 'rndApprovals']);
     Toast.ok('Đã tạo dự án R&D', `${id} · ${name}`);
   }
-  if (d.id && typeof RNDApi !== 'undefined') RNDApi.scheduleSync(['rndProjects']);
   Modal.close(); go('rnd', { tab: 'projects' });
 };
 Actions['rnd-project-delete'] = (d) => {
@@ -94,17 +92,7 @@ Actions['rnd-project-delete'] = (d) => {
   confirmBox({
     title: 'Xóa dự án R&D', icon: 'fa-trash', okText: 'Xóa dự án',
     message: `Xóa dự án <b>${esc(p.id)} · ${esc(p.name)}</b>?`,
-    onOk: () => {
-      const removedApprovalIds = DB.rndApprovals.filter((a) => a.projectId === p.id).map((a) => a.id);
-      DB.rndProjects = DB.rndProjects.filter((x) => x.id !== p.id);
-      DB.rndApprovals = DB.rndApprovals.filter((a) => a.projectId !== p.id);
-      if (typeof RNDApi !== 'undefined') {
-        RNDApi.remove('rndProjects', [p.id]).catch(() => {});
-        if (removedApprovalIds.length) RNDApi.remove('rndApprovals', removedApprovalIds).catch(() => {});
-      }
-      render();
-      Toast.ok('Đã xóa dự án', p.id);
-    },
+    onOk: () => { DB.rndProjects = DB.rndProjects.filter((x) => x.id !== p.id); DB.rndApprovals = DB.rndApprovals.filter((a) => a.projectId !== p.id); render(); Toast.ok('Đã xóa dự án', p.id); },
   });
 };
 Actions['rnd-project-view'] = (d) => {
@@ -170,7 +158,6 @@ Actions['rnd-formula-save'] = () => {
   if (!projectId || !name) { Toast.err('Thiếu thông tin', 'Vui lòng chọn dự án và nhập tên công thức.'); return; }
   const id = nextCode('CT-', DB.rndFormulas, 3);
   DB.rndFormulas.unshift({ id, projectId, name, baseProductId: $('#rndFBaseProduct')?.value || '', currentVersion: '', status: 'DRAFT' });
-  if (typeof RNDApi !== 'undefined') RNDApi.scheduleSync(['rndFormulas']);
   Modal.close();
   Toast.ok('Đã tạo công thức', `${id} · ${name} — hãy thêm phiên bản đầu tiên.`);
   Actions['rnd-version-new']({ formulaid: id });
@@ -371,7 +358,6 @@ Actions['rnd-version-edit-save'] = (d) => {
   if (fm.currentVersion === v.version) {
     fm.status = v.status;
   }
-  if (typeof RNDApi !== 'undefined') RNDApi.scheduleSync(['rndFormulaVersions', 'rndFormulas']);
   const newUnitCost = rndVersionUnitCost(v);
   Modal.close();
   render();
@@ -413,7 +399,6 @@ Actions['rnd-version-save'] = (d) => {
   });
   fm.currentVersion = 'v' + versionNo;
   fm.status = status;
-  if (typeof RNDApi !== 'undefined') RNDApi.scheduleSync(['rndFormulaVersions', 'rndFormulas']);
   Modal.close(); render();
   Toast.ok('Đã lưu phiên bản công thức', `${id} — Giá thành ước tính ${fmtVND(rndVersionUnitCost(DB.rndFormulaVersions[DB.rndFormulaVersions.length - 1]))}/đv`);
 };
@@ -489,7 +474,6 @@ Actions['rnd-trial-save'] = () => {
     batchQty: Number($('#rndTQty')?.value) || 0, batchUnit: $('#rndTUnit')?.value.trim() || 'Đơn vị', result: $('#rndTResult')?.value || 'PARTIAL',
     sensoryScore, costActual: Number($('#rndTCost')?.value) || 0, testerId: $('#rndTTester')?.value || 'NV-001', note: $('#rndTNote')?.value.trim() || '',
   });
-  if (typeof RNDApi !== 'undefined') RNDApi.scheduleSync(['rndTrials']);
   Modal.close(); go('rnd', { tab: 'trials' });
   Toast.ok('Đã ghi nhận thử nghiệm', id);
 };
@@ -515,7 +499,6 @@ Actions['rnd-cost-save'] = () => {
   if (amount <= 0) { Toast.err('Số tiền không hợp lệ', 'Vui lòng nhập số tiền lớn hơn 0.'); return; }
   const id = nextCode('CPNC-2026-', DB.rndCosts);
   DB.rndCosts.unshift({ id, projectId, date: $('#rndCDate')?.value || currentDateYMD(), category: $('#rndCCategory')?.value || RND_COST_CATEGORIES[0], amount, note: $('#rndCNote')?.value.trim() || '', recordedBy: DB.currentUser?.id || 'NV-001' });
-  if (typeof RNDApi !== 'undefined') RNDApi.scheduleSync(['rndCosts']);
   Modal.close(); go('rnd', { tab: 'costs' });
   Toast.ok('Đã ghi nhận chi phí', `${id} · ${fmtVND(amount)}`);
 };
@@ -532,7 +515,6 @@ Actions['rnd-approval-request'] = (d) => {
   if (rndPendingApproval(p.id, p.stage)) { Toast.warn('Đã có yêu cầu chờ duyệt', 'Giai đoạn hiện tại đang chờ phê duyệt.'); return; }
   const id = nextCode('DUYET-2026-', DB.rndApprovals);
   DB.rndApprovals.unshift({ id, projectId: p.id, stage: p.stage, status: 'PENDING', approverId: '', date: currentDateYMD(), note: '' });
-  if (typeof RNDApi !== 'undefined') RNDApi.scheduleSync(['rndApprovals']);
   render();
   Toast.ok('Đã gửi yêu cầu duyệt', `${p.id} · Giai đoạn "${RND_STAGE_LABEL[p.stage]}"`);
 };
@@ -555,7 +537,6 @@ Actions['rnd-approval-decide'] = (d) => {
         if (next) { p.stage = next; Toast.ok('Đã duyệt', `${p.id} · Chuyển sang giai đoạn "${RND_STAGE_LABEL[next]}"`); }
         else { p.status = 'LAUNCHED'; p.actualLaunchDate = currentDateYMD(); Toast.ok('Đã tung sản phẩm', `${p.id} · Dự án hoàn tất.`); }
       }
-      if (typeof RNDApi !== 'undefined') RNDApi.scheduleSync(['rndApprovals', 'rndProjects']);
       render();
     },
   });
@@ -565,11 +546,6 @@ Actions['rnd-project-launch'] = (d) => {
   confirmBox({
     title: 'Xác nhận tung sản phẩm', tone: 'primary', icon: 'fa-rocket', okText: 'Xác nhận',
     message: `Xác nhận dự án <b>${esc(p.name)}</b> đã hoàn tất và sẵn sàng chuyển giao sản xuất đại trà?`,
-    onOk: () => {
-      p.status = 'LAUNCHED'; p.actualLaunchDate = currentDateYMD();
-      if (typeof RNDApi !== 'undefined') RNDApi.scheduleSync(['rndProjects']);
-      render();
-      Toast.ok('Đã tung sản phẩm', `${p.id} — thời gian phát triển ${rndProjectDevDays(p)} ngày.`);
-    },
+    onOk: () => { p.status = 'LAUNCHED'; p.actualLaunchDate = currentDateYMD(); render(); Toast.ok('Đã tung sản phẩm', `${p.id} — thời gian phát triển ${rndProjectDevDays(p)} ngày.`); },
   });
 };
