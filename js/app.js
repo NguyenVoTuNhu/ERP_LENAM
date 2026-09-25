@@ -30,6 +30,81 @@ function syncOrderStatus(orderId) {
   else o.status = 'dh_cho_san_xuat';
 }
 
+
+// [SALES -> WAREHOUSE] Đơn có thể trở thành "Sẵn sàng xuất bán" sau khi
+// Sản xuất hoàn tất. Trường hợp đó trước đây chỉ đổi trạng thái đơn, chưa tạo
+// SALES_ISSUE nên Kho thành phẩm không có chứng từ để xác nhận xuất.
+// Hàm này đối soát từ dữ liệu server đã hydrate, giữ chỗ FEFO và tạo phiếu
+// chờ xác nhận đúng một lần. Server/KIO vẫn là nguồn dữ liệu chuẩn.
+async function ensureReadySalesIssuesForWarehouse() {
+  if (typeof SalesCRM === 'undefined') return { created:0, linked:0 };
+  DB.goodsIssues = Array.isArray(DB.goodsIssues) ? DB.goodsIssues : [];
+  DB.orders = Array.isArray(DB.orders) ? DB.orders : [];
+
+  let created = 0, linked = 0, inventoryChanged = false, ordersChanged = false;
+  const readyOrders = DB.orders.filter(o => o && o.status === 'dh_hoan_thanh');
+
+  for (const o of readyOrders) {
+    const existing = DB.goodsIssues.find(gi =>
+      gi && gi.type === 'SALES_ISSUE' &&
+      String(gi.orderId || gi.refDoc || '') === String(o.id) &&
+      ['PENDING_CONFIRMATION','COMPLETED'].includes(gi.status)
+    );
+    if (existing) {
+      if (o.pendingIssueId !== existing.id && existing.status === 'PENDING_CONFIRMATION') {
+        o.pendingIssueId = existing.id;
+        ordersChanged = true;
+        linked++;
+      }
+      if (existing.status === 'COMPLETED' && o.salesIssueId !== existing.id) {
+        o.salesIssueId = existing.id;
+        o.pendingIssueId = '';
+        if (!['dh_da_giao','dh_hoan_tat'].includes(o.status)) o.status = 'dh_cho_van_chuyen';
+        ordersChanged = true;
+        linked++;
+      }
+      continue;
+    }
+
+    const reserved = SalesCRM.reserveOrderStock(o);
+    if (!reserved?.ok || !reserved.warehouseId || !(reserved.reservations || []).length) continue;
+
+    const issueId = nextCode('PX-2026-', DB.goodsIssues);
+    const issueDate = typeof currentDateYMD === 'function' ? currentDateYMD() : new Date().toISOString().slice(0,10);
+    DB.goodsIssues.unshift({
+      id: issueId,
+      type: 'SALES_ISSUE',
+      warehouseId: reserved.warehouseId,
+      refDoc: o.id,
+      orderId: o.id,
+      date: issueDate,
+      status: 'PENDING_CONFIRMATION',
+      createdBy: o.approvedBy || o.createdBy || '',
+      requestedBy: o.createdBy || '',
+      approvedBy: o.approvedBy || '',
+      note: `Chờ Kho xác nhận xuất theo đơn ${o.id}`,
+      items: (reserved.reservations || []).map(r => ({ ...r }))
+    });
+    o.pendingIssueId = issueId;
+    o.reservedWarehouseId = reserved.warehouseId;
+    created++;
+    inventoryChanged = true; // reserveOrderStock đã cập nhật qtyReserved/qtyAvailable
+    ordersChanged = true;
+  }
+
+  if (created || linked) {
+    const writes = [];
+    if (created && typeof InventoryAPI !== 'undefined' && InventoryAPI.syncCollections) {
+      writes.push(InventoryAPI.syncCollections(['goodsIssues','inventory']));
+    }
+    if (ordersChanged && typeof CRMAPI !== 'undefined' && CRMAPI.syncCollections) {
+      writes.push(CRMAPI.syncCollections(['orders']));
+    }
+    if (writes.length) await Promise.all(writes);
+  }
+  return { created, linked, inventoryChanged, ordersChanged };
+}
+
 /** Xuất vật tư theo định mức BOM khi bắt đầu sản xuất */
 function issueMaterials(po) {
   const check = Q.materialCheck(po);
@@ -417,6 +492,44 @@ const WarehouseInventoryPrimaryData = (() => {
   return { ensure, prewarm, markReady, isReady };
 })();
 
+// [LOGISTICS INITIAL HYDRATE] Logistics phải thấy đơn CRM sẵn sàng xuất ngay
+// lần đầu, không phụ thuộc việc user đã mở CRM/Kho trước đó. Hydrate đúng dữ liệu
+// liên phân hệ một lần; các lần chuyển tab sau dùng RAM đã server-validated.
+const LogisticsPrimaryData = (() => {
+  let ready = false;
+  let warmPromise = null;
+
+  async function loadOnce({ force = true } = {}) {
+    if (ready && !force) return true;
+    if (warmPromise) return warmPromise;
+    warmPromise = (async () => {
+      const jobs = [];
+      if (typeof CRMAPI !== 'undefined') {
+        await CRMAPI.bootstrap?.();
+        jobs.push(CRMAPI.ensureFresh?.(['orders','customers'], { force }));
+      }
+      if (typeof InventoryAPI !== 'undefined') {
+        await InventoryAPI.bootstrap?.();
+        jobs.push(InventoryAPI.ensureFresh?.(['goodsIssues','products'], { force }));
+      }
+      if (typeof LogisticsFleet !== 'undefined' && typeof LogisticsFleet.ensureFresh === 'function') {
+        jobs.push(LogisticsFleet.ensureFresh({ force }));
+      }
+      await Promise.allSettled(jobs.filter(Boolean));
+      if (typeof LogisticsFleet !== 'undefined' && LogisticsFleet.reconcileSalesOrders) LogisticsFleet.reconcileSalesOrders();
+      ready = true;
+      return true;
+    })().finally(() => { warmPromise = null; });
+    return warmPromise;
+  }
+
+  function ensure() { return ready ? Promise.resolve(true) : loadOnce({ force:true }); }
+  function prewarm() { return ready ? Promise.resolve(true) : loadOnce({ force:true }); }
+  function markReady() { ready = true; }
+  function isReady() { return ready; }
+  return { ensure, prewarm, markReady, isReady };
+})();
+
 const Actions = {
   /* --- Điều hướng chung --- */
   nav: async (d) => {
@@ -457,6 +570,14 @@ const Actions = {
     // form mở với danh sách đầy đủ ngay, không cần qua Kho trước.
     if (d.id === 'purchases') {
       PurchasePRMasterData.prewarm().catch(err => console.warn('[Purchase] Không warm được master nguyên liệu PR:', err));
+    }
+
+    // Logistics: đơn bán Sẵn sàng xuất phải có ngay lần đầu. Chờ hydrate
+    // CRM + phiếu xuất Kho + dữ liệu Logistics trước khi đổi màn để không render
+    // danh sách rỗng/cũ rồi vài chục ms sau mới nhảy dữ liệu.
+    if (d.id === 'logistics') {
+      try { await LogisticsPrimaryData.ensure(); }
+      catch (err) { console.warn('[Logistics] Không hydrate đủ dữ liệu giao hàng ban đầu:', err); }
     }
 
     // Kho → Nhập kho là màn giao nhau Purchase + Inventory. Nạp server trước khi
@@ -799,6 +920,17 @@ const Actions = {
   'crm-order-deliver': (d) => {
     const o = Q.order(d.id);
     if (!o) return;
+
+    // Logistics chỉ theo dõi/điều phối giao hàng. Không được đẩy sang route
+    // Xuất kho (quyền của Kho), nếu không sẽ phát sinh toast "Không có quyền".
+    if (typeof Auth !== 'undefined' && Auth.hasPermission('LOGISTICS_VIEW') && !Auth.hasPermission('INVENTORY_OPERATE')) {
+      go('logistics', { tab:'deliveries' });
+      if (o.status === 'dh_hoan_thanh' && o.pendingIssueId) {
+        Toast.info('Đang chờ Kho xuất thành phẩm', `${o.id} đã sẵn sàng bán. Sau khi Kho xác nhận xuất, đơn sẽ tự chuyển sang Điều phối/Giao hàng.`);
+      }
+      return;
+    }
+
     if (o.status !== 'dh_hoan_thanh' || !o.pendingIssueId) {
       Toast.warn('Chưa thể giao hàng', 'Đơn hàng phải được duyệt và có yêu cầu xuất kho đang chờ xác nhận.');
       return;
@@ -837,14 +969,24 @@ const Actions = {
     Modal.close(); go('order-detail',{id:o.id}); Toast.ok('Đã xuất kho bán hàng',`${issueId} · Đơn ${o.id} đã chuyển sang Logistics${lgDeliveryId?` · ${lgDeliveryId}`:''}.`);
   },
 
-  'inv-sales-issue-confirm': (d) => {
+  'inv-sales-issue-confirm': async (d) => {
+    // Luôn đối chiếu tồn + phiếu SALES_ISSUE mới nhất từ server trước khi xác nhận.
+    // Trước đây qtyReserved có thể vẫn là snapshot cũ/0 dù phiếu PENDING đã tồn tại,
+    // khiến Kho bị chặn sai với thông báo "tồn/giữ chỗ của lô đã thay đổi".
+    if(typeof InventoryAPI!=='undefined' && typeof InventoryAPI.ensureFresh==='function'){
+      try{ await InventoryAPI.ensureFresh(['goodsIssues','inventory','inventoryLots'],{force:true}); }
+      catch(e){ Toast.err('Không tải được tồn kho mới nhất','Vui lòng thử lại.'); return; }
+    }
     const gi=(DB.goodsIssues||[]).find(x=>x.id===d.id); if(!gi)return;
     if(gi.type!=='SALES_ISSUE'||gi.status!=='PENDING_CONFIRMATION'){Toast.warn('Phiếu không hợp lệ','Chỉ yêu cầu xuất bán đang chờ xác nhận mới được xử lý.');return;}
     const o=Q.order(gi.orderId||gi.refDoc); if(!o){Toast.err('Không tìm thấy đơn hàng','Không thể xác nhận xuất kho.');return;}
     for(const item of gi.items||[]){
       const row=(DB.inventory||[]).find(x=>x.productId===item.productId&&x.warehouseId===gi.warehouseId&&x.locationId===item.locationId&&x.lotId===item.lotId);
-      if(!row||Number(row.qtyOnHand||0)<Number(item.qty||0)||Number(row.qtyReserved||0)<Number(item.qty||0)){
-        Toast.err('Không thể xác nhận xuất',`${Q.product(item.productId)?.name||item.productId}: tồn/giữ chỗ của lô đã thay đổi.`);return;
+      const need=Number(item.qty||0);
+      // ensureFresh() đã reconcile qtyReserved theo toàn bộ SALES_ISSUE PENDING trên server.
+      // Chỉ chặn khi tồn vật lý thật sự thiếu hoặc reservation của chính phiếu không còn hợp lệ.
+      if(!row||Number(row.qtyOnHand||0)+1e-9<need||Number(row.qtyReserved||0)+1e-9<need){
+        Toast.err('Không thể xác nhận xuất',`${Q.product(item.productId)?.name||item.productId}: tồn thực tế không còn đủ cho phiếu này. Hãy làm mới phân bổ lô.`);return;
       }
     }
     for(const item of gi.items||[]){
@@ -5853,6 +5995,7 @@ function routeRefreshPlan(module, tab) {
           const jobs=[];
           if(typeof ProductionAPI!=='undefined' && ProductionAPI.bootstrap) jobs.push(ProductionAPI.bootstrap());
           if(typeof InventoryAPI!=='undefined' && InventoryAPI.bootstrap) jobs.push(InventoryAPI.bootstrap());
+          if(typeof CRMAPI!=='undefined' && CRMAPI.bootstrap) jobs.push(CRMAPI.bootstrap());
           await Promise.allSettled(jobs);
           return true;
         },
@@ -5861,17 +6004,28 @@ function routeRefreshPlan(module, tab) {
           if(typeof ProductionAPI!=='undefined' && ProductionAPI.ensureFresh)
             jobs.push(ProductionAPI.ensureFresh(['productionMaterialRequests'],{force}));
           if(typeof InventoryAPI!=='undefined' && InventoryAPI.ensureFresh)
-            jobs.push(InventoryAPI.ensureFresh(['goodsIssues','inventory','inventoryLots','warehouses','materials'],{force}));
+            jobs.push(InventoryAPI.ensureFresh(['goodsIssues','inventory','inventoryLots','warehouses','materials','products'],{force}));
+          if(typeof CRMAPI!=='undefined' && CRMAPI.ensureFresh)
+            jobs.push(CRMAPI.ensureFresh(['orders'],{force}));
           const parts=await Promise.allSettled(jobs);
           const changed={};
           for(const part of parts){if(part.status==='fulfilled'&&part.value&&typeof part.value==='object')Object.assign(changed,part.value);}
+
+          // Sau khi dữ liệu CRM + Kho đã đúng từ server, tạo phiếu SALES_ISSUE
+          // còn thiếu cho các đơn Sẵn sàng xuất bán. Không tạo trùng.
+          const reconciled = await ensureReadySalesIssuesForWarehouse();
+          if (reconciled.created || reconciled.linked) {
+            changed.goodsIssues = true;
+            changed.inventory = true;
+            changed.orders = true;
+          }
           return changed;
         }
       };
       return {
         api: warehouseIssueServerSource,
-        keys: ['productionMaterialRequests','goodsIssues','inventory','inventoryLots','warehouses','materials'],
-        deferred: true
+        keys: ['productionMaterialRequests','goodsIssues','inventory','inventoryLots','warehouses','materials','products','orders'],
+        deferred: false
       };
     }
 
@@ -5946,6 +6100,39 @@ function routeRefreshPlan(module, tab) {
       reports: ['customers', 'orders'],
     };
     return { api: typeof CRMAPI !== 'undefined' ? CRMAPI : null, keys: map[tab] || map.dashboard };
+  }
+
+
+  if (module === 'logistics') {
+    const logisticsServerSource = {
+      async bootstrap() {
+        const jobs=[];
+        if(typeof CRMAPI!=='undefined' && CRMAPI.bootstrap) jobs.push(CRMAPI.bootstrap());
+        if(typeof InventoryAPI!=='undefined' && InventoryAPI.bootstrap) jobs.push(InventoryAPI.bootstrap());
+        await Promise.allSettled(jobs);
+        if(typeof LogisticsFleet!=='undefined') LogisticsFleet.load?.();
+        return true;
+      },
+      async ensureFresh(_keys,{force=false}={}) {
+        const jobs=[];
+        if(typeof CRMAPI!=='undefined' && CRMAPI.ensureFresh) jobs.push(CRMAPI.ensureFresh(['orders','customers'],{force}));
+        if(typeof InventoryAPI!=='undefined' && InventoryAPI.ensureFresh) jobs.push(InventoryAPI.ensureFresh(['goodsIssues','products'],{force}));
+        if(typeof LogisticsFleet!=='undefined' && LogisticsFleet.ensureFresh) jobs.push(LogisticsFleet.ensureFresh({force}));
+        const parts=await Promise.allSettled(jobs), changed={};
+        for(const part of parts){
+          if(part.status==='fulfilled' && part.value && typeof part.value==='object') Object.assign(changed,part.value);
+        }
+        // Sau khi CRM + Kho + Logistics đều đã hydrate, bảo đảm mỗi đơn CRM
+        // sẵn sàng xuất đã có mã GH thật. Trước khi Kho xuất: WAIT_WAREHOUSE;
+        // sau khi Kho xuất: tự chuyển WAIT_DISPATCH để Logistics điều phối.
+        if(typeof LogisticsFleet!=='undefined' && LogisticsFleet.reconcileSalesOrders) LogisticsFleet.reconcileSalesOrders();
+        // LogisticsFleet trả boolean; CRM/Inventory trả object changed. Khi force lần
+        // đầu vẫn coi route đã server-validated dù không có collection changed.
+        if(force) changed.__logisticsHydrated = true;
+        return changed;
+      }
+    };
+    return {api:logisticsServerSource,keys:['orders','customers','goodsIssues','products','logistics'],deferred:true};
   }
 
 
@@ -6466,6 +6653,10 @@ if (
     if (typeof AccountingBank !== 'undefined') AccountingBank.hydrate();
   }
 
+  if (State.module === 'logistics') {
+    LogisticsPrimaryData.markReady();
+  }
+
   updateAuthUserUI();
   bindTopbar();
   updateBell();
@@ -6482,6 +6673,10 @@ if (
   }
   if (State.module === 'accounting' && State.tab === 'dashboard') {
     AccountingPrimaryData.prewarm().catch(err => console.warn('[Accounting] Warm dữ liệu tài chính nền thất bại:', err));
+  }
+
+  if (State.module === 'logistics' && (State.tab === 'dashboard' || !State.tab)) {
+    LogisticsPrimaryData.prewarm().catch(err => console.warn('[Logistics] Warm dữ liệu giao hàng nền thất bại:', err));
   }
 
   // Dashboard tự refresh đúng các collection KPI ở nền. Các route khác vẫn

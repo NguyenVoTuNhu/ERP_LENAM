@@ -19,6 +19,7 @@
   let syncTimer = null;
   let serverRefreshStarted = false;
   let serverReady = false;
+  let refreshPromise = null;
   let localVersion = 0;
   const lastSerialized = new Map();
   const today = () => (typeof currentDateYMD === 'function' ? currentDateYMD() : new Date().toISOString().slice(0, 10));
@@ -145,22 +146,32 @@
     return incoming;
   }
 
-  async function refreshFromServer() {
+  async function refreshFromServer({ force = false } = {}) {
     if (typeof KioStore === 'undefined') return false;
+    if (serverReady && !force) return true;
+    if (refreshPromise) return refreshPromise;
     const versionAtStart = localVersion;
-    try {
-      const incoming = {};
-      for (const key of COLLECTIONS) incoming[key] = await KioStore.listCollection(TABLES[key]);
-      if (localVersion !== versionAtStart) return false;
-      COLLECTIONS.forEach(key => { L[key] = Array.isArray(incoming[key]) ? incoming[key] : []; });
-      normalizeStatuses(); rememberBaseline(); writeCache(); serverReady = true;
-      if (typeof State !== 'undefined' && State.module === 'logistics' && typeof render === 'function') render();
-      console.info('[LogisticsAPI] Đã nạp dữ liệu Logistics thật từ KIO.');
-      return true;
-    } catch (err) {
-      console.warn('[LogisticsAPI] Không refresh được KIO; giữ snapshot gần nhất:', err);
-      return false;
-    }
+    refreshPromise = (async () => {
+      try {
+        const values = await Promise.all(COLLECTIONS.map(key => KioStore.listCollection(TABLES[key])));
+        if (localVersion !== versionAtStart) return false;
+        COLLECTIONS.forEach((key, index) => { L[key] = Array.isArray(values[index]) ? values[index] : []; });
+        normalizeStatuses(); rememberBaseline(); writeCache(); serverReady = true;
+        if (typeof State !== 'undefined' && State.module === 'logistics' && typeof render === 'function') render();
+        console.info('[LogisticsAPI] Đã nạp dữ liệu Logistics thật từ KIO.');
+        return true;
+      } catch (err) {
+        console.warn('[LogisticsAPI] Không refresh được KIO; giữ snapshot gần nhất:', err);
+        return false;
+      } finally {
+        refreshPromise = null;
+      }
+    })();
+    return refreshPromise;
+  }
+  async function ensureFresh({ force = false } = {}) {
+    load();
+    return refreshFromServer({ force });
   }
   function save() { localVersion += 1; writeCache(); try{localStorage.setItem(PENDING_KEY,'1');}catch(_){} scheduleServerSync(); }
   function normalizeStatuses() {
@@ -181,7 +192,7 @@
   function maint(id) { return load().maintenance.find(x => x.id === id); }
   function statusBadge(status) {
     const map = {
-      DRAFT:['Nháp','slate'], WAIT_DISPATCH:['Chờ điều phối','orange'], DISPATCHED:['Đã điều phối','blue'], READY:['Sẵn sàng giao','teal'], IN_TRANSIT:['Đang giao','blue'], PARTIAL:['Giao một phần','orange'], FAILED:['Giao thất bại','red'], DELIVERED:['Đã giao','green'], CLOSED:['Đã chốt chuyến','green'],
+      DRAFT:['Nháp','slate'], WAIT_WAREHOUSE:['Chờ Kho xuất','orange'], WAIT_DISPATCH:['Chờ điều phối','orange'], DISPATCHED:['Đã điều phối','blue'], READY:['Sẵn sàng giao','teal'], IN_TRANSIT:['Đang giao','blue'], PARTIAL:['Giao một phần','orange'], FAILED:['Giao thất bại','red'], DELIVERED:['Đã giao','green'], CLOSED:['Đã chốt chuyến','green'],
       AVAILABLE:['Sẵn sàng','green'], BUSY:['Đang chạy','blue'], MAINTENANCE:['Bảo trì','orange'], RETIRED:['Ngừng sử dụng','red'], OFF:['Nghỉ','slate'], INACTIVE:['Ngừng hoạt động','red'],
       PLANNED:['Đã lên lịch','blue'], IN_PROGRESS:['Đang bảo trì','orange'], DONE:['Hoàn thành','green'], CANCELLED:['Đã hủy','slate']
     };
@@ -223,7 +234,10 @@
     // chỉ được giữ để tương thích các route/link cũ; giao diện luôn hiển thị toàn bộ đơn.
     const data=L.deliveries.slice().sort((a,b)=>String(b.id).localeCompare(String(a.id),'vi',{numeric:true}));
     const rows=data.map(d=>`<tr class="clickable" data-act="lg-delivery-view" data-id="${e(d.id)}"><td><span class="code">${e(d.id)}</span><div class="cell-sub">${e(d.orderId||'Không tham chiếu SO')}</div></td><td>${e(d.customer)}<div class="cell-sub">${e(d.address)}</div></td><td>${dateFmt(d.promisedDate)} ${e(d.promisedTime||'')}</td><td>${e(vehicle(d.vehicleId)?.plate||'—')}</td><td>${e(driver(d.driverId)?.name||'—')}</td><td class="right num">${num(d.cargoKg)} kg</td><td>${statusBadge(d.status)}</td><td class="right">${d.status==='WAIT_DISPATCH'?`<button class="btn btn-sm btn-primary" data-act="lg-dispatch" data-id="${e(d.id)}"><i class="fa-solid fa-route"></i>Điều phối</button>`:d.status==='DISPATCHED'?`<button class="btn btn-sm btn-primary" data-act="lg-trip-start" data-id="${e(d.id)}"><i class="fa-solid fa-play"></i>Bắt đầu</button>`:d.status==='IN_TRANSIT'?`<button class="btn btn-sm btn-primary" data-act="lg-trip-complete" data-id="${e(d.id)}"><i class="fa-solid fa-flag-checkered"></i>Giao hàng</button>`:''}</td></tr>`).join('');
-    return `${header(dispatchOnly?'Điều phối giao hàng':'Đơn giao hàng',dispatchOnly?'Phân xe, tài xế và thời gian xuất phát cho các đơn đang chờ.':'Theo dõi đơn giao từ lúc lập đến khi chốt chi phí chuyến.',`<button class="btn btn-primary" data-act="lg-delivery-new"><i class="fa-solid fa-plus"></i>Tạo đơn giao</button>`)}<div class="grid g-auto-sm" style="margin-bottom:14px">${card('Chờ điều phối',L.deliveries.filter(d=>d.status==='WAIT_DISPATCH').length,'fa-clock','orange')}${card('Đã điều phối',L.deliveries.filter(d=>d.status==='DISPATCHED').length,'fa-calendar-check','blue')}${card('Đang giao',L.deliveries.filter(d=>d.status==='IN_TRANSIT').length,'fa-truck-fast','teal')}${card('Đã chốt',L.deliveries.filter(d=>d.status==='CLOSED').length,'fa-circle-check','green')}</div><div class="card">${table([{t:'Đơn giao / SO'},{t:'Khách hàng'},{t:'Hạn giao'},{t:'Xe'},{t:'Tài xế'},{t:'Khối lượng',cls:'right'},{t:'Trạng thái'},{t:'',cls:'right'}],rows,'Chưa có đơn giao hàng')}</div>`;
+
+    const waitWarehouse = L.deliveries.filter(d=>d.status==='WAIT_WAREHOUSE').length;
+
+    return `${header(dispatchOnly?'Điều phối giao hàng':'Đơn giao hàng',dispatchOnly?'Phân xe, tài xế và thời gian xuất phát cho các đơn đang chờ.':'Theo dõi đơn giao từ lúc lập đến khi chốt chi phí chuyến.',`<button class="btn btn-primary" data-act="lg-delivery-new"><i class="fa-solid fa-plus"></i>Tạo đơn giao</button>`)}<div class="grid g-auto-sm" style="margin-bottom:14px">${card('Chờ Kho xuất',waitWarehouse,'fa-box','orange')}${card('Chờ điều phối',L.deliveries.filter(d=>d.status==='WAIT_DISPATCH').length,'fa-clock','orange')}${card('Đã điều phối',L.deliveries.filter(d=>d.status==='DISPATCHED').length,'fa-calendar-check','blue')}${card('Đang giao',L.deliveries.filter(d=>d.status==='IN_TRANSIT').length,'fa-truck-fast','teal')}${card('Đã chốt',L.deliveries.filter(d=>d.status==='CLOSED').length,'fa-circle-check','green')}</div><div class="card">${table([{t:'Đơn giao / SO'},{t:'Khách hàng'},{t:'Hạn giao'},{t:'Xe'},{t:'Tài xế'},{t:'Khối lượng',cls:'right'},{t:'Trạng thái'},{t:'',cls:'right'}],rows,'Chưa có đơn giao hàng')}</div>`;
   }
 
   function fleetView() {
@@ -279,6 +293,13 @@
     return ((typeof DB !== 'undefined' && DB.orders) || []).filter(o =>
       o.status === 'dh_cho_van_chuyen' && salesIssueCompleted(o.id) && !L.deliveries.some(d => d.orderId === o.id && !['FAILED','CANCELLED'].includes(d.status))
     );
+  }
+  function readySalesOrdersAwaitingWarehouse() {
+    return ((typeof DB !== 'undefined' && DB.orders) || []).filter(o =>
+      o.status === 'dh_hoan_thanh' &&
+      !salesIssueCompleted(o.id) &&
+      !L.deliveries.some(d => d.orderId === o.id && !['FAILED','CANCELLED'].includes(d.status))
+    ).sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')) || String(b.id||'').localeCompare(String(a.id||''),'vi',{numeric:true}));
   }
   function crmOrderOptions(selected='') {
     const orders = eligibleSalesOrders();
@@ -752,27 +773,73 @@
   Actions['lg-maint-finish']=(d)=>{const x=maint(d.id);if(!x)return;Modal.open({title:`Hoàn thành bảo trì · ${x.id}`,size:'md',body:`<div class="form-grid cols-2"><div class="field"><label>Chi phí thực tế</label><input class="inp num" id="lgMFinalCost" data-money="1" type="text" inputmode="numeric" min="0" value="${n(x.cost)}"></div><div class="field"><label>Bảo trì kế tiếp</label><input class="inp" id="lgMNextDate" type="date" value="${addDaysLocal(today(),90)}"></div><div class="field"><label>Mốc km kế tiếp</label><input class="inp num" id="lgMNextKm" type="number" min="0" value="${n(vehicle(x.vehicleId)?.odometer)+5000}"></div></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="lg-maint-finish-save" data-id="${e(x.id)}">Xác nhận hoàn thành</button>`});};
   Actions['lg-maint-finish-save']=(d)=>{const x=maint(d.id),v=x&&vehicle(x.vehicleId);if(!x||!v)return;x.cost=parseMoney(document.querySelector('#lgMFinalCost')?.value);x.nextDate=document.querySelector('#lgMNextDate')?.value||'';x.nextKm=n(document.querySelector('#lgMNextKm')?.value);x.completedDate=today();x.status='DONE';v.nextMaintenanceDate=x.nextDate;v.nextMaintenanceKm=x.nextKm;rerender('Đã hoàn thành bảo trì',`${v.plate} trở lại trạng thái sẵn sàng.`);};
 
-  function createFromSalesOrder(orderId, salesIssueId='') {
-    load();
-    const order = ((typeof DB!=='undefined' && DB.orders) || []).find(o => o.id === orderId);
-    if (!order || !salesIssueCompleted(order.id)) return '';
-    const existing = L.deliveries.find(d => d.orderId === order.id && !['FAILED','CANCELLED'].includes(d.status));
-    if (existing) {
-      order.logisticsDeliveryId = existing.id;
-      order.logisticsStatus = existing.status;
-      if (order.status !== 'dh_da_giao' && order.status !== 'dh_hoan_tat') order.status = existing.status === 'IN_TRANSIT' ? 'dh_dang_giao' : 'dh_cho_van_chuyen';
-      SalesCRM?.saveLocal?.(['orders']);
-      return existing.id;
-    }
-    const snap = orderSnapshot(order);
-    const id = uid('GH', L.deliveries);
-    const row = { id, orderId:order.id, salesIssueId:salesIssueId||order.salesIssueId||'', customer:snap.customer, address:snap.address, recipient:snap.recipient, phone:snap.phone, deliveryNote:snap.deliveryNote, shippingFee:snap.shippingFee, deliveryLat:snap.lat, deliveryLng:snap.lng, promisedDate:snap.promisedDate<today()?today():snap.promisedDate, promisedTime:'10:00', items:snap.items, plannedStart:'', actualStart:'', actualDelivered:'', vehicleId:'', driverId:'', route:'', estimatedKm:0, actualKm:0, cargoKg:snap.shippingWeightKg, deliveredQty:0, returnedQty:0, fuelLiters:0, fuelCost:0, tollCost:0, parkingCost:0, otherCost:0, status:'WAIT_DISPATCH', gpsLat:null, gpsLng:null, gpsUpdatedAt:'', note:snap.deliveryNote||`Tự động tạo sau khi Kho xuất đơn ${order.id}`, createdAt:nowIso(), autoCreated:true };
-    L.deliveries.unshift(row);
-    order.status='dh_cho_van_chuyen'; order.logisticsDeliveryId=id; order.logisticsStatus='WAIT_DISPATCH';
-    SalesCRM?.saveLocal?.(['orders']);
-    save();
-    return id;
+  function completedSalesIssue(orderId) {
+    return ((typeof DB!=='undefined' && DB.goodsIssues) || []).find(g =>
+      g && g.type === 'SALES_ISSUE' && (g.orderId === orderId || g.refDoc === orderId) && g.status === 'COMPLETED'
+    ) || null;
   }
 
-  window.LogisticsFleet = { load, save, data:()=>L, createFromSalesOrder, flush:syncChanged, refreshFromServer };
+  function buildDeliveryRow(order, status, salesIssueId='') {
+    const snap = orderSnapshot(order);
+    const id = uid('GH', L.deliveries);
+    return { id, orderId:order.id, salesIssueId:salesIssueId||order.salesIssueId||'', customer:snap.customer, address:snap.address, recipient:snap.recipient, phone:snap.phone, deliveryNote:snap.deliveryNote, shippingFee:snap.shippingFee, deliveryLat:snap.lat, deliveryLng:snap.lng, promisedDate:snap.promisedDate<today()?today():snap.promisedDate, promisedTime:'10:00', items:snap.items, plannedStart:'', actualStart:'', actualDelivered:'', vehicleId:'', driverId:'', route:'', estimatedKm:0, actualKm:0, cargoKg:snap.shippingWeightKg, deliveredQty:0, returnedQty:0, fuelLiters:0, fuelCost:0, tollCost:0, parkingCost:0, otherCost:0, status, gpsLat:null, gpsLng:null, gpsUpdatedAt:'', note:snap.deliveryNote||`${status==='WAIT_WAREHOUSE'?'Tạo từ đơn sẵn sàng xuất':'Tự động tạo sau khi Kho xuất'} ${order.id}`, createdAt:nowIso(), autoCreated:true };
+  }
+
+  function ensureDeliveryForSalesOrder(order, salesIssueId='') {
+    if (!order) return { id:'', changed:false };
+    load();
+    const issue = completedSalesIssue(order.id);
+    const issueId = salesIssueId || issue?.id || order.salesIssueId || '';
+    const issued = !!issue;
+    let existing = L.deliveries.find(d => d.orderId === order.id && !['FAILED','CANCELLED'].includes(d.status));
+    let changed = false;
+
+    if (!existing) {
+      const eligible = ['dh_hoan_thanh','dh_cho_van_chuyen'].includes(order.status);
+      if (!eligible) return { id:'', changed:false };
+      existing = buildDeliveryRow(order, issued ? 'WAIT_DISPATCH' : 'WAIT_WAREHOUSE', issueId);
+      L.deliveries.unshift(existing);
+      changed = true;
+    } else if (issued && existing.status === 'WAIT_WAREHOUSE') {
+      existing.status = 'WAIT_DISPATCH';
+      existing.salesIssueId = issueId;
+      existing.note = existing.note || `Kho đã xuất đơn ${order.id}`;
+      changed = true;
+    }
+
+    order.logisticsDeliveryId = existing.id;
+    order.logisticsStatus = existing.status;
+    if (issued && !['dh_da_giao','dh_hoan_tat'].includes(order.status)) order.status = 'dh_cho_van_chuyen';
+    return { id:existing.id, changed };
+  }
+
+  function reconcileSalesOrders() {
+    load();
+    let changed = false;
+    const orders = ((typeof DB!=='undefined' && DB.orders) || []).filter(o =>
+      o && ['dh_hoan_thanh','dh_cho_van_chuyen'].includes(o.status) && !['dh_da_giao','dh_hoan_tat','dh_huy'].includes(o.status)
+    );
+    orders.forEach(order => {
+      const result = ensureDeliveryForSalesOrder(order);
+      changed = changed || result.changed;
+    });
+    if (changed) {
+      SalesCRM?.saveLocal?.(['orders']);
+      save();
+    }
+    return changed;
+  }
+
+  function createFromSalesOrder(orderId, salesIssueId='') {
+    const order = ((typeof DB!=='undefined' && DB.orders) || []).find(o => o.id === orderId);
+    if (!order) return '';
+    const result = ensureDeliveryForSalesOrder(order, salesIssueId);
+    if (result.changed) {
+      SalesCRM?.saveLocal?.(['orders']);
+      save();
+    }
+    return result.id;
+  }
+
+  window.LogisticsFleet = { load, save, data:()=>L, createFromSalesOrder, reconcileSalesOrders, flush:syncChanged, refreshFromServer, ensureFresh, isReady:()=>serverReady };
 })();
