@@ -23,7 +23,7 @@ const RNDApi = (() => {
   const SEED_KEY = KIO_CONFIG.storageKeys.rndDemoSeed;
 
   let booted = false;
-  let seedStarted = false;
+  let seedPromise = null;
   let syncChain = Promise.resolve();
   let syncTimer = null;
   const pendingKeys = new Set();
@@ -109,18 +109,25 @@ const RNDApi = (() => {
     return true;
   }
 
-  async function seedIfNeeded() {
-    if (seedStarted) return;
-    seedStarted = true;
-    try {
-      const data = await loadServerAndSeedIfNeeded();
-      apply(data);
-      Object.keys(TABLES).forEach(key => lastLoaded.set(key, Date.now()));
-      writeCache();
-    } catch (err) {
-      seedStarted = false;
-      console.warn('[RNDApi] Seed R&D lần đầu thất bại; giữ dữ liệu hiện tại:', err);
-    }
+  // Promise dùng chung: các lời gọi đồng thời phải đợi cùng một lần nạp/seed, không
+  // được đọc bảng rỗng rồi ghi đè demo đang được seed. Trả về true khi DB.* vừa được
+  // thay bằng dữ liệu server (caller dùng để biết cần render lại).
+  function seedIfNeeded() {
+    if (seedPromise) return seedPromise;
+    seedPromise = (async () => {
+      try {
+        const data = await loadServerAndSeedIfNeeded();
+        apply(data);
+        Object.keys(TABLES).forEach(key => lastLoaded.set(key, Date.now()));
+        writeCache();
+        return true;
+      } catch (err) {
+        seedPromise = null; // thử lại ở lần gọi sau
+        console.warn('[RNDApi] Seed R&D lần đầu thất bại; giữ dữ liệu hiện tại:', err);
+        return false;
+      }
+    })();
+    return seedPromise;
   }
 
   async function refreshKeys(keys, { force = false } = {}) {
@@ -142,13 +149,18 @@ const RNDApi = (() => {
 
   async function ensureFresh(keys, { force = false } = {}) {
     await bootstrap();
-    await seedIfNeeded();
+    const seeded = await seedIfNeeded();
+    // Lần nạp đầu tiên (seedIfNeeded) đã thay DB.* bằng dữ liệu server, nên phải báo
+    // "changed" để scheduleRouteDataRefresh render lại — nếu không, màn hình vẫn giữ
+    // dữ liệu demo cho tới lần render kế tiếp.
+    const changed = {};
+    if (seeded) normalizeKeys(keys).forEach(key => { changed[key] = true; });
     const wanted = normalizeKeys(keys).filter(key => {
       if (force) return true;
       return (Date.now() - Number(lastLoaded.get(key) || 0)) >= REFRESH_TTL;
     });
-    if (!wanted.length) return {};
-    return refreshKeys(wanted, { force });
+    if (!wanted.length) return changed;
+    return Object.assign(changed, await refreshKeys(wanted, { force }));
   }
 
   function syncCollections(keys) {

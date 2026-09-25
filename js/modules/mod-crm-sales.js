@@ -401,14 +401,11 @@ Views.orders = function () {
   const customers = (DB.customers||[]).map(c=>[c.id, `${c.id} · ${c.name}`]);
 
   const rows = pg.items.map(o => {
-    const stock = SalesCRM.orderStockState(o);
-    const issued = SalesCRM.hasSalesIssue(o.id);
     return `<tr class="clickable" data-act="open-order" data-id="${o.id}">
       <td>${cell2(`<span class="code">${o.id}</span>`, o.opportunityId ? `Cơ hội ${esc(o.opportunityId)}` : 'Đơn trực tiếp')}</td>
       <td>${cell2(esc(Q.customerName(o.customerId)), esc(Q.customer(o.customerId)?.province||''))}</td>
       <td class="hide-sm">${(o.items||[]).length ? cell2(esc(o.items[0].name), (o.items||[]).length>1?`+ ${(o.items||[]).length-1} sản phẩm`:`${fmtN(o.items[0].qty)} ${esc(o.items[0].unit)}`) : '—'}</td>
       <td class="num">${fmtDate(o.date)}</td><td class="num hide-sm">${fmtDate(o.dueDate)}</td>
-      <td>${issued?'<span class="badge green">Đã xuất kho</span>':stock.enough?'<span class="badge teal">Đủ tồn TP</span>':'<span class="badge orange">Thiếu tồn TP</span>'}</td>
       <td class="right strong num">${fmtVND(o.total)}</td>
       <td>${SalesCRM.badgeFrom(SalesCRM.orderStatus,o.status)}</td>
       <td class="right">${rowActions([
@@ -438,7 +435,7 @@ Views.orders = function () {
       ${(f.q||f.status||f.statusGroup||f.owner||f.customerId||f.from||f.to)?'<button class="btn btn-sm" data-act="clear-filter" data-key="orders"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>':''}
       <span class="spacer"></span><span class="chip">${fmtN(list.length)} đơn</span>
     </div>
-    ${tableShell([{t:'Mã đơn',w:'135px'},{t:'Khách hàng'},{t:'Thành phẩm',cls:'hide-sm'},{t:'Ngày đặt'},{t:'Giao dự kiến',cls:'hide-sm'},{t:'Kho TP'},{t:'Giá trị',cls:'right'},{t:'Trạng thái'},{t:'Thao tác',cls:'right',w:'118px'}],rows,{emptyTitle:'Không có đơn hàng phù hợp'})}
+    ${tableShell([{t:'Mã đơn',w:'135px'},{t:'Khách hàng'},{t:'Thành phẩm',cls:'hide-sm'},{t:'Ngày đặt'},{t:'Giao dự kiến',cls:'hide-sm'},{t:'Giá trị',cls:'right'},{t:'Trạng thái'},{t:'Thao tác',cls:'right',w:'118px'}],rows,{emptyTitle:'Không có đơn hàng phù hợp'})}
     ${pagiHTML('orders',pg,'đơn hàng')}</div>`;
 };
 
@@ -672,16 +669,21 @@ Views['order-detail'] = function (params) {
   const complaints = (DB.crmTickets || []).filter(t => t.type === 'COMPLAINT' && t.orderId === o.id);
   const paidAmount = SalesCRM.paidOfOrder(o.id);
   const receivableAmount = SalesCRM.receivableOfOrder(o);
+  const canCrmOperate = typeof Auth === 'undefined' || Auth.hasPermission('CRM_OPERATE');
+  const canSalesOperate = typeof Auth === 'undefined' || Auth.hasPermission('SALES_ORDER_OPERATE');
+  const canSalesApprove = typeof Auth !== 'undefined' && Auth.hasPermission('SALES_APPROVE');
+  const canInventoryOperate = typeof Auth !== 'undefined' && Auth.hasPermission('INVENTORY_OPERATE');
+  const canLogisticsView = typeof Auth !== 'undefined' && Auth.hasPermission('LOGISTICS_VIEW');
 
   return `${pageHead(`Đơn hàng ${o.id}`, `${esc(Q.customerName(o.customerId))} · Giao dự kiến ${fmtDate(o.dueDate)}`, `
     <button class="btn" data-act="crm-go-orders"><i class="fa-solid fa-arrow-left"></i>Danh sách</button>
-    <button class="btn" data-act="crm-order-complaint" data-id="${o.id}"><i class="fa-solid fa-triangle-exclamation"></i>Thêm khiếu nại</button>
-    <button class="btn" data-act="crm-order-edit" data-id="${o.id}"><i class="fa-solid fa-pen"></i>Sửa</button>
-    ${o.status==='dh_cho_xu_ly' && !o.approvedAt ? `<button class="btn" data-act="crm-order-delete" data-id="${o.id}"><i class="fa-solid fa-trash"></i>Xóa</button>` : ''}
-    ${o.status==='dh_cho_xu_ly' && typeof Auth!=='undefined' && Auth.hasPermission('SALES_APPROVE') ? `<button class="btn" data-act="crm-order-reject" data-id="${o.id}"><i class="fa-solid fa-xmark"></i>Từ chối</button><button class="btn btn-primary" data-act="crm-order-approve" data-id="${o.id}"><i class="fa-solid fa-check"></i>Duyệt đơn</button>` : ''}
-    ${o.status==='dh_hoan_thanh' && o.pendingIssueId ? `<button class="btn btn-primary" data-act="crm-order-deliver" data-id="${o.id}"><i class="fa-solid fa-truck-fast"></i>Giao hàng</button>` : ''}
-    ${['dh_da_giao','dh_hoan_tat'].includes(o.status) && SalesCRM.receivableOfOrder(o)>0 ? `<button class="btn" data-act="crm-customer-pay-modal" data-id="${o.id}"><i class="fa-solid fa-hand-holding-dollar"></i>Thu tiền</button>` : ''}
-    ${o.status==='dh_da_giao' ? `<button class="btn btn-primary" data-act="crm-order-complete-open" data-id="${o.id}"><i class="fa-solid fa-circle-check"></i>Xác nhận hoàn thành đơn hàng</button>` : ''}`)}
+    ${canCrmOperate ? `<button class="btn" data-act="crm-order-complaint" data-id="${o.id}"><i class="fa-solid fa-triangle-exclamation"></i>Thêm khiếu nại</button>` : ''}
+    ${canSalesOperate ? `<button class="btn" data-act="crm-order-edit" data-id="${o.id}"><i class="fa-solid fa-pen"></i>Sửa</button>` : ''}
+    ${canSalesOperate && o.status==='dh_cho_xu_ly' && !o.approvedAt ? `<button class="btn" data-act="crm-order-delete" data-id="${o.id}"><i class="fa-solid fa-trash"></i>Xóa</button>` : ''}
+    ${o.status==='dh_cho_xu_ly' && canSalesApprove ? `<button class="btn" data-act="crm-order-reject" data-id="${o.id}"><i class="fa-solid fa-xmark"></i>Từ chối</button><button class="btn btn-primary" data-act="crm-order-approve" data-id="${o.id}"><i class="fa-solid fa-check"></i>Duyệt đơn</button>` : ''}
+    ${canLogisticsView ? `<button class="btn btn-primary" data-act="crm-order-deliver" data-id="${o.id}"><i class="fa-solid fa-truck-fast"></i>${o.logisticsDeliveryId?'Mở đơn giao':(o.status==='dh_hoan_thanh'&&o.pendingIssueId?'Theo dõi giao hàng':'Về Logistics')}</button>` : ''}
+    ${canCrmOperate && ['dh_da_giao','dh_hoan_tat'].includes(o.status) && SalesCRM.receivableOfOrder(o)>0 ? `<button class="btn" data-act="crm-customer-pay-modal" data-id="${o.id}"><i class="fa-solid fa-hand-holding-dollar"></i>Thu tiền</button>` : ''}
+    ${canSalesOperate && o.status==='dh_da_giao' ? `<button class="btn btn-primary" data-act="crm-order-complete-open" data-id="${o.id}"><i class="fa-solid fa-circle-check"></i>Xác nhận hoàn thành đơn hàng</button>` : ''}`)}
     <div class="grid g-auto-sm" style="margin-bottom:14px">
       ${mkpi('Giá trị đơn', fmtShort(o.total), 'fa-sack-dollar','blue')}
       ${mkpi('Đã thanh toán', fmtShort(paidAmount), 'fa-circle-check','green')}
@@ -717,8 +719,8 @@ Views['order-detail'] = function (params) {
         <dt>Hoàn thành đơn</dt><dd>${o.completedAt?fmtDate(String(o.completedAt).slice(0,10)):'—'}</dd><dt>Hàng trả về</dt><dd>${(o.returnedItems||[]).length?(o.returnedItems||[]).map(x=>`${esc(Q.product(x.productId)?.name||x.productId)}: <b>${fmtN(x.qty)}</b>`).join('<br>'):'Không có'}</dd>
       </dl><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
         ${!issued&&!stock.enough&&o.approvedAt&&!['dh_da_huy','dh_da_giao','dh_hoan_tat'].includes(o.status)?`<span class="badge orange"><i class="fa-solid fa-warehouse"></i> Chờ Kho lập kế hoạch SX</span>`:''}
-        ${canIssue?`<button class="btn btn-sm btn-primary" data-act="crm-order-issue" data-id="${o.id}"><i class="fa-solid fa-arrow-up-from-bracket"></i>Xuất kho bán hàng</button>`:''}
-        ${!['dh_da_huy','dh_da_giao','dh_hoan_tat'].includes(o.status)?`<button class="btn btn-sm" data-act="order-status" data-id="${o.id}"><i class="fa-solid fa-arrows-rotate"></i>Đổi trạng thái</button>`:''}
+        ${canIssue && canInventoryOperate?`<button class="btn btn-sm btn-primary" data-act="crm-order-issue" data-id="${o.id}"><i class="fa-solid fa-arrow-up-from-bracket"></i>Xuất kho bán hàng</button>`:''}
+        ${canSalesOperate && !['dh_da_huy','dh_da_giao','dh_hoan_tat'].includes(o.status)?`<button class="btn btn-sm" data-act="order-status" data-id="${o.id}"><i class="fa-solid fa-arrows-rotate"></i>Đổi trạng thái</button>`:''}
       </div></div></div>
     </div>
     <div class="card" style="margin-bottom:14px"><div class="card-head"><div><h3>Liên kết sản xuất</h3><p>Đơn bán → Kho kiểm tra tồn → Kế hoạch sản xuất → Yêu cầu NVL → LSX</p></div></div>
@@ -727,7 +729,7 @@ Views['order-detail'] = function (params) {
       <div class="form-sec-title" style="margin-top:14px">Lệnh sản xuất</div>
       ${tableShell([{t:'LSX'},{t:'Thành phẩm'},{t:'SL',cls:'right'},{t:'Deadline'},{t:'Trạng thái'}],pos.map(p=>`<tr class="clickable" data-act="open-production-order" data-id="${p.id}"><td><span class="code">${p.id}</span></td><td>${esc(p.productName)}</td><td class="right num">${fmtN(p.qty)} ${esc(p.unit)}</td><td>${fmtDate(p.deadline)}</td><td>${badge(p.status)}</td></tr>`),{emptyTitle:'Chưa phát hành lệnh sản xuất'})}
     </div>
-    <div class="card"><div class="card-head"><div><h3>Khiếu nại liên quan đơn hàng</h3><p>Khiếu nại được quản lý ngay trong đơn bán, không cần menu riêng</p></div><button class="btn btn-sm" data-act="crm-order-complaint" data-id="${o.id}"><i class="fa-solid fa-plus"></i>Thêm khiếu nại</button></div>
+    <div class="card"><div class="card-head"><div><h3>Khiếu nại liên quan đơn hàng</h3><p>Khiếu nại được quản lý ngay trong đơn bán, không cần menu riêng</p></div>${canCrmOperate?`<button class="btn btn-sm" data-act="crm-order-complaint" data-id="${o.id}"><i class="fa-solid fa-plus"></i>Thêm khiếu nại</button>`:''}</div>
       ${tableShell([{t:'Mã'},{t:'Tiêu đề'},{t:'Mức độ'},{t:'Trạng thái'},{t:'Ngày tiếp nhận'},{t:'Thao tác'}],complaints.map(c=>`<tr><td><span class="code">${esc(c.id)}</span></td><td>${esc(c.title)}</td><td>${esc(c.priority||'')}</td><td>${SalesCRM.badgeFrom(SalesCRM.ticketStatus,c.status)}</td><td>${fmtDate(c.createdAt)}</td><td>${rowActions([{act:'crm-complaint-edit',data:`data-id="${c.id}"`,icon:'fa-pen',title:'Cập nhật khiếu nại'}])}</td></tr>`),{emptyTitle:'Đơn hàng chưa có khiếu nại'})}
     </div>`;
 };

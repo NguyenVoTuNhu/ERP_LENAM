@@ -231,6 +231,17 @@ const Auth = {
       'crm-order-approve':'SALES_APPROVE','crm-order-reject':'SALES_APPROVE','sales-production-request':'SALES_ORDER_OPERATE','sales-production-request-approve':'SALES_APPROVE',
       'crm-order-issue':'INVENTORY_OPERATE','crm-order-issue-confirm':'INVENTORY_OPERATE','inv-sales-issue-confirm':'INVENTORY_OPERATE',
       'order-status-save':'SALES_ORDER_OPERATE',
+      // Logistics: các thao tác làm thay đổi chuyến/xe/tài xế/bảo trì chỉ role
+      // có LOGISTICS_OPERATE mới được thực hiện. Các action chỉ xem không map
+      // để Giám đốc/Admin vẫn xem được theo phạm vi module.
+      'lg-delivery-new':'LOGISTICS_OPERATE','lg-delivery-save':'LOGISTICS_OPERATE',
+      'lg-dispatch':'LOGISTICS_OPERATE','lg-dispatch-save':'LOGISTICS_OPERATE',
+      'lg-trip-start':'LOGISTICS_OPERATE','lg-trip-complete':'LOGISTICS_OPERATE','lg-trip-complete-save':'LOGISTICS_OPERATE','lg-trip-close':'LOGISTICS_OPERATE','lg-trip-close-save':'LOGISTICS_OPERATE',
+      'lg-gps-update':'LOGISTICS_OPERATE','lg-gps-update-save':'LOGISTICS_OPERATE',
+      'lg-vehicle-new':'LOGISTICS_OPERATE','lg-vehicle-edit':'LOGISTICS_OPERATE','lg-vehicle-save':'LOGISTICS_OPERATE',
+      'lg-vehicle-type-new':'LOGISTICS_OPERATE','lg-vehicle-type-edit':'LOGISTICS_OPERATE','lg-vehicle-type-save':'LOGISTICS_OPERATE',
+      'lg-driver-new':'LOGISTICS_OPERATE','lg-driver-edit':'LOGISTICS_OPERATE','lg-driver-save':'LOGISTICS_OPERATE',
+      'lg-maint-new':'LOGISTICS_OPERATE','lg-maint-save':'LOGISTICS_OPERATE','lg-maint-start':'LOGISTICS_OPERATE','lg-maint-finish':'LOGISTICS_OPERATE','lg-maint-finish-save':'LOGISTICS_OPERATE',
       'new-user':'ADMIN_USER_MANAGE','user-toggle':'ADMIN_USER_MANAGE','user-role':'ADMIN_USER_MANAGE','user-role-save':'ADMIN_USER_MANAGE',
       'new-employee':'HR_OPERATE','employee-edit':'HR_OPERATE','employee-save':'HR_OPERATE','employee-toggle-active':'HR_OPERATE','employee-import':'HR_OPERATE'
     };
