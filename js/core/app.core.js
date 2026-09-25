@@ -693,8 +693,7 @@ const NAV = [
         { id: 'shifts', label: 'Phân ca' },
         { id: 'kpi', label: 'KPI' },
         { id: 'evaluations', label: 'Đánh giá' },
-        { id: 'payroll', label: 'Tính lương' },
-        { id: 'labour_cost', label: 'Chi phí nhân công' }
+        { id: 'payroll', label: 'Tính lương' }
       ]
     },
     {

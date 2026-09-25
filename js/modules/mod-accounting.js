@@ -1559,7 +1559,7 @@ Object.assign(Actions, {
 
   'acc-asset-add': () => openFixedAssetForm(),
   'acc-asset-edit': (d) => openFixedAssetForm(d.id),
-  'acc-asset-save': (d) => {
+  'acc-asset-save': async (d) => {
     const name = $('#faName')?.value.trim();
     const cost = parseMoney($('#faCost')?.value) || 0;
     if (!name || cost <= 0) { Toast.err('Thiếu thông tin', 'Vui lòng nhập tên tài sản và nguyên giá lớn hơn 0.'); return; }
@@ -1572,11 +1572,27 @@ Object.assign(Actions, {
     } else {
       DB.fixedAssets.push({ id: nextCode('TS-', DB.fixedAssets), status: 'active', ...payload });
     }
-    Modal.close(); render(); Toast.ok(d.id ? 'Đã cập nhật tài sản' : 'Đã thêm tài sản', name);
+    try {
+      if (typeof RestaurantQualityAPI !== 'undefined') await RestaurantQualityAPI.syncRestaurant(['fixedAssets']);
+      Modal.close(); render(); Toast.ok(d.id ? 'Đã cập nhật tài sản' : 'Đã thêm tài sản', name);
+    } catch (err) {
+      DB.fixedAssets = before;
+      Toast.err('Không lưu được lên server', err?.message || 'Vui lòng thử lại.');
+    }
   },
   'acc-asset-delete': (d) => {
     const a = DB.fixedAssets.find((x) => x.id === d.id); if (!a) return;
-    confirmBox({ title: 'Xóa tài sản cố định', icon: 'fa-trash', okText: 'Xóa', message: `Xóa tài sản <b>${esc(a.name)}</b>?`, onOk: () => { DB.fixedAssets = DB.fixedAssets.filter((x) => x.id !== d.id); render(); Toast.ok('Đã xóa tài sản', a.name); } });
+    confirmBox({ title: 'Xóa tài sản cố định', icon: 'fa-trash', okText: 'Xóa', message: `Xóa tài sản <b>${esc(a.name)}</b>?`, onOk: async () => {
+      const before = JSON.parse(JSON.stringify(DB.fixedAssets || []));
+      try {
+        if (typeof RestaurantQualityAPI !== 'undefined') await RestaurantQualityAPI.deleteRestaurant('fixedAssets', d.id);
+        else DB.fixedAssets = DB.fixedAssets.filter((x) => x.id !== d.id);
+        render(); Toast.ok('Đã xóa tài sản', a.name);
+      } catch (err) {
+        DB.fixedAssets = before;
+        Toast.err('Không xóa được trên server', err?.message || 'Vui lòng thử lại.');
+      }
+    } });
   },
 });
 
