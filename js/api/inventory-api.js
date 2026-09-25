@@ -16,6 +16,10 @@ const InventoryAPI = (() => {
   const DEMO_SEED_KEY = KIO_CONFIG.storageKeys.inventoryDemoSeed;
   const PENDING_KEY = `${CACHE_KEY}:pending`; // outbox chống mất dữ liệu khi F5
   const DELIVERY_TEST_SEED_VERSION = '20260916-finished-1000-v1';
+  // One-time migration requested 2026-09-25: persist the 3 real warehouse sites
+  // and redistribute ONLY current RAW_MATERIAL / FINISHED_GOODS balances already
+  // on KIO. Total company stock is preserved; no demo quantity is created.
+  const THREE_SITE_DISTRIBUTION_VERSION = '20260925-real-stock-3-sites-equal-v2';
 
   const DEMO_DATA = KioDataUtils.snapshotCollections(TABLES);
   const DEMO_SETTINGS = {
@@ -72,6 +76,19 @@ const InventoryAPI = (() => {
       String(row?.locationId || '').trim(),
       String(row?.lotId || '').trim() || '__NO_LOT__',
     ].join('::');
+  }
+
+
+  function inventoryBalanceId(row) {
+    const safe = value => String(value || '').trim().replace(/[^A-Za-z0-9_-]+/g, '_');
+    return `BAL-${safe(row?.productId)}-${safe(row?.warehouseId)}-${safe(row?.locationId)}-${safe(row?.lotId || 'NOLOT')}`;
+  }
+
+  function ensureInventoryRowIds(rows) {
+    return (Array.isArray(rows) ? rows : []).map(row => ({
+      ...row,
+      id: String(row?.id || '').trim() || inventoryBalanceId(row),
+    }));
   }
 
   function uniqueInventoryBalances(rows) {
@@ -466,6 +483,7 @@ const InventoryAPI = (() => {
 
         const table = TABLES[key];
         if (!table) continue;
+        if (key === 'inventory') DB.inventory = ensureInventoryRowIds(DB.inventory);
         await KioStore.syncCollection(table, Array.isArray(DB[key]) ? DB[key] : []);
       }
 
@@ -681,9 +699,111 @@ const InventoryAPI = (() => {
     return true;
   }
 
+  async function ensureThreeRealWarehouseSitesAndDistribution() {
+    // One-time server seed requested 2026-09-25.
+    // Master vật tư/thành phẩm được đọc trực tiếp từ KIO. Mỗi mặt hàng được tạo
+    // tồn mở đầu 1.200 / 1.500 / 1.800 ĐVT và chia ĐỀU cho 3 kho vật lý.
+    // Không lấy số lượng từ data.js/localStorage và không chạy lại sau khi đã thành công.
+    const [settingsRows, remoteSites, remoteWarehouses, remoteLocations, remoteInventory, remoteLots, remoteMaterials, remoteProducts] = await Promise.all([
+      KioStore.listCollection(SETTINGS_TABLE, { force:true }),
+      KioStore.listCollection(TABLES.warehouseSites, { force:true }),
+      KioStore.listCollection(TABLES.warehouses, { force:true }),
+      KioStore.listCollection(TABLES.warehouseLocations, { force:true }),
+      KioStore.listCollection(TABLES.inventory, { force:true }),
+      KioStore.listCollection(TABLES.inventoryLots, { force:true }),
+      KioStore.listCollection(TABLES.materials, { force:true }),
+      KioStore.listCollection(TABLES.products, { force:true }),
+    ]);
+    let settings = settingsRows.find(x => x?.id === 'INVENTORY_SETTINGS') || {
+      id:'INVENTORY_SETTINGS', inventoryAlertConfig:{}, finishedMinStock:{}, testDataVersions:{}
+    };
+    if (settings?.testDataVersions?.threeSiteDistribution === THREE_SITE_DISTRIBUTION_VERSION) return false;
+
+    const requiredSites = [
+      { id:'SITE-TD', code:'TD', name:'Kho Thủ Đức', address:'128 Lê Văn Việt, TP. Thủ Đức, TP.HCM', province:'Thành phố Hồ Chí Minh', district:'TP. Thủ Đức', ward:'', addressDetail:'128 Lê Văn Việt', managerId:'NV-018', status:'active', note:'Kho trung tâm Thủ Đức' },
+      { id:'SITE-BD', code:'BD', name:'Kho Bình Dương', address:'KCN Sóng Thần, Dĩ An, Bình Dương', province:'Bình Dương', district:'Dĩ An', ward:'', addressDetail:'KCN Sóng Thần', managerId:'NV-018', status:'active', note:'Kho khu vực Bình Dương' },
+      { id:'SITE-DN', code:'DN', name:'Kho Đồng Nai', address:'KCN Biên Hòa 2, Đồng Nai', province:'Đồng Nai', district:'Biên Hòa', ward:'', addressDetail:'KCN Biên Hòa 2', managerId:'NV-018', status:'active', note:'Kho khu vực Đồng Nai' },
+    ];
+    const requiredWarehouses = [
+      { id:'WH-001',siteId:'SITE-TD',code:'RAW_TD',name:'Kho Nguyên liệu - Thủ Đức',type:'RAW_MATERIAL',address:'128 Lê Văn Việt, TP. Thủ Đức, TP.HCM',managerId:'NV-018',status:'active' },
+      { id:'WH-008',siteId:'SITE-BD',code:'RAW_BD',name:'Kho Nguyên liệu - Bình Dương',type:'RAW_MATERIAL',address:'KCN Sóng Thần, Dĩ An, Bình Dương',managerId:'NV-018',status:'active' },
+      { id:'WH-009',siteId:'SITE-DN',code:'RAW_DN',name:'Kho Nguyên liệu - Đồng Nai',type:'RAW_MATERIAL',address:'KCN Biên Hòa 2, Đồng Nai',managerId:'NV-018',status:'active' },
+      { id:'WH-004',siteId:'SITE-TD',code:'FIN_TD',name:'Kho Thành phẩm - Thủ Đức',type:'FINISHED_GOODS',address:'128 Lê Văn Việt, TP. Thủ Đức, TP.HCM',managerId:'NV-018',status:'active' },
+      { id:'WH-012',siteId:'SITE-BD',code:'FIN_BD',name:'Kho Thành phẩm - Bình Dương',type:'FINISHED_GOODS',address:'KCN Sóng Thần, Dĩ An, Bình Dương',managerId:'NV-018',status:'active' },
+      { id:'WH-013',siteId:'SITE-DN',code:'FIN_DN',name:'Kho Thành phẩm - Đồng Nai',type:'FINISHED_GOODS',address:'KCN Biên Hòa 2, Đồng Nai',managerId:'NV-018',status:'active' },
+    ];
+    const requiredLocations = [
+      {id:'LOC-001',warehouseId:'WH-001',code:'TD-RAW-A1',name:'Kệ A1 - Nguyên liệu',locationType:'SHELF',status:'active'},
+      {id:'LOC-013',warehouseId:'WH-008',code:'BD-RAW-A1',name:'Kệ A1 - Nguyên liệu',locationType:'SHELF',status:'active'},
+      {id:'LOC-015',warehouseId:'WH-009',code:'DN-RAW-A1',name:'Kệ A1 - Nguyên liệu',locationType:'SHELF',status:'active'},
+      {id:'LOC-007',warehouseId:'WH-004',code:'TD-FIN-A1',name:'Kệ A1 - Thành phẩm',locationType:'SHELF',status:'active'},
+      {id:'LOC-019',warehouseId:'WH-012',code:'BD-FIN-A1',name:'Kệ A1 - Thành phẩm',locationType:'SHELF',status:'active'},
+      {id:'LOC-021',warehouseId:'WH-013',code:'DN-FIN-A1',name:'Kệ A1 - Thành phẩm',locationType:'SHELF',status:'active'},
+    ];
+    const mergeById = (remote, required) => {
+      const map = new Map((remote || []).map(x => [String(x?.id || ''), x]));
+      required.forEach(x => map.set(x.id, { ...(map.get(x.id)||{}), ...x }));
+      return [...map.values()];
+    };
+    const sites = mergeById(remoteSites, requiredSites);
+    const warehouses = mergeById(remoteWarehouses, requiredWarehouses);
+    const locations = mergeById(remoteLocations, requiredLocations);
+
+    const rawWh = [['WH-001','LOC-001'],['WH-008','LOC-013'],['WH-009','LOC-015']];
+    const finWh = [['WH-004','LOC-007'],['WH-012','LOC-019'],['WH-013','LOC-021']];
+    const targetWhIds = new Set([...rawWh,...finWh].map(x=>x[0]));
+    // Giữ nguyên các balance ngoài 6 kho NVL/TP này; chỉ tạo lại tồn mở đầu cho
+    // nguyên liệu + thành phẩm theo master thật đang có trên KIO.
+    const untouched = uniqueInventoryBalances(remoteInventory).rows.filter(row => !targetWhIds.has(String(row?.warehouseId||'')));
+    const lotsById = new Map((remoteLots||[]).map(x=>[String(x?.id||''),x]));
+    const nextLots = [...(remoteLots||[])];
+    const balances = [];
+    const totals = [1200,1500,1800]; // đều chia hết cho 3; mỗi kho nhận 400/500/600.
+    const now = new Date().toISOString();
+    const ymd = now.slice(0,10).replaceAll('-','');
+
+    function addStock(items, kind, whPairs) {
+      (Array.isArray(items)?items:[]).forEach((item,index)=>{
+        const productId=String(item?.id||'').trim();
+        if(!productId) return;
+        const total=totals[index % totals.length];
+        const perWarehouse=total/3;
+        const lotId=`OPEN-${kind}-${productId}`.replace(/[^A-Za-z0-9_-]/g,'_');
+        if(!lotsById.has(lotId)) {
+          const lot={id:lotId,lotNumber:`OPEN-${ymd}-${productId}`,productId,productionOrderId:'',mfgDate:now.slice(0,10),expiryDate:'2027-12-31',supplierLot:'OPENING-STOCK',supplierId:'',qcStatus:'PASSED',status:'active',sourceType:'OPENING_STOCK',sourceId:THREE_SITE_DISTRIBUTION_VERSION,createdAt:now};
+          nextLots.push(lot); lotsById.set(lotId,lot);
+        }
+        whPairs.forEach(([warehouseId,locationId])=>{
+          const row={productId,warehouseId,locationId,lotId,qtyOnHand:perWarehouse,qtyPending:0,qtyRejected:0,qtyReserved:0,qtyAvailable:perWarehouse,unit:item?.unit||'',sourceType:'OPENING_STOCK',sourceId:THREE_SITE_DISTRIBUTION_VERSION,lastUpdated:now};
+          row.id=inventoryBalanceId(row); balances.push(row);
+        });
+      });
+    }
+    addStock(remoteMaterials,'RAW',rawWh);
+    addStock(remoteProducts,'FIN',finWh);
+    const nextInventory=ensureInventoryRowIds([...untouched,...balances]);
+
+    await KioStore.replaceCollection(TABLES.warehouseSites, sites);
+    await KioStore.replaceCollection(TABLES.warehouses, warehouses);
+    await KioStore.replaceCollection(TABLES.warehouseLocations, locations);
+    await KioStore.replaceCollection(TABLES.inventoryLots, nextLots);
+    await KioStore.replaceCollection(TABLES.inventory, nextInventory);
+    settings={...settings,testDataVersions:{...(settings.testDataVersions||{}),threeSiteDistribution:THREE_SITE_DISTRIBUTION_VERSION}};
+    await KioStore.syncCollection(SETTINGS_TABLE,[settings]);
+    DB.warehouseSites=sites; DB.warehouses=warehouses; DB.warehouseLocations=locations; DB.inventoryLots=nextLots; DB.inventory=nextInventory;
+    console.info(`[InventoryAPI] Đã ghi tồn thật lên KIO: ${remoteMaterials.length} NVL + ${remoteProducts.length} TP; mỗi mặt hàng 1.200/1.500/1.800 ĐVT, chia đều 3 kho.`);
+    return true;
+  }
+
   async function bootstrap() {
     if (booted) return true;
     booted = true;
+    // One-time real-server warehouse migration. It reads current KIO stock first,
+    // preserves totals, then marks its version in lenam_inventory_settings so it never
+    // redistributes again on later logins.
+    try { await ensureThreeRealWarehouseSitesAndDistribution(); }
+    catch (err) { console.error('[InventoryAPI] Không thể khởi tạo 3 kho thật:', err); }
+
     // Không tự tạo/đối soát dữ liệu test Logistics khi mở web.
     // Đây là tác vụ ghi server khá nặng và không thuộc luồng tải dữ liệu thực tế.
     // Dữ liệu test chỉ được tạo khi người dùng gọi chức năng test tương ứng.
@@ -693,13 +813,11 @@ const InventoryAPI = (() => {
     // [PERFORMANCE] Chỉ nạp cache/data.js ở lúc boot. Không đọc toàn bộ bảng
     // Kho/Master ngay sau đăng nhập. Tab nào được mở thì tab đó mới refresh các
     // collection cần thiết qua ensureFresh().
-    if (cached && hasData(cached)) {
-      apply(cached);
-      console.info('[InventoryAPI] Đã nạp cache local; chờ refresh theo màn hình đang mở.');
-    } else {
-      Object.keys(TABLES).forEach(key => { DB[key] = []; });
-      console.info('[InventoryAPI] Chưa có cache server; chờ tải dữ liệu thật từ KIO.');
-    }
+    // [SERVER FIRST] Không đổ snapshot local vào UI Kho. Dữ liệu hiển thị phải
+    // đến từ KIO/server của route đang mở; tránh vài chục ms đầu hiện dữ liệu cũ/demo
+    // rồi mới nhảy sang dữ liệu thật. Cache chỉ còn dùng cho outbox/persistence nội bộ.
+    Object.keys(TABLES).forEach(key => { DB[key] = []; });
+    console.info('[InventoryAPI] Chờ tải dữ liệu Kho thật từ KIO/server.');
 
     const replay = normalizeKeys(pendingState?.keys || []).filter(k => k==='settings' || TABLES[k]);
     replay.forEach(k => pendingKeys.add(k));

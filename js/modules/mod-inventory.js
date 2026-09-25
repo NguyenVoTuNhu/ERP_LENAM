@@ -426,8 +426,8 @@ Views.inventory = function () {
         ? ` · <span class="badge orange"><i class="fa-solid fa-triangle-exclamation"></i> Sắp hết hàng</span>`
         : ` · <span class="badge green"><i class="fa-solid fa-circle-check"></i> Còn hàng</span>`;
     const parent = `<tr class="clickable ${expanded ? 'inventory-group-selected' : ''} ${lowStock ? 'inventory-low-stock' : ''}" data-act="inv-stock-product-toggle" data-productid="${group.productId}" style="${expanded ? 'background:var(--teal-soft);box-shadow:inset 5px 0 0 var(--teal)' : ''}">
-      <td>${cell2(esc(item?.name || group.productId), `${esc(group.productId)}${stockBadge}${Number(group.qtyPending||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--orange)"><i class="fa-solid fa-flask-vial"></i> Đang chờ kiểm tra chất lượng</div>` : ''}${Number(group.qtyRejected||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--red)"><i class="fa-solid fa-triangle-exclamation"></i> Có ${fmtN(group.qtyRejected)} ${esc(item?.unit || '')} không đạt QC · chờ xuất trả NCC</div>` : ''}${Number(group.qtyReserved||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--blue)">${reservationLinks(group.productId, '', item?.unit || '') || `<i class="fa-solid fa-cart-flatbed"></i> ${fmtN(group.qtyReserved)} ${esc(item?.unit || '')} đang chờ xác nhận xuất bán`}</div>` : ''}`)}</td>
-      <td class="right strong num">${fmtN(group.qtyOnHand)} ${esc(item?.unit || lotRows[0]?.unit || '')}${Number(group.qtyPending||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--orange)">Chờ QC: ${fmtN(group.qtyPending)} ${esc(item?.unit || lotRows[0]?.unit || '')} · chưa tính vào tồn</div>` : ''}${Number(group.qtyReserved||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--blue)">${reservationLinks(group.productId, '', item?.unit || lotRows[0]?.unit || '') || `Giữ chỗ bán: ${fmtN(group.qtyReserved)} ${esc(item?.unit || lotRows[0]?.unit || '')} · chưa trừ tồn thật`}</div>` : ''}${minimumStock > 0 ? `<div class="cell-sub">Tối thiểu: ${fmtN(minimumStock)}</div>` : ''}</td>
+      <td>${cell2(esc(item?.name || group.productId), `${esc(group.productId)}${stockBadge}${Number(group.qtyPending||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--orange)"><i class="fa-solid fa-flask-vial"></i> Đang chờ kiểm tra chất lượng</div>` : ''}${Number(group.qtyRejected||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--red)"><i class="fa-solid fa-triangle-exclamation"></i> Có ${fmtN(group.qtyRejected)} ${esc(item?.unit || '')} không đạt QC · chờ xuất trả NCC</div>` : ''}${stockTab!=='finished' && Number(group.qtyReserved||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--blue)">${reservationLinks(group.productId, '', item?.unit || '') || `<i class="fa-solid fa-cart-flatbed"></i> ${fmtN(group.qtyReserved)} ${esc(item?.unit || '')} đang chờ xác nhận xuất bán`}</div>` : ''}`)}</td>
+      <td class="right strong num">${fmtN(group.qtyOnHand)} ${esc(item?.unit || lotRows[0]?.unit || '')}${Number(group.qtyPending||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--orange)">Chờ QC: ${fmtN(group.qtyPending)} ${esc(item?.unit || lotRows[0]?.unit || '')} · chưa tính vào tồn</div>` : ''}${stockTab!=='finished' && Number(group.qtyReserved||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--blue)">${reservationLinks(group.productId, '', item?.unit || lotRows[0]?.unit || '') || `Giữ chỗ bán: ${fmtN(group.qtyReserved)} ${esc(item?.unit || lotRows[0]?.unit || '')} · chưa trừ tồn thật`}</div>` : ''}${minimumStock > 0 ? `<div class="cell-sub">Tối thiểu: ${fmtN(minimumStock)}</div>` : ''}</td>
       <td class="center"><span class="chip"><i class="fa-solid fa-layer-group"></i> ${lotRows.length} lô</span></td>
       <td>${esc([...new Set(lotRows.map(r=>inventoryWarehouseLabel(r.warehouseId)).filter(Boolean))].join(', '))}</td>
       <td class="right" style="white-space:nowrap">${rowActions([
@@ -447,7 +447,7 @@ Views.inventory = function () {
           const receiptDate = receipt?.date || String(row.lastUpdated||'').slice(0,10);
           return `<tr class="clickable" data-act="inv-stock-lot-view" data-productid="${row.productId}" data-lotid="${row.lotId}">
             <td><span class="code">${esc(lot?.lotNumber || '—')}</span></td>
-            <td class="right strong num">${fmtN(Number(row.qtyPending||0)>0 && Number(row.qtyOnHand||0)<=0 ? Number(row.qtyPending||0) : Number(row.qtyOnHand||0))} ${esc(row.unit || item?.unit || '')}${Number(row.qtyPending||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--orange)">${Number(row.qtyOnHand||0)>0 ? `Chờ QC: ${fmtN(row.qtyPending)} ${esc(row.unit || item?.unit || '')} · chưa tính vào tồn` : 'Đang chờ kiểm tra chất lượng · chưa tính vào tồn'}</div>` : ''}${Number(row.qtyRejected||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--red)">Lô nhập ${fmtN(Number(row.receivedQty||0) || (Number(row.qtyOnHand||0)+Number(row.qtyRejected||0)))} ${esc(row.unit || item?.unit || '')} có ${fmtN(row.qtyRejected)} không đạt · chờ trả NCC</div>` : ''}${Number(row.qtyReserved||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--blue)">${reservationLinks(row.productId, row.lotId, row.unit || item?.unit || '') || `${fmtN(row.qtyReserved)} ${esc(row.unit || item?.unit || '')} đang giữ chỗ · chờ xác nhận xuất bán`}</div>` : ''}</td>
+            <td class="right strong num">${fmtN(Number(row.qtyPending||0)>0 && Number(row.qtyOnHand||0)<=0 ? Number(row.qtyPending||0) : Number(row.qtyOnHand||0))} ${esc(row.unit || item?.unit || '')}${Number(row.qtyPending||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--orange)">${Number(row.qtyOnHand||0)>0 ? `Chờ QC: ${fmtN(row.qtyPending)} ${esc(row.unit || item?.unit || '')} · chưa tính vào tồn` : 'Đang chờ kiểm tra chất lượng · chưa tính vào tồn'}</div>` : ''}${Number(row.qtyRejected||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--red)">Lô nhập ${fmtN(Number(row.receivedQty||0) || (Number(row.qtyOnHand||0)+Number(row.qtyRejected||0)))} ${esc(row.unit || item?.unit || '')} có ${fmtN(row.qtyRejected)} không đạt · chờ trả NCC</div>` : ''}${stockTab!=='finished' && Number(row.qtyReserved||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--blue)">${reservationLinks(row.productId, row.lotId, row.unit || item?.unit || '') || `${fmtN(row.qtyReserved)} ${esc(row.unit || item?.unit || '')} đang giữ chỗ · chờ xác nhận xuất bán`}</div>` : ''}</td>
             <td class="num">${fmtDate(receiptDate)}</td>
             <td class="num">${lot?.expiryDate ? fmtDate(lot.expiryDate) : '—'}</td>
             <td>${receipt?.poId ? `<span class="code" style="color:var(--primary)">${esc(receipt.poId)}</span>` : `<span class="muted">${esc(lot?.productionOrderId || '—')}</span>`}</td>
@@ -468,7 +468,6 @@ Views.inventory = function () {
   `)}
   <div class="tabs" style="margin-bottom:14px">
     <button class="tab ${stockTab === 'raw' ? 'active' : ''}" data-act="inventory-stock-tab" data-tab="raw"><i class="fa-solid fa-seedling"></i>Kho nguyên liệu</button>
-    <button class="tab ${stockTab === 'semi' ? 'active' : ''}" data-act="inventory-stock-tab" data-tab="semi"><i class="fa-solid fa-cubes-stacked"></i>Kho bán thành phẩm</button>
     <button class="tab ${stockTab === 'finished' ? 'active' : ''}" data-act="inventory-stock-tab" data-tab="finished"><i class="fa-solid fa-box"></i>Kho thành phẩm</button>
   </div>
   <!-- Dashboard riêng của subtab tồn kho hiện tại. Chỉ tổng hợp dữ liệu, không thay đổi nghiệp vụ. -->
@@ -875,7 +874,6 @@ Views['inv-receipts'] = function () {
     ${inventoryCanOperate() ? `<button class="btn btn-primary" data-act="inv-new-receipt" data-tab="${receiptTab}"><i class="fa-solid fa-plus"></i>${receiptTab==='raw'?'Phiếu nhập kho nguyên liệu':receiptTab==='semi'?'Phiếu nhập kho bán thành phẩm':'Phiếu nhập kho thành phẩm'}</button>` : ''}`)}
     <div class="tabs" style="margin-bottom:14px">
       <button class="tab ${receiptTab==='raw'?'active':''}" data-act="inventory-receipt-tab" data-tab="raw"><i class="fa-solid fa-seedling"></i>Kho nguyên liệu</button>
-      <button class="tab ${receiptTab==='semi'?'active':''}" data-act="inventory-receipt-tab" data-tab="semi"><i class="fa-solid fa-cubes-stacked"></i>Kho bán thành phẩm</button>
       <button class="tab ${receiptTab==='finished'?'active':''}" data-act="inventory-receipt-tab" data-tab="finished"><i class="fa-solid fa-box"></i>Kho thành phẩm</button>
     </div>
     <div class="grid g-auto-sm" style="margin-bottom:14px">
@@ -980,7 +978,6 @@ Views['inv-issues'] = function () {
     <button class="btn btn-primary" data-act="inv-new-issue" data-tab="${issueTab}"><i class="fa-solid fa-plus"></i>Lập phiếu xuất ${cfg.label.toLowerCase()}</button>`)}
     <div class="tabs" style="margin-bottom:14px">
       <button class="tab ${issueTab==='raw'?'active':''}" data-act="inventory-issue-tab" data-tab="raw"><i class="fa-solid fa-seedling"></i>Kho nguyên liệu</button>
-      <button class="tab ${issueTab==='semi'?'active':''}" data-act="inventory-issue-tab" data-tab="semi"><i class="fa-solid fa-cubes-stacked"></i>Kho bán thành phẩm</button>
       <button class="tab ${issueTab==='finished'?'active':''}" data-act="inventory-issue-tab" data-tab="finished"><i class="fa-solid fa-box"></i>Kho thành phẩm</button>
     </div>
     <div class="grid g-auto-sm" style="margin-bottom:14px">
@@ -1002,7 +999,7 @@ Views['inv-transfers'] = function () {
     FINISHED_GOODS: { label: 'Chuyển kho thành phẩm', short: 'Thành phẩm', icon: 'fa-box' },
     STORE: { label: 'Cấp hàng cửa hàng', short: 'Cửa hàng', icon: 'fa-store' },
   };
-  State.invTransferType = State.invTransferType || 'RAW_MATERIAL';
+  if (!['RAW_MATERIAL','FINISHED_GOODS'].includes(State.invTransferType)) State.invTransferType = 'RAW_MATERIAL';
   const activeType = State.invTransferType;
   const meta = TYPE_META[activeType];
   const f = F('inv-transfers', { q: '', status: '', dateFrom: '', dateTo: '' });
@@ -1036,7 +1033,7 @@ Views['inv-transfers'] = function () {
     </tr>`;
   });
 
-  const tabs = Object.entries(TYPE_META).map(([type, m]) => `
+  const tabs = Object.entries(TYPE_META).filter(([type]) => ['RAW_MATERIAL','FINISHED_GOODS'].includes(type)).map(([type, m]) => `
     <button class="tab ${activeType === type ? 'active' : ''}" data-act="inv-transfer-tab" data-type="${type}">
       <i class="fa-solid ${m.icon}"></i>${m.label}
     </button>`).join('');

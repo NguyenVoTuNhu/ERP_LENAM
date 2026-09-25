@@ -950,3 +950,41 @@ input.inp:disabled, select.inp:disabled { background: var(--surface-3); color: v
 .restaurant-pos-product.is-sold-out .restaurant-pos-product-icon{color:var(--muted)}
 .restaurant-pos-stock{margin-top:4px;font-weight:600}
 .restaurant-pos-stock.out{color:var(--danger,#dc2626)!important}
+
+/* Logistics — modal xác nhận giao hàng */
+.lg-complete-modal { max-width: 1120px; border-radius: 18px; overflow: hidden; }
+.lg-complete-modal .modal-head { align-items: center; padding: 20px 22px; gap: 14px; background: linear-gradient(180deg,#fff 0%,#fbfdff 100%); }
+.lg-complete-modal .modal-head h3 { font-size: 20px; line-height: 1.25; color: var(--text); letter-spacing: -.01em; }
+.lg-complete-modal .modal-head p { margin-top: 4px; font-size: 13px; }
+.lg-complete-head-icon { width: 46px; height: 46px; border-radius: 14px; display: grid; place-items: center; flex: 0 0 46px; color: var(--primary); background: #eaf2ff; font-size: 19px; }
+.lg-complete-modal .modal-body { padding: 20px 22px 22px; background: #fff; }
+.lg-complete-modal .modal-foot { padding: 14px 22px; background: #fbfcfe; gap: 10px; }
+.lg-complete-wrap { display: grid; gap: 18px; }
+.lg-complete-table { border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: #fff; }
+.lg-complete-table-head, .lg-complete-row { display: grid; grid-template-columns: minmax(320px,1.8fr) minmax(150px,.65fr) minmax(150px,.65fr) 90px; align-items: center; column-gap: 18px; }
+.lg-complete-table-head { min-height: 46px; padding: 0 18px; background: #f5f8fc; color: var(--text-3); font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .035em; }
+.lg-complete-table-head span:nth-child(n+2) { text-align: center; }
+.lg-complete-row { min-height: 78px; padding: 12px 18px; border-top: 1px solid var(--border); }
+.lg-complete-product { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.lg-complete-product b { display: block; font-size: 14px; color: var(--text); margin-bottom: 4px; }
+.lg-complete-product-icon { width: 42px; height: 42px; border-radius: 12px; flex: 0 0 42px; display: grid; place-items: center; background: #f2f6fb; color: #7890aa; border: 1px solid #e6edf5; }
+.lg-complete-qty { display: flex; justify-content: center; }
+.lg-complete-qty .inp { width: 100%; max-width: 170px; min-height: 42px; text-align: center; font-weight: 600; border-radius: 10px; background: #fbfdff; }
+.lg-complete-unit { text-align: center; font-weight: 600; color: var(--text-2); }
+.lg-complete-meta { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 16px; }
+.lg-complete-field { margin-bottom: 0; }
+.lg-complete-field > label { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; font-size: 12.5px; }
+.lg-complete-field > label > i { color: #6f8fb6; width: 15px; text-align: center; }
+.lg-complete-field .inp { min-height: 44px; border-radius: 10px; background: #fbfdff; }
+.lg-complete-field textarea.inp { min-height: 72px; resize: vertical; padding-top: 11px; }
+.lg-complete-cancel, .lg-complete-confirm { min-width: 96px; min-height: 42px; border-radius: 10px; justify-content: center; }
+.lg-complete-confirm { min-width: 132px; box-shadow: 0 5px 14px rgba(37,99,235,.22); }
+@media (max-width: 820px) {
+  .lg-complete-table-head { display: none; }
+  .lg-complete-row { grid-template-columns: 1fr 1fr; gap: 10px 12px; }
+  .lg-complete-product { grid-column: 1/-1; }
+  .lg-complete-unit { display: none; }
+  .lg-complete-qty { justify-content: stretch; }
+  .lg-complete-qty::before { display: block; margin-right: 8px; font-size: 11px; color: var(--text-3); }
+  .lg-complete-meta { grid-template-columns: 1fr; }
+}

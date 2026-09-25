@@ -662,7 +662,10 @@ Views['order-detail'] = function (params) {
   const customer = Q.customer(o.customerId);
   const stock = SalesCRM.orderStockState(o);
   const issues = SalesCRM.salesIssuesOf(o.id);
-  const issued = issues.length > 0;
+  // Đơn đã giao/hoàn tất về nghiệp vụ bắt buộc đã qua Xuất kho bán hàng.
+  // Fallback trạng thái cuối giúp summary không hiển thị sai "Chưa xuất" trong lúc
+  // goodsIssues vừa được hydrate từ server hoặc với dữ liệu lịch sử cũ.
+  const issued = issues.length > 0 || ['dh_da_giao','dh_hoan_tat','dh_hoan_thanh'].includes(o.status);
   const pos = Q.posOfOrder(o.id);
   const productionPlans = (DB.productionPlans || []).filter(p => p.source === 'SALES_ORDER' && p.sourceOrderId === o.id && p.status !== 'CANCELLED');
   const canIssue = !['dh_da_huy','dh_da_giao','dh_hoan_tat','dh_cho_xu_ly','dh_hoan_thanh'].includes(o.status) && stock.enough && !issued;
@@ -723,15 +726,15 @@ Views['order-detail'] = function (params) {
         ${canSalesOperate && !['dh_da_huy','dh_da_giao','dh_hoan_tat'].includes(o.status)?`<button class="btn btn-sm" data-act="order-status" data-id="${o.id}"><i class="fa-solid fa-arrows-rotate"></i>Đổi trạng thái</button>`:''}
       </div></div></div>
     </div>
-    <div class="card" style="margin-bottom:14px"><div class="card-head"><div><h3>Liên kết sản xuất</h3><p>Đơn bán → Kho kiểm tra tồn → Kế hoạch sản xuất → Yêu cầu NVL → LSX</p></div></div>
-      <div class="form-sec-title">Kế hoạch sản xuất từ Kho</div>
-      ${tableShell([{t:'Kế hoạch'},{t:'Thành phẩm / SL'},{t:'Deadline'},{t:'Trạng thái'},{t:'Thao tác'}],productionPlans.map(p=>`<tr><td><span class="code">${esc(p.id)}</span><div class="cell-sub">Từ ${esc(o.id)}</div></td><td>${(p.items||[]).map(i=>`${esc(Q.product(i.productId)?.name||i.productId)} · <b>${fmtN(i.qty)}</b>`).join('<br>')}</td><td>${fmtDate(p.dueDate)}</td><td>${pfPlanStatus(p.status)}</td><td>${rowActions([{act:'pf-plan-view',data:`data-id="${esc(p.id)}"`,icon:'fa-eye',title:'Xem chi tiết'}])}</td></tr>`),{emptyTitle:'Kho chưa lập kế hoạch sản xuất cho đơn này'})}
-      <div class="form-sec-title" style="margin-top:14px">Lệnh sản xuất</div>
-      ${tableShell([{t:'LSX'},{t:'Thành phẩm'},{t:'SL',cls:'right'},{t:'Deadline'},{t:'Trạng thái'}],pos.map(p=>`<tr class="clickable" data-act="open-production-order" data-id="${p.id}"><td><span class="code">${p.id}</span></td><td>${esc(p.productName)}</td><td class="right num">${fmtN(p.qty)} ${esc(p.unit)}</td><td>${fmtDate(p.deadline)}</td><td>${badge(p.status)}</td></tr>`),{emptyTitle:'Chưa phát hành lệnh sản xuất'})}
-    </div>
-    <div class="card"><div class="card-head"><div><h3>Khiếu nại liên quan đơn hàng</h3><p>Khiếu nại được quản lý ngay trong đơn bán, không cần menu riêng</p></div>${canCrmOperate?`<button class="btn btn-sm" data-act="crm-order-complaint" data-id="${o.id}"><i class="fa-solid fa-plus"></i>Thêm khiếu nại</button>`:''}</div>
-      ${tableShell([{t:'Mã'},{t:'Tiêu đề'},{t:'Mức độ'},{t:'Trạng thái'},{t:'Ngày tiếp nhận'},{t:'Thao tác'}],complaints.map(c=>`<tr><td><span class="code">${esc(c.id)}</span></td><td>${esc(c.title)}</td><td>${esc(c.priority||'')}</td><td>${SalesCRM.badgeFrom(SalesCRM.ticketStatus,c.status)}</td><td>${fmtDate(c.createdAt)}</td><td>${rowActions([{act:'crm-complaint-edit',data:`data-id="${c.id}"`,icon:'fa-pen',title:'Cập nhật khiếu nại'}])}</td></tr>`),{emptyTitle:'Đơn hàng chưa có khiếu nại'})}
-    </div>`;
+    ${(productionPlans.length || pos.length) ? `<div class="card" style="margin-bottom:14px"><div class="card-head"><div><h3>Liên kết sản xuất</h3><p>Đơn bán → Kho kiểm tra tồn → Kế hoạch sản xuất → Yêu cầu NVL → LSX</p></div></div>
+      ${productionPlans.length ? `<div class="form-sec-title">Kế hoạch sản xuất từ Kho</div>
+      ${tableShell([{t:'Kế hoạch'},{t:'Thành phẩm / SL'},{t:'Deadline'},{t:'Trạng thái'},{t:'Thao tác'}],productionPlans.map(p=>`<tr><td><span class="code">${esc(p.id)}</span><div class="cell-sub">Từ ${esc(o.id)}</div></td><td>${(p.items||[]).map(i=>`${esc(Q.product(i.productId)?.name||i.productId)} · <b>${fmtN(i.qty)}</b>`).join('<br>')}</td><td>${fmtDate(p.dueDate)}</td><td>${pfPlanStatus(p.status)}</td><td>${rowActions([{act:'pf-plan-view',data:`data-id="${esc(p.id)}"`,icon:'fa-eye',title:'Xem chi tiết'}])}</td></tr>`),{})}` : ''}
+      ${pos.length ? `<div class="form-sec-title" style="margin-top:${productionPlans.length?'14px':'0'}">Lệnh sản xuất</div>
+      ${tableShell([{t:'LSX'},{t:'Thành phẩm'},{t:'SL',cls:'right'},{t:'Deadline'},{t:'Trạng thái'}],pos.map(p=>`<tr class="clickable" data-act="open-production-order" data-id="${p.id}"><td><span class="code">${p.id}</span></td><td>${esc(p.productName)}</td><td class="right num">${fmtN(p.qty)} ${esc(p.unit)}</td><td>${fmtDate(p.deadline)}</td><td>${badge(p.status)}</td></tr>`),{})}` : ''}
+    </div>` : ''}
+    ${complaints.length ? `<div class="card"><div class="card-head"><div><h3>Khiếu nại liên quan đơn hàng</h3><p>Khiếu nại được quản lý ngay trong đơn bán, không cần menu riêng</p></div>${canCrmOperate?`<button class="btn btn-sm" data-act="crm-order-complaint" data-id="${o.id}"><i class="fa-solid fa-plus"></i>Thêm khiếu nại</button>`:''}</div>
+      ${tableShell([{t:'Mã'},{t:'Tiêu đề'},{t:'Mức độ'},{t:'Trạng thái'},{t:'Ngày tiếp nhận'},{t:'Thao tác'}],complaints.map(c=>`<tr><td><span class="code">${esc(c.id)}</span></td><td>${esc(c.title)}</td><td>${esc(c.priority||'')}</td><td>${SalesCRM.badgeFrom(SalesCRM.ticketStatus,c.status)}</td><td>${fmtDate(c.createdAt)}</td><td>${rowActions([{act:'crm-complaint-edit',data:`data-id="${c.id}"`,icon:'fa-pen',title:'Cập nhật khiếu nại'}])}</td></tr>`),{})}
+    </div>` : ''}`;
 };
 
 function crmGeoDistanceKm(lat1,lng1,lat2,lng2){
