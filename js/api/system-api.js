@@ -90,26 +90,60 @@ const SystemAPI = (() => {
   async function loadTable(key) { return KioStore.listCollection(TABLES[key]); }
   async function syncTable(key, rows) { return KioStore.syncCollection(TABLES[key], rows); }
 
+  // Tài khoản KHÔNG nằm trong danh sách actor demo (ACTORS) — ví dụ tài khoản
+  // được tạo kèm hồ sơ nhân sự tại màn Nhân sự (mod-hr.js: DB.users.push(...)).
+  function isCustomAccount(u, defaultIds) { return !defaultIds.has(u.id); }
+
+  // Trộn danh sách actor mặc định (ACTORS) với dữ liệu users thật (server hoặc
+  // cache): actor mặc định giữ nguyên username/role/dept theo code (đây là bộ
+  // phân quyền chuẩn, không cho dữ liệu cũ ghi đè), chỉ kế thừa state/lastLogin/
+  // passwordHash đã lưu. Tài khoản KHÔNG thuộc actor mặc định (tài khoản tạo
+  // qua hồ sơ nhân sự) được giữ nguyên như trên server/cache — trước bản này,
+  // bootstrap()/refreshFromServer() luôn dựng lại DB.users CHỈ từ ACTORS nên
+  // mọi tài khoản mới tạo bị "biến mất" ngay khi F5, dù đã ghi lên KIO.
+  function mergeUsers(defaults, source) {
+    const byId = new Map((source || []).map(u => [u.id, u]));
+    const defaultIds = new Set(defaults.map(d => d.id));
+    const mergedDefaults = defaults.map(d => {
+      const old = byId.get(d.id) || {};
+      return { ...d, state: old.state || d.state, lastLogin: old.lastLogin || '', passwordHash: old.passwordHash || d.passwordHash };
+    });
+    const customUsers = (source || []).filter(u => isCustomAccount(u, defaultIds));
+    return [...mergedDefaults, ...customUsers];
+  }
+
+  function applyUsers(users, auditLogs) {
+    DB.users = users;
+    DB.roles = ROLE_DEFS.map(r => ({...r, perms:r.permissions || [], desc:r.desc || r.name, users:users.filter(u => u.roleId === r.id).length}));
+    DB.auditLogs = Array.isArray(auditLogs) ? auditLogs : [];
+  }
+
   async function bootstrap() {
     const defaults = await buildDefaultUsers();
     const cache = cacheRead();
 
-    // [PERFORMANCE] Auth dùng cache/actor mặc định để login tức thì. Không đọc
-    // 5 bảng KIO ở boot vì các bảng quyền rất ít thay đổi và việc đó từng chặn
-    // queue LIST của Purchase/Kho/CRM trong hàng chục giây.
-    const cachedById = new Map((cache?.users || []).map(u => [u.id, u]));
-    const users = defaults.map(d => {
-      const old = cachedById.get(d.id) || {};
-      // Không cho cache cũ ghi đè username/role/dept của bộ phân quyền mới.
-      // Chỉ giữ các dữ liệu vận hành thực sự cần bảo toàn.
-      return { ...d, state: old.state || d.state, lastLogin: old.lastLogin || '', passwordHash: old.passwordHash || d.passwordHash };
-    });
-    const roles = ROLE_DEFS;
+    // [PERFORMANCE] Chỉ đọc đúng 1 bảng KIO (lenam_users) ở boot — không đọc
+    // roles/permissions/rolePermissions vì 3 bảng đó luôn theo ROLE_DEFS cố
+    // định trong code, không cần đọc lại. lenam_users PHẢI được đọc: đây là
+    // nguồn dữ liệu duy nhất chứa tài khoản tạo qua hồ sơ nhân sự — dùng cache
+    // sẽ hoạt động sai (hoặc không login được) trên máy/browser khác.
+    let remoteUsers = null;
+    try { remoteUsers = await KioStore.listCollection(TABLES.users); }
+    catch (err) { console.warn('[SystemAPI] Không đọc được lenam_users ở boot; dùng cache:', err); }
+
+    const source = (Array.isArray(remoteUsers) && remoteUsers.length) ? remoteUsers : (cache?.users || []);
+    const users = mergeUsers(defaults, source);
     const auditLogs = Array.isArray(cache?.auditLogs) ? cache.auditLogs : [];
 
-    DB.users = users;
-    DB.roles = roles.map(r => ({...r, perms:r.permissions || [], desc:r.desc || r.name, users:users.filter(u => u.roleId === r.id).length}));
-    DB.auditLogs = auditLogs;
+    applyUsers(users, auditLogs);
+    cacheWrite({users, roles:ROLE_DEFS, auditLogs, syncedAt:Date.now()});
+
+    // Lần chạy đầu tiên của cả hệ thống: bảng lenam_users chưa có dòng nào.
+    // Ghi actor demo lên server ngay để lần F5 sau đọc được, không phải chờ
+    // tới khi ai đó khóa/mở/đổi vai trò một tài khoản (saveUsers()) mới seed.
+    if (!(Array.isArray(remoteUsers) && remoteUsers.length)) {
+      syncTable('users', users).catch(err => console.warn('[SystemAPI] Seed actor demo lần đầu thất bại:', err));
+    }
     return true;
   }
 
@@ -121,17 +155,13 @@ const SystemAPI = (() => {
       loadTable('users'), loadTable('roles'), loadTable('permissions'), loadTable('rolePermissions'), loadTable('auditLogs')
     ]);
 
-    const byUser = new Map((remoteUsers || []).map(x => [x.id, x]));
-    const mergedUsers = defaults.map(d => {
-      const old = byUser.get(d.id) || {};
-      return { ...d, state: old.state || d.state, lastLogin: old.lastLogin || '', passwordHash: old.passwordHash || d.passwordHash };
-    });
+    // Cùng logic trộn với bootstrap(): giữ lại tài khoản tạo qua hồ sơ nhân sự
+    // (không có trong ACTORS) thay vì chỉ dựng lại từ danh sách actor demo.
+    const mergedUsers = mergeUsers(defaults, remoteUsers || []);
     const mergedRoles = ROLE_DEFS.map(d => ({ ...d }));
     const mergedAudit = Array.isArray(remoteAudit) ? remoteAudit : [];
 
-    DB.users = mergedUsers;
-    DB.roles = mergedRoles.map(r => ({...r, perms:r.permissions || [], desc:r.desc || r.name, users:mergedUsers.filter(u => u.roleId === r.id).length}));
-    DB.auditLogs = mergedAudit;
+    applyUsers(mergedUsers, mergedAudit);
     cacheWrite({users:mergedUsers, roles:mergedRoles, auditLogs:mergedAudit, syncedAt:Date.now()});
 
     const seeds = [];
@@ -292,5 +322,11 @@ const SystemAPI = (() => {
 
   async function saveUsers() { await syncTable('users', DB.users || []); cacheWrite({users:DB.users||[],roles:DB.roles||[],auditLogs:DB.auditLogs||[],syncedAt:Date.now()}); return true; }
 
-  return {bootstrap,refreshFromServer,restoreSession,showLogin,login,logout,flushBusinessDataBeforeRoleSwitch,audit,auditFor,currentUser,saveUsers,ROLE_DEFS,ACTORS,SESSION_KEY};
+  // Dùng chung đúng 1 thuật toán hash với login(): mọi nơi tạo tài khoản mới
+  // (VD: mod-hr.js khi thêm nhân sự kèm tài khoản) PHẢI hash qua đây để ghi vào
+  // `passwordHash` — ghi thẳng chuỗi thô vào DB.users sẽ khiến tài khoản không
+  // bao giờ đăng nhập được, vì login() luôn so sánh bằng SHA-256.
+  const hashPassword = sha256;
+
+  return {bootstrap,refreshFromServer,restoreSession,showLogin,login,logout,flushBusinessDataBeforeRoleSwitch,audit,auditFor,currentUser,saveUsers,hashPassword,ROLE_DEFS,ACTORS,SESSION_KEY};
 })();

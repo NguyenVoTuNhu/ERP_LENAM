@@ -267,6 +267,67 @@ function openEmployeeModal(id) {
   });
 }
 
+/* --------------------------------------- TÀI KHOẢN ĐĂNG NHẬP KÈM HỒ SƠ NV
+ * Khi thêm nhân sự mới, form cho phép tick "Tạo tài khoản đăng nhập" và tự
+ * gợi ý tên đăng nhập (theo đúng quy ước đang dùng trong hệ thống: tên +
+ * "." + chữ cái đầu họ/đệm, ví dụ "Nguyễn Đức Anh" -> "anh.nd") cùng vai trò
+ * phân quyền mặc định theo phòng ban. Người dùng vẫn có thể sửa lại trước
+ * khi lưu. */
+const HR_DEPT_DEFAULT_ROLE = {
+  'Ban giám đốc': 'R02',
+  'Kinh doanh': 'R04',
+  'Sản xuất': 'R05',
+  'Kho vận': 'R06',
+  'Mua hàng': 'R07',
+  'Kế toán': 'R08',
+};
+
+/** Chuyển chữ có dấu tiếng Việt sang không dấu, chữ thường, dùng để sinh username */
+function hrStripDiacritics(str) {
+  return String(str || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .trim();
+}
+
+/** Sinh gợi ý tên đăng nhập kiểu "ten.hodem" và tự thêm số nếu đã trùng */
+function hrSuggestUsername(fullName) {
+  const words = hrStripDiacritics(fullName).split(/\s+/).filter(Boolean);
+  if (!words.length) return '';
+  const last = words[words.length - 1];
+  const initials = words.slice(0, -1).map((w) => w[0]).join('');
+  const base = initials ? `${last}.${initials}` : last;
+  let candidate = base, n = 1;
+  while ((DB.users || []).some((u) => String(u.username || '').toLowerCase() === candidate)) {
+    n += 1;
+    candidate = `${base}${n}`;
+  }
+  return candidate;
+}
+
+/** Gợi ý vai trò mặc định theo phòng ban / chức vụ — người dùng có thể đổi lại */
+function hrSuggestRoleId(dept, position) {
+  if (dept === 'Kinh doanh' && /trưởng phòng/i.test(String(position || ''))) return 'R03';
+  if (HR_DEPT_DEFAULT_ROLE[dept]) return HR_DEPT_DEFAULT_ROLE[dept];
+  return (DB.roles && DB.roles[0] && DB.roles[0].id) || '';
+}
+
+/** Đổi phòng ban / chức vụ trong form NV thì gợi ý lại vai trò, trừ khi người dùng đã tự chọn */
+function hrSyncSuggestedRole() {
+  const roleSelect = $('#empAccountRole');
+  if (!roleSelect || roleSelect.dataset.touched === '1') return;
+  roleSelect.value = hrSuggestRoleId($('#empDept')?.value || '', $('#empPosition')?.value || '');
+}
+
+/** Gõ họ tên thì tự gợi ý tên đăng nhập, trừ khi người dùng đã tự sửa ô này */
+function hrSyncSuggestedUsername() {
+  const el = $('#empUsername');
+  if (!el || el.dataset.touched === '1') return;
+  el.value = hrSuggestUsername($('#empName')?.value || '');
+}
+
 /* --------------------------------------- THÊM MỚI / SỬA HỒ SƠ NHÂN SỰ */
 function openEmployeeForm(id) {
   const editing = id ? Q.employee(id) : null;
@@ -274,6 +335,10 @@ function openEmployeeForm(id) {
   const positions = [...new Set(DB.employees.map((e) => e.position))].sort();
   const contractTypes = DB.contractTypes || [];
   const today = currentDateYMD();
+  const existingAccount = editing ? (DB.users || []).find((u) => u.empId === editing.id) : null;
+  const createAccountDefault = !editing; // Mặc định tick khi thêm nhân sự mới
+  const suggestedRoleId = hrSuggestRoleId(editing ? editing.dept : '', editing ? editing.position : '');
+  const suggestedUsername = editing ? hrSuggestUsername(editing.name) : '';
 
   Modal.open({
     title: editing ? `Sửa hồ sơ nhân sự · ${esc(editing.id)}` : 'Thêm nhân sự mới',
@@ -283,19 +348,19 @@ function openEmployeeForm(id) {
       <input type="hidden" id="empFormId" value="${editing ? esc(editing.id) : ''}">
       <div class="form-grid">
         <div class="field"><label>Họ và tên <span class="req">*</span></label>
-          <input class="inp" id="empName" value="${editing ? esc(editing.name) : ''}" placeholder="Nguyễn Văn A"></div>
+          <input class="inp" id="empName" value="${editing ? esc(editing.name) : ''}" placeholder="Nguyễn Văn A" oninput="hrSyncSuggestedUsername()"></div>
         <div class="field"><label>Giới tính</label>
           <select class="inp" id="empGender">
             <option value="Nam" ${(!editing || editing.gender === 'Nam') ? 'selected' : ''}>Nam</option>
             <option value="Nữ" ${editing?.gender === 'Nữ' ? 'selected' : ''}>Nữ</option>
           </select></div>
         <div class="field"><label>Phòng ban <span class="req">*</span></label>
-          <select class="inp" id="empDept">
+          <select class="inp" id="empDept" onchange="hrSyncSuggestedRole()">
             <option value="">-- Chọn phòng ban --</option>
             ${DB.departments.map((d) => `<option value="${esc(d)}" ${editing?.dept === d ? 'selected' : ''}>${esc(d)}</option>`).join('')}
           </select></div>
         <div class="field"><label>Chức vụ <span class="req">*</span></label>
-          <input class="inp" id="empPosition" list="empPositionList" value="${editing ? esc(editing.position) : ''}" placeholder="VD: Công nhân tổ Xay">
+          <input class="inp" id="empPosition" list="empPositionList" value="${editing ? esc(editing.position) : ''}" placeholder="VD: Công nhân tổ Xay" oninput="hrSyncSuggestedRole()">
           <datalist id="empPositionList">${positions.map((p) => `<option value="${esc(p)}">`).join('')}</datalist></div>
         <div class="field"><label>Loại hợp đồng <span class="req">*</span></label>
           <select class="inp" id="empContractType">
@@ -313,13 +378,41 @@ function openEmployeeForm(id) {
           <input class="inp" id="empJoinDate" type="date" data-allow-past="1" value="${editing ? esc(editing.joinDate) : today}"></div>
         <div class="field"><label>Mức lương (VNĐ/tháng)</label>
           <input class="inp right num" id="empSalary" type="number" min="0" step="500000" value="${editing ? Number(editing.salary || 0) : 0}"></div>
-      </div>`,
+      </div>
+      ${existingAccount ? `
+        <div class="form-sec-title" style="margin-top:18px"><i class="fa-solid fa-key"></i>Tài khoản đăng nhập</div>
+        <div class="chip" style="display:inline-flex;align-items:center;gap:6px;padding:8px 12px;font-size:12.5px;white-space:normal">
+          <i class="fa-solid fa-circle-check" style="color:var(--green)"></i>
+          <span>Đã có tài khoản <span class="code">${esc(existingAccount.username)}</span> — vai trò <b>${esc((DB.roles.find((r) => r.id === existingAccount.roleId) || {}).name || '—')}</b>. Đổi vai trò tại menu "Người dùng &amp; phân quyền".</span>
+        </div>
+      ` : `
+        <div class="form-sec-title" style="margin-top:18px"><i class="fa-solid fa-key"></i>Tài khoản đăng nhập</div>
+        <div class="field" style="margin-bottom:10px">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600">
+            <input type="checkbox" id="empCreateAccount" ${createAccountDefault ? 'checked' : ''}
+              onchange="document.getElementById('empAccountFields').style.display=this.checked?'':'none'">
+            Tạo tài khoản đăng nhập cùng vai trò cho nhân sự này
+          </label>
+        </div>
+        <div id="empAccountFields" class="form-grid" style="${createAccountDefault ? '' : 'display:none'}">
+          <div class="field"><label>Tên đăng nhập <span class="req">*</span></label>
+            <input class="inp" id="empUsername" value="${esc(suggestedUsername)}" placeholder="vd: tu.ha" oninput="this.dataset.touched='1'"></div>
+          <div class="field"><label>Mật khẩu tạm thời <span class="req">*</span></label>
+            <input class="inp" id="empPassword" type="text" value="123456" placeholder="Mật khẩu ban đầu"></div>
+          <div class="field" style="grid-column:1/-1"><label>Vai trò phân quyền <span class="req">*</span></label>
+            <select class="inp" id="empAccountRole" onchange="this.dataset.touched='1'">
+              ${(DB.roles || []).map((r) => `<option value="${esc(r.id)}" ${r.id === suggestedRoleId ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}
+            </select>
+            <div class="cell-sub" style="margin-top:4px">Gợi ý tự động theo phòng ban đã chọn — có thể đổi lại nếu cần.</div>
+          </div>
+        </div>
+      `}`,
     foot: `<button class="btn" data-act="modal-close">Hủy</button>
            <button class="btn btn-primary" data-act="employee-save"><i class="fa-solid fa-floppy-disk"></i>${editing ? 'Lưu thay đổi' : 'Thêm nhân sự'}</button>`,
   });
 }
 
-function saveEmployeeForm() {
+async function saveEmployeeForm() {
   const formId = $('#empFormId')?.value || '';
   const name = $('#empName')?.value.trim() || '';
   const dept = $('#empDept')?.value || '';
@@ -337,24 +430,82 @@ function saveEmployeeForm() {
     return;
   }
 
-  if (formId) {
-    const e = Q.employee(formId);
-    if (!e) { Toast.err('Không tìm thấy nhân sự', formId); return; }
-    Object.assign(e, { name, dept, position, contractType, status, phone, email, joinDate, gender, salary });
-    SEARCH_INDEX = null;
-    if (typeof HRAPI !== 'undefined') HRAPI.scheduleSync();
-    Modal.close();
-    render();
-    Toast.ok('Đã cập nhật hồ sơ nhân sự', `${e.id} · ${name}`);
-  } else {
-    const id = nextCode('NV-', DB.employees, 3);
-    DB.employees.push({ id, name, dept, position, contractType, status, phone, email, joinDate, gender, salary, active: true });
-    SEARCH_INDEX = null;
-    if (typeof HRAPI !== 'undefined') HRAPI.scheduleSync();
-    Modal.close();
-    render();
-    Toast.ok('Đã thêm nhân sự mới', `${id} · ${name}`);
+  /* Tài khoản đăng nhập đi kèm (chỉ có mặt trên form khi nhân sự chưa có tài khoản) */
+  const accountCheckbox = $('#empCreateAccount');
+  const createAccount = !!accountCheckbox?.checked;
+  let accUsername = '', accPassword = '', accRoleId = '';
+  if (createAccount) {
+    accUsername = ($('#empUsername')?.value || '').trim() || hrSuggestUsername(name);
+    accPassword = ($('#empPassword')?.value || '').trim();
+    accRoleId = $('#empAccountRole')?.value || '';
+    if (!accUsername) { Toast.err('Thiếu tên đăng nhập', 'Vui lòng nhập tên đăng nhập cho tài khoản mới.'); return; }
+    if ((DB.users || []).some((u) => String(u.username || '').toLowerCase() === accUsername.toLowerCase())) {
+      Toast.err('Trùng tên đăng nhập', `Tên đăng nhập "${accUsername}" đã được sử dụng. Vui lòng chọn tên khác.`);
+      return;
+    }
+    if (!accPassword) { Toast.err('Thiếu mật khẩu', 'Vui lòng nhập mật khẩu tạm thời cho tài khoản mới.'); return; }
+    if (!accRoleId || !(DB.roles || []).some((r) => r.id === accRoleId)) { Toast.err('Chưa chọn vai trò', 'Vui lòng chọn vai trò phân quyền cho tài khoản mới.'); return; }
   }
+
+  let empRecord;
+  let empId = formId;
+  if (formId) {
+    empRecord = Q.employee(formId);
+    if (!empRecord) { Toast.err('Không tìm thấy nhân sự', formId); return; }
+    Object.assign(empRecord, { name, dept, position, contractType, status, phone, email, joinDate, gender, salary });
+  } else {
+    empId = nextCode('NV-', DB.employees, 3);
+    empRecord = { id: empId, name, dept, position, contractType, status, phone, email, joinDate, gender, salary, active: true };
+    DB.employees.push(empRecord);
+  }
+
+  let createdAccount = null;
+  if (createAccount) {
+    // SystemAPI.login() so sánh mật khẩu bằng SHA-256 vào `passwordHash`, không
+    // phải chuỗi thô — trước đây field ghi ở đây là `password` (chuỗi thô), nên
+    // tài khoản tạo ra không bao giờ đăng nhập được (passwordHash luôn undefined
+    // -> luôn sai mật khẩu), kể cả khi đã lưu lên server đúng cách.
+    const accPasswordHash = typeof SystemAPI !== 'undefined' && typeof SystemAPI.hashPassword === 'function'
+      ? await SystemAPI.hashPassword(accPassword)
+      : accPassword;
+    createdAccount = {
+      id: nextCode('U', DB.users, 2), empId, username: accUsername, roleId: accRoleId,
+      passwordHash: accPasswordHash, lastLogin: '', state: 'active', name: empRecord.name, dept: empRecord.dept,
+    };
+    DB.users.push(createdAccount);
+  }
+
+  SEARCH_INDEX = null;
+  if (typeof HRAPI !== 'undefined') HRAPI.scheduleSync();
+  if (createdAccount && typeof SystemAPI !== 'undefined' && typeof SystemAPI.saveUsers === 'function') {
+    // Phải CHỜ ghi lên KIO rồi mới đóng modal/toast "đã thêm nhân sự mới": trước
+    // đây saveUsers() không được await nên nếu request lỗi (mất mạng, KIO lỗi...)
+    // người dùng vẫn thấy "đã lưu thành công" trong khi tài khoản chưa hề lên
+    // server — và F5 ngay sau đó (trước khi debounce sync khác kịp chạy) sẽ mất
+    // tài khoản vừa tạo dù giao diện báo lưu OK.
+    try {
+      await SystemAPI.saveUsers();
+      if (typeof SystemAPI.audit === 'function') {
+        await SystemAPI.audit({
+          module: 'SYSTEM', entityType: 'USER', entityId: createdAccount.id, action: 'CREATE',
+          description: `${DB.currentUser?.name || 'Người dùng'} tạo tài khoản ${createdAccount.username} theo hồ sơ nhân sự ${empId}`,
+          newData: { empId, username: createdAccount.username, roleId: createdAccount.roleId },
+        });
+      }
+    } catch (err) {
+      DB.users = DB.users.filter((u) => u.id !== createdAccount.id);
+      console.warn('[HR] Không lưu được tài khoản mới lên server:', err);
+      Toast.err('Không lưu được tài khoản đăng nhập', err?.message || 'Đã lưu hồ sơ nhân sự nhưng tài khoản chưa được tạo. Vui lòng thử lại tại đây hoặc ở màn Người dùng & phân quyền.');
+      createdAccount = null;
+    }
+  }
+
+  Modal.close();
+  render();
+
+  const roleName = createdAccount ? ((DB.roles.find((r) => r.id === createdAccount.roleId) || {}).name || '') : '';
+  const accountNote = createdAccount ? ` · Tài khoản ${createdAccount.username} (${roleName})` : '';
+  Toast.ok(formId ? 'Đã cập nhật hồ sơ nhân sự' : 'Đã thêm nhân sự mới', `${empId} · ${name}${accountNote}`);
 }
 
 /* -------------------------------------------------- KHÓA / NGỪNG SỬ DỤNG */
