@@ -25,20 +25,20 @@ const SystemAPI = (() => {
     // có thêm quyền duyệt PR. Trưởng phòng vẫn có thể nhập báo giá, chọn NCC,
     // tạo/gửi/hủy PO khi cần; nhân viên Mua hàng cũng làm các bước này bình thường.
     { id:'ROLE_PURCHASE_MANAGER', name:'Trưởng phòng Mua hàng', permissions:['PURCHASE_VIEW','PURCHASE_PR_CREATE','PURCHASE_PO_CREATE','PURCHASE_PO_SEND','PURCHASE_SUPPLIER_MANAGE','PURCHASE_REPORT','INVENTORY_VIEW','PURCHASE_PR_APPROVE'], modules:{purchases:'*',warehouse:['inventory'],approvals:'*'} },
-    { id:'ROLE_WAREHOUSE', name:'Kho', permissions:['INVENTORY_VIEW','INVENTORY_OPERATE','INVENTORY_ADJUST','PURCHASE_PR_CREATE'], modules:{warehouse:'*',purchases:['pr']} },
-    { id:'ROLE_PRODUCTION', name:'Sản xuất', permissions:['PRODUCTION_VIEW','PRODUCTION_OPERATE','PRODUCTION_APPROVE','INVENTORY_VIEW','PURCHASE_PR_CREATE'], modules:{production:'*',warehouse:['inventory'],purchases:['pr']} },
+    { id:'ROLE_WAREHOUSE', name:'Kho', permissions:['INVENTORY_VIEW','INVENTORY_OPERATE','INVENTORY_ADJUST','PURCHASE_VIEW','CRM_VIEW'], modules:{warehouse:'*',purchases:['pr'],crm:['orders'],bi:['warehouse']} },
+    { id:'ROLE_PRODUCTION', name:'Sản xuất', permissions:['PRODUCTION_VIEW','PRODUCTION_OPERATE','PRODUCTION_APPROVE','INVENTORY_VIEW','PURCHASE_PR_CREATE'], modules:{production:'*',warehouse:['inventory'],purchases:['pr'],bi:['production']} },
     { id:'ROLE_QC', name:'QC / QA', permissions:['QC_VIEW','QC_INSPECT','QC_APPROVE','INVENTORY_VIEW'], modules:{quality:'*',warehouse:['inventory','batches','defects','receipts']} },
     // Kinh doanh làm toàn bộ nghiệp vụ bán hàng hằng ngày nhưng KHÔNG duyệt.
     // Trưởng phòng Kinh doanh kế thừa toàn bộ quyền Kinh doanh và có thêm quyền duyệt,
     // tương tự mô hình Mua hàng / Trưởng phòng Mua hàng.
-    { id:'ROLE_SALES', name:'Kinh doanh', permissions:['CRM_VIEW','CRM_OPERATE','CRM_DELETE_CUSTOMER','SALES_ORDER_OPERATE'], modules:{crm:'*'} },
-    { id:'ROLE_SALES_MANAGER', name:'Trưởng phòng Kinh doanh', permissions:['CRM_VIEW','CRM_OPERATE','CRM_DELETE_CUSTOMER','SALES_ORDER_OPERATE','SALES_APPROVE'], modules:{crm:'*',approvals:'*'} },
-    { id:'ROLE_ACCOUNTING', name:'Kế toán', permissions:['ACCOUNTING_VIEW','ACCOUNTING_OPERATE','PAYMENT_APPROVE','PURCHASE_VIEW'], modules:{accounting:'*',purchases:['po','debts','suppliers'],crm:['debts','customers']} },
-    { id:'ROLE_HR', name:'Nhân sự', permissions:['HR_VIEW','HR_OPERATE'], modules:{hr:'*'} },
+    { id:'ROLE_SALES', name:'Kinh doanh', permissions:['CRM_VIEW','CRM_OPERATE','CRM_DELETE_CUSTOMER','SALES_ORDER_OPERATE'], modules:{crm:'*',bi:['sales']} },
+    { id:'ROLE_SALES_MANAGER', name:'Trưởng phòng Kinh doanh', permissions:['CRM_VIEW','CRM_OPERATE','CRM_DELETE_CUSTOMER','SALES_ORDER_OPERATE','SALES_APPROVE'], modules:{crm:'*',approvals:'*',bi:['sales']} },
+    { id:'ROLE_ACCOUNTING', name:'Kế toán', permissions:['ACCOUNTING_VIEW','ACCOUNTING_OPERATE','PAYMENT_APPROVE','PURCHASE_VIEW'], modules:{accounting:'*',purchases:['po','debts','suppliers'],crm:['debts','customers'],bi:['finance']} },
+    { id:'ROLE_HR', name:'Nhân sự', permissions:['HR_VIEW','HR_OPERATE'], modules:{hr:'*',bi:['hr']} },
     { id:'ROLE_MAINTENANCE', name:'Bảo trì', permissions:['MAINTENANCE_VIEW','MAINTENANCE_OPERATE'], modules:{maintenance:'*'} },
     { id:'ROLE_LOGISTICS', name:'Logistics', permissions:['LOGISTICS_VIEW','LOGISTICS_OPERATE','CRM_VIEW'], modules:{logistics:'*',crm:['orders']} },
-    { id:'ROLE_RESTAURANT', name:'Nhà hàng / Cửa hàng', permissions:['RESTAURANT_VIEW','RESTAURANT_OPERATE','INVENTORY_VIEW'], modules:{restaurant:'*'} },
-    { id:'ROLE_SUBCONTRACT', name:'Gia công', permissions:['SUBCONTRACT_VIEW','SUBCONTRACT_OPERATE','INVENTORY_VIEW','QC_VIEW'], modules:{subcontracting:'*',warehouse:['inventory','issues'],quality:['subcontracting_qc']} },
+    { id:'ROLE_RESTAURANT', name:'Nhà hàng / Cửa hàng', permissions:['RESTAURANT_VIEW','RESTAURANT_OPERATE','INVENTORY_VIEW'], modules:{restaurant:'*',bi:['restaurant']} },
+    { id:'ROLE_SUBCONTRACT', name:'Gia công', permissions:['SUBCONTRACT_VIEW','SUBCONTRACT_OPERATE','INVENTORY_VIEW'], modules:{subcontracting:'*',warehouse:['inventory']} },
     { id:'ROLE_RND', name:'R&D', permissions:['RND_VIEW','RND_OPERATE','INVENTORY_VIEW'], modules:{rnd:'*',warehouse:['inventory']} },
   ];
 

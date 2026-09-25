@@ -611,7 +611,8 @@ const NAV = [
         { id: 'stocktake', label: 'Kiểm kê' },
         { id: 'inventory', label: 'Tồn kho' },
         { id: 'locations', label: 'Quản lý kho' },
-        { id: 'batches', label: 'Lô và hạn sử dụng' },
+        // Tạm ẩn theo yêu cầu: Lô và hạn sử dụng
+        // { id: 'batches', label: 'Lô và hạn sử dụng' },
         { id: 'defects', label: 'Hàng lỗi & hàng trả về' },
         { id: 'production_plan', label: 'Kế hoạch sản xuất & gia công' },
         { id: 'store_replenishment', label: 'Duyệt bổ sung cửa hàng' },
@@ -644,7 +645,6 @@ const NAV = [
       children: [
         { id: 'dashboard', label: 'Tổng quan' },
         { id: 'orders', label: 'Kế hoạch gia công' },
-        { id: 'debt', label: 'Đối chiếu công nợ' },
         { id: 'partners', label: 'Đối tác gia công' },
         // Tạm ẩn: Nhận hàng hoàn thành (đã gộp vào chi tiết kế hoạch), Báo cáo gia công
       ]
@@ -662,8 +662,8 @@ const NAV = [
         { id: 'store_stock', label: 'Tồn kho cửa hàng' },
         { id: 'replenishment', label: 'Yêu cầu bổ sung' },
         { id: 'issue', label: 'Xuất kho nguyên liệu' },
-        { id: 'revenue', label: 'Doanh thu' },
-        { id: 'reports', label: 'Báo cáo cửa hàng' }
+        { id: 'revenue', label: 'Doanh thu' }
+        // Báo cáo cửa hàng đã tích hợp vào Tổng quan.
       ]
     },
     {

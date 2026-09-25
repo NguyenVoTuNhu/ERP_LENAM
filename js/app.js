@@ -495,6 +495,44 @@ const WarehouseInventoryPrimaryData = (() => {
 // [LOGISTICS INITIAL HYDRATE] Logistics phải thấy đơn CRM sẵn sàng xuất ngay
 // lần đầu, không phụ thuộc việc user đã mở CRM/Kho trước đó. Hydrate đúng dữ liệu
 // liên phân hệ một lần; các lần chuyển tab sau dùng RAM đã server-validated.
+
+
+// [SUBCONTRACT INVENTORY FIRST-LOAD] Role Gia công chỉ xem Tồn kho nhưng lần đầu
+// phải lấy snapshot server hoàn chỉnh trước khi render để không flash cache cũ.
+// Sau lần hydrate đầu tiên, dùng RAM đã xác thực trong phiên.
+const SubcontractInventoryPrimaryData = (() => {
+  let ready = false;
+  let warmPromise = null;
+
+  async function loadOnce() {
+    if (ready) return true;
+    if (warmPromise) return warmPromise;
+    warmPromise = (async () => {
+      if (typeof InventoryAPI === 'undefined') return false;
+      await InventoryAPI.bootstrap?.();
+      // refreshFromServer đọc snapshot Kho đầy đủ và apply xong mới resolve,
+      // tránh trạng thái danh sách vật tư/tồn bị thay đổi sau khi view đã render.
+      if (typeof InventoryAPI.refreshFromServer === 'function') {
+        await InventoryAPI.refreshFromServer();
+      } else if (typeof InventoryAPI.ensureFresh === 'function') {
+        await InventoryAPI.ensureFresh(
+          ['inventory','inventoryLots','warehouses','warehouseLocations','materials','semiFinishedProducts','products','itemCategories'],
+          { force:true }
+        );
+      }
+      ready = true;
+      return true;
+    })().finally(() => { warmPromise = null; });
+    return warmPromise;
+  }
+
+  function ensure() { return ready ? Promise.resolve(true) : loadOnce(); }
+  function prewarm() { return ready ? Promise.resolve(true) : loadOnce(); }
+  function markReady() { ready = true; }
+  function isReady() { return ready; }
+  return { ensure, prewarm, markReady, isReady };
+})();
+
 const LogisticsPrimaryData = (() => {
   let ready = false;
   let warmPromise = null;
@@ -554,7 +592,11 @@ const Actions = {
     // tránh flash vài dòng cache cũ rồi mới nhảy sang tồn thật. Sau lần đầu,
     // chuyển màn dùng RAM đã hydrate và không gọi list.php lại nếu TTL còn fresh.
     if (d.id === 'warehouse' && d.tab === 'inventory') {
-      try { await WarehouseInventoryPrimaryData.ensure(); }
+      try {
+        const isSubcontractRole = DB.currentUser?.roleId === 'ROLE_SUBCONTRACT';
+        if (isSubcontractRole) await SubcontractInventoryPrimaryData.ensure();
+        else await WarehouseInventoryPrimaryData.ensure();
+      }
       catch (err) { console.warn('[Warehouse] Không warm được Tồn kho ban đầu:', err); }
     }
 
@@ -570,6 +612,19 @@ const Actions = {
     // form mở với danh sách đầy đủ ngay, không cần qua Kho trước.
     if (d.id === 'purchases') {
       PurchasePRMasterData.prewarm().catch(err => console.warn('[Purchase] Không warm được master nguyên liệu PR:', err));
+    }
+
+    // Gia công: warm danh mục thành phẩm thật từ server để form Tạo kế hoạch
+    // luôn có đầy đủ sản phẩm, không phụ thuộc đã mở Kho/Thành phẩm trước đó.
+    if (d.id === 'subcontracting') {
+      (async () => {
+        try {
+          if (typeof InventoryAPI !== 'undefined') {
+            await InventoryAPI.bootstrap?.();
+            await InventoryAPI.ensureFresh?.(['products'], { force:false });
+          }
+        } catch (err) { console.warn('[Subcontracting] Không warm được danh mục thành phẩm:', err); }
+      })();
     }
 
     // Logistics: đơn bán Sẵn sàng xuất phải có ngay lần đầu. Chờ hydrate
@@ -1886,13 +1941,24 @@ const Actions = {
     let receiptId = '';
     if (pass > 0) {
       receiptId = nextCode('PN-2026-', DB.goodsReceipts || []);
+      const receivedAt = new Date().toISOString();
       DB.goodsReceipts.unshift({
-        id:receiptId, poId:'', prId:'', productionOrderId:po.id, date:currentDateYMD(), receivedBy:DB.currentUser?.id || '',
+        id:receiptId, poId:'', prId:'', productionOrderId:po.id, finalInspectionId:ins.id,
+        sourceType:'PRODUCTION_FINAL_QC', refType:'PRODUCTION_ORDER', refId:po.id,
+        date:currentDateYMD(), receivedAt, receivedBy:DB.currentUser?.id || DB.currentUser?.userId || '',
         warehouse:Q.warehouseName(ins.warehouseId), warehouseId:ins.warehouseId, locationId:ins.locationId, location:Q.locationName(ins.locationId),
         status:'RECEIVED', inspectionStatus:ins.status, note:`Nhập thành phẩm đạt QC từ ${po.id}`,
-        items:[{ materialId:po.productId, name:po.productName, unit:po.unit, qty:pass, rejectedQty:fail, lotId:ins.lotId, lotNumber:ins.lotNumber, productionOrderId:po.id, mfgDate:lot.mfgDate, expiryDate:lot.expiryDate, locationId:ins.locationId }]
+        items:[{ materialId:po.productId, productId:po.productId, name:po.productName, unit:po.unit, qty:pass, rejectedQty:fail,
+          lotId:ins.lotId, lotNumber:ins.lotNumber, productionOrderId:po.id, finalInspectionId:ins.id,
+          mfgDate:lot.mfgDate, expiryDate:lot.expiryDate, locationId:ins.locationId }]
       });
-      DB.inventoryTransactions.unshift({ id:nextCode('TX-',DB.inventoryTransactions||[]), transactionNumber:receiptId, type:'PRODUCTION_QC_RECEIPT', productId:po.productId, warehouseId:ins.warehouseId, locationId:ins.locationId, lotId:ins.lotId, qty:pass, qtyBefore:before, qtyAfter:row.qtyOnHand, refType:'PRODUCTION_ORDER', refId:po.id, userId:DB.currentUser?.id||'', date:currentDateYMD(), note:`QC thành phẩm đạt ${fmtN(pass)} ${po.unit}` });
+      DB.inventoryTransactions.unshift({
+        id:nextCode('TX-',DB.inventoryTransactions||[]), transactionNumber:receiptId, type:'PRODUCTION_QC_RECEIPT',
+        productId:po.productId, warehouseId:ins.warehouseId, locationId:ins.locationId, lotId:ins.lotId, qty:pass,
+        qtyBefore:before, qtyAfter:row.qtyOnHand, refType:'PRODUCTION_ORDER', refId:po.id,
+        receiptId, finalInspectionId:ins.id, userId:DB.currentUser?.id||DB.currentUser?.userId||'',
+        date:currentDateYMD(), createdAt:receivedAt, note:`Nhập kho thành phẩm từ ${po.id} · QC ${ins.id} · ${fmtN(pass)} ${po.unit}`
+      });
       po.finishedReceiptId = receiptId; po.receivedQty = pass; po.receivedAt = new Date().toISOString(); po.status = 'lsx_da_nhap_kho';
     } else {
       po.status = 'lsx_hoan_thanh';
@@ -1914,10 +1980,19 @@ const Actions = {
             await ProductionAPI.persistStageProgress(po, stageIdx);
           }
         }
-        if (typeof InventoryAPI !== 'undefined') {
-          InventoryAPI.scheduleCollections?.(['goodsReceipts','inventoryLots','inventory','inventoryTransactions'], 0);
+        // goodsReceipts thuộc PurchaseAPI (lenam_goods_receipts), không thuộc InventoryAPI.
+        // Trước đây gọi InventoryAPI.scheduleCollections(['goodsReceipts', ...]) khiến key goodsReceipts bị bỏ qua,
+        // nên phiếu nhập TP chỉ còn trong RAM và mất sau F5/logout. Ghi đúng từng collection lên server ngay tại đây.
+        const persistJobs = [];
+        if (receiptId && typeof PurchaseAPI !== 'undefined' && PurchaseAPI.syncCollections) {
+          persistJobs.push(PurchaseAPI.syncCollections(['goodsReceipts']));
         }
-        Toast.ok('Đã xác nhận QC thành phẩm', pass > 0 ? `${fmtN(pass)} ${po.unit} đã được cộng vào Kho thành phẩm${receiptId ? ` · ${receiptId}` : ''}.` : `Toàn bộ ${fmtN(fail)} ${po.unit} không đạt, không cộng tồn.`);
+        if (typeof InventoryAPI !== 'undefined' && InventoryAPI.syncCollections) {
+          persistJobs.push(InventoryAPI.syncCollections(['inventoryLots','inventory','inventoryTransactions']));
+        }
+        if (persistJobs.length) await Promise.all(persistJobs);
+
+        Toast.ok('Đã xác nhận QC thành phẩm', pass > 0 ? `${fmtN(pass)} ${po.unit} đã được nhập kho và lưu lịch sử${receiptId ? ` · ${receiptId}` : ''}.` : `Toàn bộ ${fmtN(fail)} ${po.unit} không đạt, không cộng tồn.`);
       } catch (err) {
         console.error('[FQC] Không lưu được kết quả QC lên server:', err);
         Toast.err('Chưa lưu được kết quả QC lên server', err?.message || 'Vui lòng thử lại.');
@@ -2377,7 +2452,7 @@ const Actions = {
   },
   'inv-transfer-tab': (d) => {
     State.invTransferType = d.type || 'RAW_MATERIAL';
-    go('inv-transfers');
+    render();
   },
   'inv-transfer-view': (d) => openTransferDetailModal(d.id),
   'inv-transfer-save-new': () => {
@@ -2431,13 +2506,21 @@ const Actions = {
       const out = InventoryService.apply({ productId: source.productId, warehouseId: fromWarehouseId, locationId: source.locationId, lotId: source.lotId, quantity, type: 'TRANSFER_OUT', refType: 'TRANSFER', refId: id, note: 'Xuất chuyển kho nội bộ' });
       if (!out.ok) { Toast.err('Không thể chuyển kho', out.message); return; }
       const incoming = InventoryService.apply({ productId: source.productId, warehouseId: toWarehouseId, locationId: destination.id, lotId: source.lotId, quantity, type: 'TRANSFER_IN', refType: 'TRANSFER', refId: id, note: 'Nhập chuyển kho nội bộ' });
+      // Balance mới ở kho đích phải có khóa riêng theo hàng+kho+vị trí+lô.
+      // Nếu dùng lotId làm khóa KIO, cùng một lô ở hai kho sẽ ghi đè nhau trên server.
+      if (incoming.ok && incoming.row && !incoming.row.id) incoming.row.id = `BAL-${source.productId}-${toWarehouseId}-${destination.id}-${source.lotId || 'NOLOT'}`;
       if (!incoming.ok) { Toast.err('Không thể nhận tại kho đích', incoming.message); return; }
       items.push({ productId: source.productId, lotId: source.lotId, qty: quantity, fromLocationId: source.locationId, toLocationId: destination.id, unit: source.unit });
     }
     DB.stockTransfers.unshift({ id, transferType, fromWarehouseId, toWarehouseId, date: $('#ckDate').value || DB.today, status: 'RECEIVED', createdBy:DB.currentUser?.userId||DB.currentUser?.id||'', createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''), note: $('#ckNote').value.trim(), items });
     Modal.close();
     State.invTransferType = transferType;
-    go('inv-transfers');
+    // Phiếu chuyển kho đang nằm trong Kho -> Chuyển kho. Không điều hướng sang
+    // route độc lập `inv-transfers` vì role Kho chỉ được cấp module `warehouse`
+    // và việc điều hướng đó tạo toast "Không có quyền" dù giao dịch đã thành công.
+    // Render ngay state vừa tạo để phiếu xuất hiện tức thì; InventoryAPI wrapper
+    // sẽ đồng bộ stockTransfers + inventory + inventoryTransactions lên KIO/server.
+    render();
     Toast.ok('Đã chuyển kho thành công', `${id} · ${items.length} dòng hàng`);
   },
   // [WAREHOUSE DASHBOARD INTERACTION]
@@ -2635,9 +2718,25 @@ const Actions = {
     Exporter.csv(`Bao-cao-${d.key}.csv`, module.columns, module.rows);
   },
   'enterprise-action': (d) => { if (d.key === 'suppliers') openSupplierForm(); else Toast.info('Chức năng đang chờ dữ liệu nhập', `Màn ${d.key} đã sẵn sàng để kết nối form nghiệp vụ và API triển khai.`); },
-  'subcontracting-new': () => openSubcontractingForm(),
+  'subcontracting-new': async () => {
+    try {
+      if (typeof InventoryAPI !== 'undefined') {
+        await InventoryAPI.bootstrap?.();
+        await InventoryAPI.ensureFresh?.(['products'], { force:false });
+      }
+    } catch (err) { console.warn('[Subcontracting] Không hydrate được đầy đủ thành phẩm:', err); }
+    openSubcontractingForm();
+  },
   'subcontracting-open': (d) => openSubcontractingDetail(d.id),
-  'subcontracting-edit': (d) => openSubcontractingForm(d.id),
+  'subcontracting-edit': async (d) => {
+    try {
+      if (typeof InventoryAPI !== 'undefined') {
+        await InventoryAPI.bootstrap?.();
+        await InventoryAPI.ensureFresh?.(['products'], { force:false });
+      }
+    } catch (err) { console.warn('[Subcontracting] Không hydrate được đầy đủ thành phẩm:', err); }
+    openSubcontractingForm(d.id);
+  },
   'subcontracting-save': (d) => subcontractingSaveOrder(d.id || ''),
   'subcontracting-delete': (d) => subcontractingDeleteOrder(d.id),
   'subcontracting-approve': (d) => subcontractingApproveOrder(d.id),
@@ -2665,13 +2764,17 @@ const Actions = {
   'subcontracting-partner-detail': (d) => openSubcontractingPartnerDetail(d.id || d.partner),
   'subcontracting-partner-delete': (d) => subcontractingDeletePartner(d.id),
   'restaurant-replenishment-new': async (d) => {
-    // Luôn đọc lại master Chi nhánh từ bảng lenam_restaurant_stores trước khi mở form.
-    // Chỉ áp dụng Restaurant; không can thiệp các API/module cũ.
+    // Form yêu cầu bổ sung phải độc lập với thứ tự người dùng đã mở các phân hệ.
+    // Nạp Chi nhánh + master Thành phẩm thật từ server trước khi dựng dropdown.
     try {
+      const jobs=[];
       if (typeof RestaurantQualityAPI !== 'undefined' && RestaurantQualityAPI.refreshRestaurant)
-        await RestaurantQualityAPI.refreshRestaurant(['stores']);
+        jobs.push(RestaurantQualityAPI.refreshRestaurant(['stores']));
+      if (typeof InventoryAPI !== 'undefined' && InventoryAPI.ensureFresh)
+        jobs.push(InventoryAPI.ensureFresh(['products','inventory','inventoryLots','warehouses'],{force:false}));
+      await Promise.allSettled(jobs);
     } catch (err) {
-      console.warn('[Restaurant] Không refresh được chi nhánh từ server, dùng dữ liệu đang có:', err);
+      console.warn('[Restaurant] Không hydrate đủ dữ liệu bổ sung cửa hàng từ server:', err);
     }
     openRestaurantReplenishmentForm({storeId:d.store||'',productId:d.product||'',quantity:Number(d.qty||0)||1});
   },
@@ -2747,7 +2850,7 @@ const Actions = {
     });
     req.status='ISSUED'; req.approvedItems=approved; req.sourceWarehouseId=fromWarehouseId; req.transferId=transferId; req.goodsIssueId=goodsIssueId; req.issuedLines=issuedLines; req.issuedAt=new Date().toISOString(); req.issuedBy=DB.currentUser?.id||'';
     if(typeof InventoryAPI!=='undefined'&&InventoryAPI.scheduleCollections) InventoryAPI.scheduleCollections(['inventory','inventoryTransactions','goodsIssues'],120);
-    await restaurantPersist(['replenishments']); Modal.close(); go('restaurant',{tab:'replenishment'}); Toast.ok('Kho đã xuất hàng',`${goodsIssueId} · ${transferId} · ${approved.length} thành phẩm · chờ cửa hàng nhận`);
+    await restaurantPersist(['replenishments']); Modal.close(); go('warehouse',{tab:'store_replenishment'}); Toast.ok('Kho đã xuất hàng',`${goodsIssueId} · ${transferId} · ${approved.length} thành phẩm · chờ cửa hàng nhận`);
   },
   'restaurant-replenishment-receive': (d) => {
     const req=restaurantReplenishment(d.id); if(!req||req.status!=='ISSUED')return; const store=restaurantStore(req.storeId);
@@ -3138,11 +3241,21 @@ const Actions = {
   'new-pr': async () => { await PurchasePRMasterData.ensure(); switchTo(() => { State.prFormDraft = null; State.prEditingExistingPrId = null; openPRForm(null); }); },
   'filter-pr': (d) => { F('purchases').status = d.status; F('purchases').tab = 'pr'; State.page.purchases = 1; render(); },
   'pr-edit': async (d) => {
+    if (typeof Auth !== 'undefined' && !Auth.hasPermission('PURCHASE_PR_CREATE')) {
+      Toast.err('Không có quyền sửa đề nghị mua hàng', 'Vai trò hiện tại chỉ được xem Đề nghị mua hàng.');
+      return;
+    }
     await PurchasePRMasterData.ensure();
     const pr = Q.purchase(d.id);
     if (!pr) return;
 
-    // Đề nghị mua hàng được phép sửa cho đến khi người dùng
+    const editablePr = PURCHASE_INVENTORY_CONFIG.prStatus.pending.includes(pr.status);
+    if (!editablePr) {
+      Toast.err('Đề nghị đã khóa', `${pr.id} đã đi qua bước duyệt hoặc các bước mua hàng tiếp theo nên không thể sửa.`);
+      return;
+    }
+
+    // Đề nghị mua hàng chỉ được sửa khi còn Chờ duyệt và chưa xác nhận NCC.
     // xác nhận lựa chọn nhà cung cấp. Sau mốc này PR bị khóa.
     const supplierSelectionConfirmed = DB.supplierQuotations.some(
       q => q.prId === pr.id && (q.confirmed || q.confirmedAt)
@@ -3173,6 +3286,10 @@ const Actions = {
   },
 
   'pr-save': () => {
+    if (typeof Auth !== 'undefined' && !Auth.hasPermission('PURCHASE_PR_CREATE')) {
+      Toast.err('Không có quyền lưu đề nghị mua hàng', 'Vai trò hiện tại chỉ được xem Đề nghị mua hàng. Dữ liệu không được ghi lên server.');
+      return;
+    }
     const selectedMaterials =
       State.prFormMaterials || [];
 
@@ -3305,8 +3422,12 @@ const Actions = {
       const existingPr = Q.purchase(editingExistingPrId);
       if (!existingPr) { Toast.err('Không tìm thấy đề nghị', editingExistingPrId); return; }
 
-      // Kiểm tra lại ở thời điểm lưu để tránh sửa trực tiếp bằng action/UI cũ
-      // sau khi nhà cung cấp đã được xác nhận trong lúc form đang mở.
+      // Kiểm tra lại workflow ở thời điểm lưu. PR đã duyệt/đã tạo PO/đã nhận
+      // tuyệt đối không được quay ngược về Chờ duyệt chỉ vì mở form sửa cũ.
+      if (!PURCHASE_INVENTORY_CONFIG.prStatus.pending.includes(existingPr.status)) {
+        Toast.err('Đề nghị đã khóa', `${existingPr.id} đã đi qua bước duyệt hoặc các bước mua hàng tiếp theo nên không thể sửa.`);
+        return;
+      }
       const supplierSelectionConfirmed = DB.supplierQuotations.some(
         q => q.prId === existingPr.id && (q.confirmed || q.confirmedAt)
       );
@@ -3477,6 +3598,10 @@ const Actions = {
   },
 
   'pr-delete': (d) => {
+    if (typeof Auth !== 'undefined' && !Auth.hasPermission('PURCHASE_PR_CREATE')) {
+      Toast.err('Không có quyền xóa đề nghị mua hàng', 'Vai trò hiện tại chỉ được xem Đề nghị mua hàng.');
+      return;
+    }
     const pr = DB.purchases.find((p) => p.id === d.id);
     if (!pr) return;
     const isPending = PURCHASE_INVENTORY_CONFIG.prStatus.pending.includes(pr.status);
@@ -5929,7 +6054,7 @@ function routeRefreshPlan(module, tab) {
   if (module === 'purchases') {
     const map = {
       dashboard: ['purchases', 'purchaseOrders', 'supplierPayments'],
-      pr: ['purchases', 'suppliers', 'approvalRequests', 'approvalLogs'],
+      pr: ['purchases', 'purchaseOrders', 'suppliers', 'approvalRequests', 'approvalLogs'],
       quotes: ['supplierQuotations', 'purchases', 'suppliers'],
       po: ['purchaseOrders', 'suppliers'],
       debts: ['purchaseOrders', 'supplierPayments', 'suppliers'],
@@ -6029,6 +6154,38 @@ function routeRefreshPlan(module, tab) {
       };
     }
 
+    // Duyệt yêu cầu bổ sung cửa hàng là màn giao nhau giữa Nhà hàng/Cửa hàng và Kho.
+    // Yêu cầu được lưu ở lenam_restaurant_replenishment_requests, vì vậy Kho phải
+    // nạp trực tiếp RestaurantQualityAPI từ server thay vì chỉ dựa vào DB đang có trong RAM.
+    if (tab === 'store_replenishment') {
+      const warehouseStoreReplenishmentServerSource = {
+        async bootstrap() {
+          const jobs=[];
+          if(typeof RestaurantQualityAPI!=='undefined' && RestaurantQualityAPI.bootstrap) jobs.push(RestaurantQualityAPI.bootstrap());
+          if(typeof InventoryAPI!=='undefined' && InventoryAPI.bootstrap) jobs.push(InventoryAPI.bootstrap());
+          await Promise.allSettled(jobs);
+          return true;
+        },
+        async ensureFresh(_keys,{force=false}={}) {
+          const jobs=[];
+          if(typeof RestaurantQualityAPI!=='undefined' && RestaurantQualityAPI.ensureFresh)
+            jobs.push(RestaurantQualityAPI.ensureFresh(['stores','replenishments'],{force}));
+          if(typeof InventoryAPI!=='undefined' && InventoryAPI.ensureFresh)
+            jobs.push(InventoryAPI.ensureFresh(['products','inventory','inventoryLots','warehouses','warehouseLocations'],{force}));
+          const parts=await Promise.allSettled(jobs), changed={};
+          for(const part of parts){
+            if(part.status==='fulfilled' && part.value && typeof part.value==='object') Object.assign(changed,part.value);
+          }
+          return changed;
+        }
+      };
+      return {
+        api:warehouseStoreReplenishmentServerSource,
+        keys:['stores','replenishments','products','inventory','inventoryLots','warehouses','warehouseLocations'],
+        deferred:false
+      };
+    }
+
     if (tab === 'production_plan') {
       const warehouseProductionPlanServerSource = {
         async bootstrap() {
@@ -6080,13 +6237,24 @@ function routeRefreshPlan(module, tab) {
       dashboard: ['inventory', 'inventoryLots', 'warehouses'],
       inventory: ['inventory', 'goodsIssues', 'inventoryLots', 'warehouses', 'warehouseLocations', 'materials', 'semiFinishedProducts', 'products', 'itemCategories'],
       issues: ['goodsIssues', 'warehouses', 'inventoryLots'],
-      transfers: ['stockTransfers', 'warehouses'],
+      transfers: ['stockTransfers', 'warehouses', 'warehouseLocations', 'inventory', 'inventoryLots', 'products', 'materials'],
       stocktake: ['inventoryCounts', 'warehouses'],
       batches: ['inventoryLots', 'inventory', 'materials', 'semiFinishedProducts', 'products'],
-      locations: ['warehouses', 'warehouseLocations'],
+      locations: ['warehouseSites', 'warehouses', 'warehouseLocations', 'inventory', 'inventoryLots', 'materials', 'products'],
       alerts: ['inventory', 'inventoryLots', 'materials', 'semiFinishedProducts', 'products'],
     };
     return { api: typeof InventoryAPI !== 'undefined' ? InventoryAPI : null, keys: map[tab] || map.dashboard, deferred: tab === 'inventory' };
+  }
+
+  // Chi tiết đơn hàng cần dữ liệu từ cả CRM, Kho và Sản xuất.
+  // Đặc biệt goodsIssues phải có ngay để trạng thái "Xuất kho bán hàng" không
+  // phụ thuộc việc người dùng đã mở Kho trước đó hay chưa.
+  if (module === 'order-detail') {
+    return routeMultiPlan({
+      crm: ['customers','orders','crmTickets','customerPayments'],
+      inventory: ['goodsIssues','products','inventory','inventoryLots','warehouses'],
+      production: ['productionPlans','productionOrders']
+    }, { deferred: false });
   }
 
   if (module === 'crm') {
@@ -6475,6 +6643,32 @@ window.ERPDataWarmup = (() => {
   return { start, hydrateCaches, warmCritical, warmRemaining };
 })();
 
+async function reconcileCorruptedPurchaseRequestStatuses() {
+  if (!Array.isArray(DB.purchases) || !Array.isArray(DB.purchaseOrders)) return false;
+  let changed = false;
+  for (const pr of DB.purchases) {
+    if (!PURCHASE_INVENTORY_CONFIG?.prStatus?.pending?.includes(pr.status)) continue;
+    const linked = DB.purchaseOrders.filter(po => po.prId === pr.id && po.status !== 'CANCELLED');
+    if (!linked.length) continue;
+
+    const statuses = linked.map(po => String(po.status || ''));
+    let restored = 'mh_da_dat_hang';
+    if (statuses.length && statuses.every(st => st === 'RECEIVED')) restored = 'mh_hoan_thanh';
+    else if (statuses.some(st => st === 'PARTIAL_RECEIVED' || st === 'RECEIVED')) restored = 'mh_da_nhan';
+    else if (statuses.some(st => st === 'SHIPPING')) restored = 'mh_dang_giao';
+
+    console.warn(`[Purchase] Khôi phục workflow PR ${pr.id}: ${pr.status} -> ${restored} vì đã có PO downstream.`);
+    pr.status = restored;
+    pr.workflowRestoredAt = new Date().toISOString();
+    pr.workflowRestoredReason = 'PR bị ghi lùi trạng thái trong khi đã có PO liên kết';
+    changed = true;
+  }
+  if (changed && typeof PurchaseAPI !== 'undefined' && PurchaseAPI.syncCollections) {
+    await PurchaseAPI.syncCollections(['purchases']);
+  }
+  return changed;
+}
+
 function scheduleRouteDataRefresh(module = State.module, tab = State.tab) {
   clearTimeout(__routeRefreshTimer);
   const plan = routeRefreshPlan(module, tab);
@@ -6504,12 +6698,16 @@ function scheduleRouteDataRefresh(module = State.module, tab = State.tab) {
       // Không bootstrap Purchase/Inventory/CRM/Production đồng loạt khi F5.
       if (typeof plan.api.bootstrap === 'function') await plan.api.bootstrap();
       const changed = await plan.api.ensureFresh(plan.keys);
+      let repairedPurchaseWorkflow = false;
+      if (module === 'purchases' && tab === 'pr') {
+        repairedPurchaseWorkflow = await reconcileCorruptedPurchaseRequestStatuses();
+      }
 
       // Khi user mở đúng phân hệ, dữ liệu badge đã được server-validated.
       if (module === 'purchases' && plan.keys.includes('purchases')) window.SidebarBadges?.markReady?.('purchases');
       if ((module === 'production' || module === 'production-detail' || module === 'progress') && plan.keys.includes('productionOrders')) window.SidebarBadges?.markReady?.('production');
 
-      if (!changed || !Object.keys(changed).length) {
+      if ((!changed || !Object.keys(changed).length) && !repairedPurchaseWorkflow) {
         if (typeof renderNav === 'function') renderNav();
         return;
       }
@@ -6644,6 +6842,7 @@ if (
   }
   if (State.module === 'warehouse' && State.tab === 'inventory') {
     WarehouseInventoryPrimaryData.markReady();
+    if (DB.currentUser?.roleId === 'ROLE_SUBCONTRACT') SubcontractInventoryPrimaryData.markReady();
   }
   if (State.module === 'warehouse' && State.tab === 'production_plan') {
     WarehouseProductionPlanPrimaryData.markReady();
@@ -6670,6 +6869,9 @@ if (
   if (State.module === 'warehouse' && State.tab === 'dashboard') {
     WarehouseInventoryPrimaryData.prewarm().catch(err => console.warn('[Warehouse] Warm Tồn kho nền thất bại:', err));
     WarehouseProductionPlanPrimaryData.prewarm().catch(err => console.warn('[Warehouse] Warm Kế hoạch sản xuất nền thất bại:', err));
+  }
+  if (State.module === 'subcontracting' && (State.tab === 'dashboard' || !State.tab) && DB.currentUser?.roleId === 'ROLE_SUBCONTRACT') {
+    SubcontractInventoryPrimaryData.prewarm().catch(err => console.warn('[Subcontracting] Warm Tồn kho read-only nền thất bại:', err));
   }
   if (State.module === 'accounting' && State.tab === 'dashboard') {
     AccountingPrimaryData.prewarm().catch(err => console.warn('[Accounting] Warm dữ liệu tài chính nền thất bại:', err));

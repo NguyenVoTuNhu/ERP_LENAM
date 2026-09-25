@@ -130,6 +130,7 @@ const tabs =
     .prStatus
     .pending
     .includes(p.status);
+  const canManagePr = typeof Auth === 'undefined' || Auth.hasPermission('PURCHASE_PR_CREATE');
 
   const pendingApprovalReq = (DB.approvalRequests || []).find(r => r.docType === 'PR' && r.docId === p.id && r.status === 'PENDING');
   const pendingApprovalLevel = pendingApprovalReq ? (pendingApprovalReq.levels || []).find(l => Number(l.level) === Number(pendingApprovalReq.currentLevel)) : null;
@@ -228,7 +229,7 @@ const tabs =
             icon: 'fa-eye',
             title: 'Xem chi tiết'
           },
-          ...(!DB.supplierQuotations.some(q => q.prId === p.id && (q.confirmed || q.confirmedAt)) ? [{
+          ...(canManagePr && isPending && !DB.supplierQuotations.some(q => q.prId === p.id && (q.confirmed || q.confirmedAt)) ? [{
             act: 'pr-edit',
             data: `data-id="${p.id}"`,
             icon: 'fa-pen-to-square',
@@ -247,12 +248,12 @@ const tabs =
               icon: 'fa-xmark',
               title: 'Từ chối đề nghị mua hàng'
             }] : []),
-            {
+            ...(canManagePr ? [{
               act: 'pr-delete',
               data: `data-id="${p.id}"`,
               icon: 'fa-trash',
               title: 'Xóa PR chưa duyệt'
-            }
+            }] : [])
           ] : []),
         ])}
       </td>
@@ -1088,6 +1089,7 @@ function openPRModal(id) {
   const p = Q.purchase(id);
   if (!p) return;
   const canApprovePurchase = Auth.canApprovePurchase();
+  const canManagePr = typeof Auth === 'undefined' || Auth.hasPermission('PURCHASE_PR_CREATE');
   // PR không còn chọn NCC ở bước này
   const s = p.supplierId
     ? Q.supplier(p.supplierId)
@@ -1168,7 +1170,7 @@ const isApproved =
 
       ${auditRows.length ? `<div class="form-sec-title" style="margin-top:16px"><i class="fa-solid fa-fingerprint"></i>Dấu vết thao tác</div>
       <div class="tline">${auditRows.map(a => `<div class="tline-item done"><span class="tline-dot t-blue"><i class="fa-solid fa-user-shield"></i></span><div class="tline-title">${esc(a.fullName)} — ${esc(a.action)}</div><div class="tline-sub">${esc(a.description || '')} · ${esc(a.createdAt || '')}</div></div>`).join('')}</div>` : ''}`,
-        foot: `${isPending ? `<button class="btn btn-danger left" data-act="pr-delete" data-id="${p.id}"><i class="fa-solid fa-trash"></i>Xóa PR</button>
+        foot: `${isPending ? `${canManagePr ? `<button class="btn btn-danger left" data-act="pr-delete" data-id="${p.id}"><i class="fa-solid fa-trash"></i>Xóa PR</button>` : ''}
           ${canApprovePurchase ? `<button class="btn" data-act="pr-reject-modal" data-id="${p.id}"><i class="fa-solid fa-xmark"></i>Từ chối PR</button>
           <button class="btn btn-success" data-act="pr-approve-action" data-id="${p.id}"><i class="fa-solid fa-check"></i>Duyệt PR</button>` : `<span class="muted" style="margin-right:auto"><i class="fa-solid fa-lock"></i> Tài khoản chỉ có quyền xem, không có quyền phê duyệt</span>`}` : ''}
           <button class="btn" data-act="modal-close">Đóng</button>`,
