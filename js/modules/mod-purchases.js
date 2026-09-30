@@ -119,6 +119,12 @@ const tabs =
     const cnt = (s) => DB.purchases.filter((p) => p.status === s).length;
 
     const rows = pg.items.map((p) => {
+  // Dữ liệu cũ có thể còn status Đã đặt hàng dù toàn bộ PO của PR đã bị hủy.
+  // Chỉ chuẩn hóa trạng thái HIỂN THỊ; không thay đổi luồng nghiệp vụ hay tự tạo/xóa chứng từ.
+  const linkedPos = (DB.purchaseOrders || []).filter(po => po.prId === p.id);
+  const allLinkedPosCancelled = linkedPos.length > 0 && linkedPos.every(po => po.status === 'CANCELLED');
+  const effectivePrStatus = (['mh_da_dat_hang','CONVERTED_TO_PO'].includes(p.status) && allLinkedPosCancelled) ? 'CANCELLED' : p.status;
+  const pView = effectivePrStatus === p.status ? p : { ...p, status: effectivePrStatus };
   const isApproved =
   PURCHASE_INVENTORY_CONFIG
     .prStatus
@@ -217,7 +223,7 @@ const tabs =
       </td>
 
       <td>
-        ${badge(p.status)}
+        ${badge(pView.status)}
         ${pendingApprovalLevel ? `<div class="cell-sub" style="margin-top:4px;color:var(--orange);font-weight:700">Chờ cấp ${pendingApprovalLevel.level}: ${esc(approvalRoleName(pendingApprovalLevel.role))}</div>` : ''}
       </td>
 
@@ -1128,7 +1134,7 @@ const isApproved =
         ${infoItem('Nhà cung cấp dự kiến', esc(supplierLabel))}
         ${infoItem('Người tạo', esc(p.createdByName || Q.employeeName(p.createdBy) || '—'))}
         ${infoItem('Thời gian tạo', p.createdAt ? esc(String(p.createdAt).replace('T',' ').slice(0,19)) : fmtDate(p.date))}
-        ${infoItem('Người phê duyệt', p.approvedBy ? esc(p.approvedByName || Q.employeeName(p.approvedBy)) : '<span class="muted">Chưa duyệt</span>')}
+        ${infoItem('Người phê duyệt', (() => { const req=(DB.approvalRequests||[]).filter(r=>r.docType==='PR'&&r.docId===p.id).sort((a,b)=>new Date(b.requestedAt||0)-new Date(a.requestedAt||0))[0]; const names=(req?.levels||[]).filter(l=>l.status==='APPROVED'&&l.approverName).map(l=>`Cấp ${l.level}: ${esc(l.approverName)}`); return names.length ? names.join('<br>') : (p.approvedBy ? esc(p.approvedByName || Q.employeeName(p.approvedBy)) : '<span class="muted">Chưa duyệt</span>'); })())}
         ${infoItem('Thời gian phê duyệt', p.approvedAt ? esc(String(p.approvedAt).replace('T',' ').slice(0,19)) : '<span class="muted">—</span>')}
         ${infoItem('Tổng giá trị đề xuất', `<b class="num" style="color:var(--primary);font-size:15px">${fmtVND(p.total)}</b>`)}
       </div>

@@ -682,7 +682,9 @@
   }
 
   // ---- Register view -------------------------------------------------------
-  load();
+  // [PERFORMANCE] Không gọi load() khi file module vừa được nạp. Trước đây dòng này
+  // làm màn đăng nhập cũng tự refresh 5 bảng Logistics từ KIO. Mỗi view Logistics
+  // tự gọi load() khi thực sự được mở, nên bỏ eager-load này không đổi nghiệp vụ.
   Views.logistics = function(params={}) {
     const tab=State.tab || params.tab || 'dashboard';
     if (tab==='deliveries') return deliveriesView(false);

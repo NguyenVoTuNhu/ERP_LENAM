@@ -1,0 +1,39 @@
+LÊ NAM ERP - CHECKLIST BẢNG SERVER
+=================================
+
+Yêu cầu mỗi bảng tối thiểu có:
+- id: khóa chính tự tăng
+- payload: TEXT/LONGTEXT
+
+PURCHASE
+[ ] lenam_suppliers
+[ ] lenam_purchase_requests
+[ ] lenam_supplier_quotations
+[ ] lenam_purchase_orders
+[ ] lenam_goods_receipts
+[ ] lenam_supplier_payments
+[ ] lenam_purchase_price_history
+[ ] lenam_supplier_evaluations
+
+INVENTORY / MASTER
+[ ] lenam_warehouses
+[ ] lenam_warehouse_locations
+[ ] lenam_inventory_lots
+[ ] lenam_inventory_balances
+[ ] lenam_stock_transfers
+[ ] lenam_inventory_counts
+[ ] lenam_inventory_transactions
+[ ] lenam_goods_issues
+[ ] lenam_stock_moves
+[ ] lenam_inventory_audit_logs
+[ ] lenam_material_return_requests
+[ ] lenam_material_return_history
+[ ] lenam_material_inspections
+[ ] lenam_item_categories
+[ ] lenam_materials
+[ ] lenam_semi_finished_products
+[ ] lenam_finished_products
+[ ] lenam_inventory_settings
+
+Không tạo bằng phpMyAdmin local.
+Các bảng phải tồn tại trên database server của công ty.

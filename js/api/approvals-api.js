@@ -18,6 +18,8 @@ const ApprovalsAPI = (() => {
   const DEMO_SEED_KEY = KIO_CONFIG.storageKeys.approvalDemoSeed;
 
   const REFRESH_TTL = 2 * 60 * 1000;
+  const DB_KEYS = { workflows: 'approvalWorkflows', requests: 'approvalRequests', logs: 'approvalLogs', signatures: 'eSignatures' };
+  const dbKey = (key) => DB_KEYS[key] || key;
 
   let syncChain = Promise.resolve();
   const localVersion = new Map();
@@ -37,11 +39,11 @@ const ApprovalsAPI = (() => {
   }
 
   function readCache() { return KioDataUtils.readJson(CACHE_KEY); }
-  function writeCache() { KioDataUtils.writeJson(CACHE_KEY, KioDataUtils.snapshotCollections(TABLES)); }
+  function writeCache() { const snap={}; Object.keys(TABLES).forEach(key => snap[key]=KioDataUtils.clone(DB[dbKey(key)] || [])); KioDataUtils.writeJson(CACHE_KEY, snap); }
 
   function apply(data) {
     Object.keys(TABLES).forEach(key => {
-      if (Array.isArray(data?.[key])) DB[key] = data[key];
+      if (Array.isArray(data?.[key])) DB[dbKey(key)] = data[key];
     });
   }
 
@@ -57,7 +59,7 @@ const ApprovalsAPI = (() => {
   // KHÔNG tự seed lại nếu collection đã từng được migrate (tương tự CRMAPI:
   // một request/log rỗng sau đó là trạng thái hợp lệ, không phải thiếu dữ liệu).
   async function seedMissingCollections(serverData) {
-    const demo = KioDataUtils.snapshotCollections(TABLES);
+    const demo = {}; Object.keys(TABLES).forEach(key => demo[key]=KioDataUtils.clone(DB[dbKey(key)] || []));
     const out = { ...serverData };
     const seeded = [];
 
@@ -91,7 +93,7 @@ const ApprovalsAPI = (() => {
     const wanted = normalizeKeys(keys);
     syncChain = syncChain.catch(() => {}).then(async () => {
       for (const key of wanted) {
-        await KioStore.syncCollection(TABLES[key], Array.isArray(DB[key]) ? DB[key] : []);
+        await KioStore.syncCollection(TABLES[key], Array.isArray(DB[dbKey(key)]) ? DB[dbKey(key)] : []);
       }
       writeCache();
       if (wanted.length) console.info(`[ApprovalsAPI] Đã đồng bộ lên KIO: ${wanted.join(', ')}`);
@@ -142,7 +144,7 @@ const ApprovalsAPI = (() => {
       const changed = {};
       Object.keys(TABLES).forEach(key => {
         if (!Array.isArray(data?.[key])) return;
-        const before = JSON.stringify(DB[key] || []);
+        const before = JSON.stringify(DB[dbKey(key)] || []);
         const after = JSON.stringify(data[key]);
         if (before !== after) changed[key] = data[key];
       });

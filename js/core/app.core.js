@@ -585,7 +585,7 @@ const NAV = [
       icon: 'fa-cart-shopping',
       children: [
         { id: 'dashboard', label: 'Tổng quan' },
-        { id: 'pr', label: 'Đề nghị mua hàng' },
+        { id: 'pr', label: 'Đề nghị mua hàng', count: () => window.SidebarBadges?.purchasePendingCount?.() || 0, alert: true },
         { id: 'quotes', label: 'Báo giá nhà cung cấp' },
         { id: 'po', label: 'Đơn đặt hàng' },
         { id: 'debts', label: 'Công nợ NCC' },
@@ -693,8 +693,7 @@ const NAV = [
         { id: 'shifts', label: 'Phân ca' },
         { id: 'kpi', label: 'KPI' },
         { id: 'evaluations', label: 'Đánh giá' },
-        { id: 'payroll', label: 'Tính lương' },
-        { id: 'labour_cost', label: 'Chi phí nhân công' }
+        { id: 'payroll', label: 'Tính lương' }
       ]
     },
     {
@@ -772,7 +771,7 @@ const NAV = [
       icon: 'fa-circle-check',
       children: [
         { id: 'dashboard', label: 'Tổng quan' },
-        { id: 'pending', label: 'Việc cần duyệt' },
+        { id: 'pending', label: 'Việc cần duyệt', count: () => window.SidebarBadges?.approvalPendingCount?.() || 0, alert: true },
         { id: 'workflows', label: 'Quy trình phê duyệt' },
         { id: 'logs', label: 'Nhật ký phê duyệt' },
         { id: 'overdue', label: 'Cảnh báo quá hạn' },
@@ -1133,6 +1132,7 @@ function renderNav() {
                     data-tab="${tab}"
                     type="button">
                     <span>${esc(child.label)}</span>
+                    ${child.count && child.count() ? `<span class="nav-count ${child.alert ? 'alert' : ''}">${child.count()}</span>` : ''}
                   </button>
                 `;
               }).join('')}

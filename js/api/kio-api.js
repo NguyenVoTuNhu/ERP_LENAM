@@ -295,24 +295,28 @@ const KioStore = (() => {
   }
 
   async function insertEncoded(table, encoded) {
-    // [KIO RACE FIX] Các chunk thuộc CÙNG một record phải ghi tuần tự.
-    // Nếu gửi đồng thời vào một bảng vừa được tạo, backend KIO có thể để nhiều
-    // request cùng rơi vào nhánh CREATE TABLE và phát sinh MySQL 1050
-    // "Table already exists". Ghi tuần tự vẫn giữ nguyên dữ liệu nghiệp vụ
-    // và loại bỏ race condition này.
-    for (const payloadText of encoded.payloads) {
+    // [PERFORMANCE] Chỉ chunk đầu tiên cần đi tuần tự để bảo đảm bảng vật lý đã
+    // tồn tại. Sau khi chunk đầu thành công, các chunk còn lại của CÙNG record
+    // có thể INSERT song song vì thứ tự ghép đã nằm trong trường `i`. Điều này
+    // không đổi payload/logic nghiệp vụ nhưng giảm mạnh thời gian CREATE/UPDATE.
+    const payloads = Array.isArray(encoded?.payloads) ? encoded.payloads : [];
+    if (!payloads.length) return;
+
+    const writeOne = async (payloadText) => {
       try {
-        await writePayload('insert', table, null, payloadText);
+        return await writePayload('insert', table, null, payloadText);
       } catch (err) {
-        // Trường hợp một client/request khác vừa tạo bảng ở đúng thời điểm này,
-        // đợi ngắn rồi thử lại đúng 1 lần. Không retry các lỗi khác.
         if (/SQLSTATE\[42S01\]|1050|already exists/i.test(String(err?.message || err))) {
           await new Promise(resolve => setTimeout(resolve, 180));
-          await writePayload('insert', table, null, payloadText);
-        } else {
-          throw err;
+          return writePayload('insert', table, null, payloadText);
         }
+        throw err;
       }
+    };
+
+    await writeOne(payloads[0]);
+    if (payloads.length > 1) {
+      await runLimited(payloads.slice(1), WRITE_CONCURRENCY, writeOne);
     }
   }
 

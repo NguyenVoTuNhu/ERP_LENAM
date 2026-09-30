@@ -25,7 +25,11 @@ const RestaurantQualityAPI = (() => {
     storeStocks: ['restaurantStoreStocks', RT.storeStocks],
     storeStockTransactions: ['restaurantStoreStockTransactions', RT.storeStockTransactions],
     // Dùng chung master tài khoản ngân hàng của Kế toán – Tài chính.
-    bankAccounts: ['bankAccounts', RT.bankAccounts],
+    bankAccounts: ['bankAccounts', RT.bankAccounts],    
+	cashTransactions: ['cashTransactions', RT.cashTransactions],
+    bankTransactions: ['bankTransactions', RT.bankTransactions],
+    fixedAssets: ['fixedAssets', RT.fixedAssets],
+
   });
   const qualityMap = Object.freeze({
     coa: ['qualityCoa', QT.coa],
@@ -131,6 +135,19 @@ const RestaurantQualityAPI = (() => {
     return true;
   }
 
+  async function saveRestaurantRecord(key, record){
+    await bootstrap();
+    const entry=restaurantMap[key];
+    if(!entry || !record) return false;
+    const [,table]=entry;
+    // Ghi đúng một record thay đổi thay vì sync lại cả collection. KioStore vẫn
+    // đối chiếu dữ liệu server theo key nên đây vẫn là persistence thật.
+    await KioStore.saveSingleton(table, String(record.id||record.code||''), clone(record));
+    lastLoaded.set(key,now()); snapshotKeys.add(key);
+    writeMapCache(restaurantMap,REST_CACHE_KEY);
+    return true;
+  }
+
   async function refreshRestaurant(keys){
     const wanted=Array.isArray(keys)&&keys.length?[...new Set(keys)]:Object.keys(restaurantMap);
     return ensureFresh(wanted,{force:true});
@@ -165,6 +182,7 @@ const RestaurantQualityAPI = (() => {
     syncRestaurant:(keys)=>syncMap(restaurantMap,keys),
     syncQuality:(keys)=>syncMap(qualityMap,keys),
     refreshRestaurant,
+    saveRestaurantRecord,
     deleteRestaurant:(key,id)=>deleteFrom(restaurantMap,key,id),
     deleteQuality:(key,id)=>deleteFrom(qualityMap,key,id),
     debugTables,

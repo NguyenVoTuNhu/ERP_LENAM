@@ -514,6 +514,48 @@ const InventoryAPI = (() => {
     return true;
   }
 
+  // Ghi đúng các record vừa thay đổi thay vì quét/so sánh toàn bộ collection.
+  // Dùng cho thao tác master + tồn đầu kỳ để một lần thêm hàng không kéo theo
+  // hàng trăm KRUD của các record không liên quan.
+  // Ghi nhanh record MỚI: không LIST toàn bộ bảng trước khi insert.
+  // Chỉ dùng khi caller chắc chắn đây là master/lô/balance/transaction vừa tạo.
+  async function appendRecords(key, records) {
+    const table = TABLES[key];
+    if (!table) throw new Error(`Không xác định collection: ${key || ''}`);
+    const rows = (Array.isArray(records) ? records : [records]).filter(Boolean);
+    if (!rows.length) return true;
+    if (key === 'inventory') rows.forEach(row => { if (!row.id) row.id = inventoryBalanceId(row); });
+    markLocalChange([key]);
+    await KioStore.appendCollection(table, rows);
+    lastRefresh.set(key, Date.now());
+    writeCache(snapshotCurrentDb());
+    return true;
+  }
+
+  async function syncRecords(key, records) {
+    const table = TABLES[key];
+    if (!table) throw new Error(`Không xác định collection: ${key || ''}`);
+    const rows = (Array.isArray(records) ? records : [records]).filter(Boolean);
+    if (!rows.length) return true;
+    if (key === 'inventory') {
+      rows.forEach(row => { if (!row.id) row.id = inventoryBalanceId(row); });
+    }
+    markLocalChange([key]);
+    await KioStore.syncCollection(table, rows);
+    lastRefresh.set(key, Date.now());
+    writeCache(snapshotCurrentDb());
+    return true;
+  }
+
+  async function deleteCollectionKeys(key, recordIds) {
+    const table = TABLES[key];
+    const ids = (Array.isArray(recordIds) ? recordIds : [recordIds]).map(String).filter(Boolean);
+    if (!table || !ids.length) return true;
+    await KioStore.deleteKeys(table, ids);
+    lastRefresh.delete(key);
+    return true;
+  }
+
   function syncAll() {
     return syncCollections([...Object.keys(TABLES), 'settings']);
   }
@@ -798,11 +840,10 @@ const InventoryAPI = (() => {
   async function bootstrap() {
     if (booted) return true;
     booted = true;
-    // One-time real-server warehouse migration. It reads current KIO stock first,
-    // preserves totals, then marks its version in lenam_inventory_settings so it never
-    // redistributes again on later logins.
-    try { await ensureThreeRealWarehouseSitesAndDistribution(); }
-    catch (err) { console.error('[InventoryAPI] Không thể khởi tạo 3 kho thật:', err); }
+    // [PERFORMANCE/DATA SAFETY] Bootstrap chỉ ĐỌC dữ liệu. Không chạy migration/
+    // phân phối tồn kho tự động khi F5 hoặc mở Kho. Tác vụ cũ replaceCollection()
+    // có thể phát sinh hàng trăm krud.php và còn ghi đè tồn vừa nhập. Chuỗi nghiệp
+    // vụ hiện hữu không đổi; migration (nếu cần) phải là thao tác quản trị chủ động.
 
     // Không tự tạo/đối soát dữ liệu test Logistics khi mở web.
     // Đây là tác vụ ghi server khá nặng và không thuộc luồng tải dữ liệu thực tế.
@@ -816,8 +857,13 @@ const InventoryAPI = (() => {
     // [SERVER FIRST] Không đổ snapshot local vào UI Kho. Dữ liệu hiển thị phải
     // đến từ KIO/server của route đang mở; tránh vài chục ms đầu hiện dữ liệu cũ/demo
     // rồi mới nhảy sang dữ liệu thật. Cache chỉ còn dùng cho outbox/persistence nội bộ.
-    Object.keys(TABLES).forEach(key => { DB[key] = []; });
-    console.info('[InventoryAPI] Chờ tải dữ liệu Kho thật từ KIO/server.');
+    // PERFORMANCE: giữ master tham chiếu từ cache để màn Tồn kho có tên/ĐVT ngay,
+    // nhưng KHÔNG gọi server cho các bảng master. Route Tồn kho chỉ LIST bảng inventory.
+    // Các màn quản lý master vẫn refresh bảng tương ứng khi người dùng mở chúng.
+    Object.keys(TABLES).forEach(key => {
+      DB[key] = Array.isArray(cached?.[key]) ? cached[key] : [];
+    });
+    console.info('[InventoryAPI] Lazy mode: route nào chỉ tải collection của route đó.');
 
     const replay = normalizeKeys(pendingState?.keys || []).filter(k => k==='settings' || TABLES[k]);
     replay.forEach(k => pendingKeys.add(k));
@@ -949,6 +995,9 @@ const InventoryAPI = (() => {
     syncAll,
     syncCollections,
     deleteCollectionKey,
+    deleteCollectionKeys,
+    syncRecords,
+    appendRecords,
     flushPending,
     scheduleSync,
     scheduleCollections,

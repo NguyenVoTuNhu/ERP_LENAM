@@ -1,0 +1,18 @@
+LÊ NAM ERP - XAMPP / MYSQL
+
+1) Copy thư mục lenam vào C:\xampp\htdocs\lenam
+2) Start Apache + MySQL.
+3) Vào http://localhost/phpmyadmin, chọn database `lenam`.
+4) Import lần lượt:
+   - database/lenam_purchase.sql
+   - database/lenam_inventory.sql
+5) Test API:
+   - http://localhost/lenam/api/purchase.php?action=bootstrap
+   - http://localhost/lenam/api/inventory.php?action=bootstrap
+   Cả hai phải trả {"success":true,...}
+6) Chạy hệ thống: http://localhost/lenam/
+7) Test tạo/sửa PR, PO, nhập kho, xuất kho, chuyển kho, kiểm kê; refresh lại trang và kiểm tra dữ liệu còn giữ.
+
+Kết nối mặc định XAMPP ở api/config.php:
+DB_NAME=lenam, DB_USER=root, DB_PASS='' (rỗng).
+Nếu MySQL máy bạn có mật khẩu, chỉ sửa DB_PASS.

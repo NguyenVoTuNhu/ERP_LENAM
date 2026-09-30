@@ -90,26 +90,64 @@ const SystemAPI = (() => {
   async function loadTable(key) { return KioStore.listCollection(TABLES[key]); }
   async function syncTable(key, rows) { return KioStore.syncCollection(TABLES[key], rows); }
 
+  // Tài khoản KHÔNG nằm trong danh sách actor demo (ACTORS) — ví dụ tài khoản
+  // được tạo kèm hồ sơ nhân sự tại màn Nhân sự (mod-hr.js: DB.users.push(...)).
+  function isCustomAccount(u, defaultIds) { return !defaultIds.has(u.id); }
+
+  // Trộn danh sách actor mặc định (ACTORS) với dữ liệu users thật (server hoặc
+  // cache): actor mặc định giữ nguyên username/role/dept theo code (đây là bộ
+  // phân quyền chuẩn, không cho dữ liệu cũ ghi đè), chỉ kế thừa state/lastLogin/
+  // passwordHash đã lưu. Tài khoản KHÔNG thuộc actor mặc định (tài khoản tạo
+  // qua hồ sơ nhân sự) được giữ nguyên như trên server/cache — trước bản này,
+  // bootstrap()/refreshFromServer() luôn dựng lại DB.users CHỈ từ ACTORS nên
+  // mọi tài khoản mới tạo bị "biến mất" ngay khi F5, dù đã ghi lên KIO.
+  function mergeUsers(defaults, source) {
+    const byId = new Map((source || []).map(u => [u.id, u]));
+    const defaultIds = new Set(defaults.map(d => d.id));
+    const mergedDefaults = defaults.map(d => {
+      const old = byId.get(d.id) || {};
+      return { ...d, state: old.state || d.state, lastLogin: old.lastLogin || '', passwordHash: old.passwordHash || d.passwordHash };
+    });
+    const customUsers = (source || []).filter(u => isCustomAccount(u, defaultIds));
+    return [...mergedDefaults, ...customUsers];
+  }
+
+  function applyUsers(users, auditLogs) {
+    DB.users = users;
+    DB.roles = ROLE_DEFS.map(r => ({...r, perms:r.permissions || [], desc:r.desc || r.name, users:users.filter(u => u.roleId === r.id).length}));
+    DB.auditLogs = Array.isArray(auditLogs) ? auditLogs : [];
+  }
+
+  let bootUsersRefresh = null;
+
   async function bootstrap() {
     const defaults = await buildDefaultUsers();
     const cache = cacheRead();
 
-    // [PERFORMANCE] Auth dùng cache/actor mặc định để login tức thì. Không đọc
-    // 5 bảng KIO ở boot vì các bảng quyền rất ít thay đổi và việc đó từng chặn
-    // queue LIST của Purchase/Kho/CRM trong hàng chục giây.
-    const cachedById = new Map((cache?.users || []).map(u => [u.id, u]));
-    const users = defaults.map(d => {
-      const old = cachedById.get(d.id) || {};
-      // Không cho cache cũ ghi đè username/role/dept của bộ phân quyền mới.
-      // Chỉ giữ các dữ liệu vận hành thực sự cần bảo toàn.
-      return { ...d, state: old.state || d.state, lastLogin: old.lastLogin || '', passwordHash: old.passwordHash || d.passwordHash };
-    });
-    const roles = ROLE_DEFS;
+    // PERFORMANCE: dựng AUTH ngay từ actor mặc định + cache local. Màn Login
+    // không phải chờ list lenam_users từ server. Việc đọc server vẫn chạy nền
+    // để giữ nguyên tài khoản tạo từ Nhân sự và trạng thái khóa/mở tài khoản.
+    const cachedUsers = Array.isArray(cache?.users) ? cache.users : [];
     const auditLogs = Array.isArray(cache?.auditLogs) ? cache.auditLogs : [];
+    const initialUsers = mergeUsers(defaults, cachedUsers);
+    applyUsers(initialUsers, auditLogs);
 
-    DB.users = users;
-    DB.roles = roles.map(r => ({...r, perms:r.permissions || [], desc:r.desc || r.name, users:users.filter(u => u.roleId === r.id).length}));
-    DB.auditLogs = auditLogs;
+    bootUsersRefresh = (async () => {
+      try {
+        const remoteUsers = await KioStore.listCollection(TABLES.users);
+        const source = (Array.isArray(remoteUsers) && remoteUsers.length) ? remoteUsers : cachedUsers;
+        const users = mergeUsers(defaults, source);
+        applyUsers(users, auditLogs);
+        cacheWrite({users, roles:ROLE_DEFS, auditLogs, syncedAt:Date.now()});
+        if (!(Array.isArray(remoteUsers) && remoteUsers.length)) {
+          syncTable('users', users).catch(err => console.warn('[SystemAPI] Seed actor demo lần đầu thất bại:', err));
+        }
+        return true;
+      } catch (err) {
+        console.warn('[SystemAPI] Không đọc được lenam_users ở nền; dùng cache:', err);
+        return false;
+      }
+    })();
     return true;
   }
 
@@ -121,17 +159,13 @@ const SystemAPI = (() => {
       loadTable('users'), loadTable('roles'), loadTable('permissions'), loadTable('rolePermissions'), loadTable('auditLogs')
     ]);
 
-    const byUser = new Map((remoteUsers || []).map(x => [x.id, x]));
-    const mergedUsers = defaults.map(d => {
-      const old = byUser.get(d.id) || {};
-      return { ...d, state: old.state || d.state, lastLogin: old.lastLogin || '', passwordHash: old.passwordHash || d.passwordHash };
-    });
+    // Cùng logic trộn với bootstrap(): giữ lại tài khoản tạo qua hồ sơ nhân sự
+    // (không có trong ACTORS) thay vì chỉ dựng lại từ danh sách actor demo.
+    const mergedUsers = mergeUsers(defaults, remoteUsers || []);
     const mergedRoles = ROLE_DEFS.map(d => ({ ...d }));
     const mergedAudit = Array.isArray(remoteAudit) ? remoteAudit : [];
 
-    DB.users = mergedUsers;
-    DB.roles = mergedRoles.map(r => ({...r, perms:r.permissions || [], desc:r.desc || r.name, users:mergedUsers.filter(u => u.roleId === r.id).length}));
-    DB.auditLogs = mergedAudit;
+    applyUsers(mergedUsers, mergedAudit);
     cacheWrite({users:mergedUsers, roles:mergedRoles, auditLogs:mergedAudit, syncedAt:Date.now()});
 
     const seeds = [];
@@ -174,7 +208,15 @@ const SystemAPI = (() => {
   }
 
   async function login(username, password) {
-    const u = (DB.users || []).find(x => String(x.username).toLowerCase() === String(username).trim().toLowerCase());
+    // FAST LOGIN: tài khoản đã có trong actor/cache được xác thực ngay, không chờ
+    // request lenam_users đang chạy nền. Chỉ tài khoản chưa có local (VD tài khoản
+    // nhân sự mới tạo trên máy khác) mới cần chờ server một lần.
+    const normalizedUsername = String(username).trim().toLowerCase();
+    let u = (DB.users || []).find(x => String(x.username).toLowerCase() === normalizedUsername);
+    if (!u && bootUsersRefresh) {
+      await bootUsersRefresh;
+      u = (DB.users || []).find(x => String(x.username).toLowerCase() === normalizedUsername);
+    }
     if (!u || u.state !== 'active') return {ok:false,message:'Tài khoản không tồn tại hoặc đã bị khóa.'};
     const hash = await sha256(password);
     if (hash !== u.passwordHash) return {ok:false,message:'Mật khẩu không đúng.'};
@@ -184,7 +226,11 @@ const SystemAPI = (() => {
     // Session có hiệu lực ngay. Không sync toàn bộ lenam_users mỗi lần login
     // vì thao tác đó phải đọc lại cả bảng và từng làm chậm các request nghiệp vụ.
     cacheWrite({users:DB.users||[], roles:DB.roles||[], auditLogs:DB.auditLogs||[]});
-    audit({module:'AUTH',entityType:'USER',entityId:u.id,action:'LOGIN',description:`${u.fullName} đăng nhập hệ thống`}).catch(() => {});
+    // Nhật ký đăng nhập vẫn được lưu, nhưng tuyệt đối không chen KRUD vào đường
+    // chuyển màn hình ngay sau login. Ghi khi browser rảnh để UI/route ưu tiên trước.
+    const writeLoginAudit = () => audit({module:'AUTH',entityType:'USER',entityId:u.id,action:'LOGIN',description:`${u.fullName} đăng nhập hệ thống`}).catch(() => {});
+    if (typeof requestIdleCallback === 'function') requestIdleCallback(writeLoginAudit, {timeout:8000});
+    else setTimeout(writeLoginAudit, 3000);
     return {ok:true,user:u};
   }
 
@@ -252,6 +298,7 @@ const SystemAPI = (() => {
 
   function showLogin() {
     return new Promise(resolve => {
+      document.getElementById('startupMask')?.remove();
       document.querySelector('.app')?.classList.add('hidden');
       let host=document.getElementById('authLoginHost');
       if (!host) { host=document.createElement('div'); host.id='authLoginHost'; document.body.appendChild(host); }
@@ -284,7 +331,9 @@ const SystemAPI = (() => {
         const res=await login(document.getElementById('authUsername').value,document.getElementById('authPassword').value);
         btn.disabled=false;
         if (!res.ok) { document.getElementById('authError').textContent=res.message; return; }
-        host.remove(); document.querySelector('.app')?.classList.remove('hidden'); resolve(true);
+        // Không hiện app shell tại đây. boot() sẽ render route hoàn chỉnh trước rồi
+        // mới chuyển Login -> ERP, tránh flash sidebar/header + vùng trắng.
+        host.remove(); resolve(true);
       });
       setTimeout(()=>document.getElementById('authUsername')?.focus(),0);
     });
@@ -292,5 +341,11 @@ const SystemAPI = (() => {
 
   async function saveUsers() { await syncTable('users', DB.users || []); cacheWrite({users:DB.users||[],roles:DB.roles||[],auditLogs:DB.auditLogs||[],syncedAt:Date.now()}); return true; }
 
-  return {bootstrap,refreshFromServer,restoreSession,showLogin,login,logout,flushBusinessDataBeforeRoleSwitch,audit,auditFor,currentUser,saveUsers,ROLE_DEFS,ACTORS,SESSION_KEY};
+  // Dùng chung đúng 1 thuật toán hash với login(): mọi nơi tạo tài khoản mới
+  // (VD: mod-hr.js khi thêm nhân sự kèm tài khoản) PHẢI hash qua đây để ghi vào
+  // `passwordHash` — ghi thẳng chuỗi thô vào DB.users sẽ khiến tài khoản không
+  // bao giờ đăng nhập được, vì login() luôn so sánh bằng SHA-256.
+  const hashPassword = sha256;
+
+  return {bootstrap,refreshFromServer,restoreSession,showLogin,login,logout,flushBusinessDataBeforeRoleSwitch,audit,auditFor,currentUser,saveUsers,hashPassword,ROLE_DEFS,ACTORS,SESSION_KEY};
 })();

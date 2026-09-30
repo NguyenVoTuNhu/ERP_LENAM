@@ -195,10 +195,12 @@ function restaurantOrderPaymentLabel(value){
 }
 function restaurantBankAccount(id){ return (DB.bankAccounts||[]).find(x=>String(x.id)===String(id)); }
 function restaurantEligibleBankAccounts(storeId){
-  // Tài khoản nhận tiền được quản lý tập trung tại Kế toán – Tài chính.
-  // POS chỉ lấy tài khoản Công ty hoặc tài khoản gắn đúng chi nhánh/cửa hàng của đơn.
-  const rows=(DB.bankAccounts||[]).filter(x=>x.active!==false && (x.scopeType==='COMPANY' || (x.scopeType==='STORE'&&String(x.storeId)===String(storeId))));
-  return rows.sort((a,b)=>Number(b.scopeType==='STORE')-Number(a.scopeType==='STORE') || Number(b.isDefault)-Number(a.isDefault) || String(a.bankName||a.name||'').localeCompare(String(b.bankName||b.name||''),'vi'));
+  // Thanh toán tại cửa hàng phải ưu tiên đúng tài khoản đã gắn với cửa hàng của đơn.
+  // Chỉ fallback về tài khoản Công ty khi cửa hàng CHƯA được khai báo tài khoản riêng.
+  const active=(DB.bankAccounts||[]).filter(x=>x.active!==false);
+  const storeRows=active.filter(x=>x.scopeType==='STORE' && String(x.storeId||'')===String(storeId||''));
+  const rows=storeRows.length ? storeRows : active.filter(x=>x.scopeType==='COMPANY');
+  return rows.sort((a,b)=>Number(b.isDefault)-Number(a.isDefault) || String(a.bankName||a.name||'').localeCompare(String(b.bankName||b.name||''),'vi'));
 }
 function restaurantBankScopeLabel(a){
   if(a?.scopeType==='STORE') return restaurantStore(a.storeId)?.name||a.storeId||'Chi nhánh';

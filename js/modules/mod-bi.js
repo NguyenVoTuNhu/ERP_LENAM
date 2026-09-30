@@ -351,7 +351,6 @@ function biFinanceView() {
 
   return `
     ${pageHead('Tài chính', 'Doanh thu, lợi nhuận, dòng tiền và công nợ — cập nhật theo dữ liệu hệ thống hiện có', periodToggle)}
-    ${moduleTabs(biTabsConfig(), 'finance')}
     ${kpis}
     <div class="grid g-21" style="margin-bottom:16px">
       <div class="card">
@@ -518,7 +517,6 @@ function biWarehouseView() {
 
   return `
     ${pageHead('Kho', 'Giá trị tồn kho, hàng cận hạn và hàng chậm luân chuyển — cập nhật theo dữ liệu hệ thống hiện có', nearDaysToggle)}
-    ${moduleTabs(biTabsConfig(), 'warehouse')}
     ${kpis}
     <div class="grid g-21" style="margin-bottom:16px">
       <div class="card">
@@ -660,7 +658,6 @@ function biProductionView() {
 
   return `
     ${pageHead('Sản xuất', 'Sản lượng, hao hụt và hiệu suất dây chuyền — cập nhật theo dữ liệu hệ thống hiện có')}
-    ${moduleTabs(biTabsConfig(), 'production')}
     ${kpis}
     <div class="grid g-21" style="margin-bottom:16px">
       <div class="card">
@@ -812,7 +809,6 @@ function biSalesView() {
 
   return `
     ${pageHead('Kinh doanh', 'Top khách hàng, sản phẩm và khu vực — cập nhật theo dữ liệu hệ thống hiện có', periodToggle)}
-    ${moduleTabs(biTabsConfig(), 'sales')}
     ${kpis}
     <div class="grid g-21" style="margin-bottom:16px">
       <div class="card">
@@ -854,7 +850,7 @@ function biSalesView() {
  * -------------------------------------------------------------------------*/
 /** Giá vốn nguyên liệu cho 1 phần món, tính từ recipe.items (BOM của món ăn) */
 function biRecipeUnitCost(recipe) {
-  return (recipe.items || []).reduce((s, it) => s + Number(it.quantity || 0) * Number(Q.material(it.materialId)?.price || 0), 0);
+  return (recipe.items || []).reduce((s, it) => { const item=Q.material(it.materialId)||Q.product(it.materialId); return s + Number(it.quantity || 0) * Number(item?.price || item?.cost || 0); }, 0);
 }
 
 /** Chi phí nhân công ƯỚC TÍNH cho các đơn của 1 cửa hàng: hệ thống demo chưa có
@@ -876,7 +872,8 @@ function biLaborCostEstimate(storeOrders) {
 
 function biRestaurantData() {
   const stores = DB.stores || [];
-  const orders = DB.posOrders || [];
+  // Doanh thu BI chỉ ghi nhận đơn đã thanh toán thật trên server.
+  const orders = (DB.posOrders || []).filter(o => o.status === 'PAID');
 
   const perStore = stores.map((store) => {
     const storeOrders = orders.filter((o) => o.storeId === store.id);
@@ -942,7 +939,7 @@ function biRestaurantView() {
     </div>
     <div class="alert info" style="margin-bottom:16px;font-size:12.3px">
       <i class="fa-solid fa-circle-info"></i>
-      <span>Food Cost tính trực tiếp từ định mức nguyên liệu (recipe) của từng món. Labor Cost hệ thống demo chưa có bảng chấm công theo cửa hàng, nên được <b>ước tính</b> bằng lương tháng của nhân viên (÷ 26 ngày công) nhân với số ngày nhân viên đó có phát sinh bán hàng tại cửa hàng — không phải số liệu chấm công thực tế.</span>
+      <span>Doanh thu chỉ lấy đơn đã thanh toán trên server. Food Cost tính trực tiếp từ định mức nguyên liệu/thành phẩm và đơn giá hiện tại. Labor Cost hiện chưa có bảng chấm công theo cửa hàng, nên được <b>ước tính</b> bằng lương tháng của nhân viên (÷ 26 ngày công) nhân với số ngày nhân viên đó có phát sinh bán hàng tại cửa hàng — không phải số liệu chấm công thực tế.</span>
     </div>`;
 
   const storeRows = d.perStore.map((x) => `
@@ -967,11 +964,10 @@ function biRestaurantView() {
 
   return `
     ${pageHead('Nhà hàng', 'Doanh thu từng cửa hàng, Food Cost, Labor Cost và Prime Cost — cập nhật theo dữ liệu hệ thống hiện có')}
-    ${moduleTabs(biTabsConfig(), 'restaurant')}
     ${kpis}
     <div class="grid g-21" style="margin-bottom:16px">
       <div class="card">
-        <div class="card-head"><div><h3>Doanh thu theo cửa hàng</h3><p>Tổng hợp từ toàn bộ phiếu bán hàng POS</p></div></div>
+        <div class="card-head"><div><h3>Doanh thu theo cửa hàng</h3><p>Tổng hợp từ các đơn đã thanh toán trên server</p></div></div>
         <div class="card-body"><div class="chart-box"><canvas id="biStoreRevenueChart"></canvas></div></div>
       </div>
       <div class="card">
@@ -1085,7 +1081,6 @@ function biHRView() {
 
   return `
     ${pageHead('Nhân sự', 'KPI, năng suất lao động và chi phí nhân sự — cập nhật theo dữ liệu hệ thống hiện có')}
-    ${moduleTabs(biTabsConfig(), 'hr')}
     ${kpis}
     <div class="grid g-21" style="margin-bottom:16px">
       <div class="card">

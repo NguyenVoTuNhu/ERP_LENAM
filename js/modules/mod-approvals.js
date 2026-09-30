@@ -127,6 +127,78 @@ function approvalEnsurePrLevels(req, pr) {
   return changed;
 }
 
+
+/* Tự chữa dữ liệu PR cũ bị lệch giữa Purchase và Approvals.
+ * Nguồn sự thật nghiệp vụ vẫn là PR: nếu PR đang Chờ duyệt thì BẮT BUỘC phải
+ * có đúng một approval request PENDING tương ứng. Hàm này chỉ bổ sung liên kết
+ * bị thiếu/sửa metadata cấp duyệt; KHÔNG đổi trạng thái PR và KHÔNG thay đổi
+ * chuỗi nghiệp vụ PR -> duyệt -> báo giá -> PO. */
+async function approvalReconcilePendingPrs({ persist = true } = {}) {
+  const pendingStatuses = new Set(['mh_cho_duyet', 'PENDING_APPROVAL']);
+  const prs = (DB.purchases || []).filter(pr => pr && pendingStatuses.has(pr.status));
+  if (!prs.length) return { created: 0, repaired: 0 };
+
+  let created = 0;
+  let repaired = 0;
+  const now = new Date();
+  const wf = approvalWorkflowOf('PR');
+  if (!wf) return { created, repaired };
+
+  for (const pr of prs) {
+    let req = (DB.approvalRequests || []).find(r => r.docType === 'PR' && r.docId === pr.id && r.status === 'PENDING');
+    const amount = approvalPrAmount(pr);
+
+    if (!req) {
+      const levels = approvalActiveLevels(wf, amount).map(l => ({
+        level: l.level, role: l.role, label: l.label, status: 'PENDING',
+        approverId: '', approverName: '', time: '', note: '', signature: '',
+      }));
+      if (!levels.length) continue;
+      const due = new Date(now.getTime() + Number(wf.slaHours || 24) * 3600000);
+      req = {
+        id: nextCode('DUYET-2026-', DB.approvalRequests),
+        workflowId: wf.id, docType: 'PR', docId: pr.id,
+        title: `Đề nghị mua hàng ${pr.id}`,
+        amount,
+        requestedBy: pr.requestedBy || pr.createdBy || pr.employeeId || '',
+        requestedByName: pr.requestedByName || pr.createdByName || pr.employeeName || '',
+        requestedAt: pr.requestedAt || pr.createdAt || now.toISOString(),
+        status: 'PENDING', currentLevel: levels[0].level, levels,
+        dueAt: due.toISOString(), note: pr.reason || '',
+        repairedFromPurchase: true,
+      };
+      DB.approvalRequests.unshift(req);
+      created++;
+    } else {
+      const before = JSON.stringify({ amount:req.amount, levels:req.levels, currentLevel:req.currentLevel });
+      approvalEnsurePrLevels(req, pr);
+      const nextPending = (req.levels || []).find(l => l.status === 'PENDING');
+      if (nextPending) req.currentLevel = nextPending.level;
+      if (before !== JSON.stringify({ amount:req.amount, levels:req.levels, currentLevel:req.currentLevel })) repaired++;
+    }
+
+    const lvl = (req.levels || []).find(l => Number(l.level) === Number(req.currentLevel)) || (req.levels || []).find(l => l.status === 'PENDING');
+    if (pr.approvalRequestId !== req.id || Number(pr.approvalCurrentLevel || 0) !== Number(lvl?.level || 0) || pr.approvalCurrentRole !== (lvl?.role || '')) repaired++;
+    pr.approvalRequestId = req.id;
+    pr.approvalCurrentLevel = lvl?.level || '';
+    pr.approvalCurrentRole = lvl?.role || '';
+    pr.approvalCurrentLabel = lvl?.label || (lvl?.role ? approvalRoleName(lvl.role) : '');
+  }
+
+  if (persist && (created || repaired)) {
+    // Ghi cả hai phía ngay trong cùng lượt sửa để F5/đổi tài khoản không làm
+    // mất liên kết vừa phục hồi. Không tạo audit giả cho dữ liệu lịch sử.
+    const jobs = [];
+    if (typeof ApprovalsAPI !== 'undefined' && ApprovalsAPI.syncCollections) jobs.push(ApprovalsAPI.syncCollections(['requests']));
+    if (typeof PurchaseAPI !== 'undefined' && PurchaseAPI.syncCollections) jobs.push(PurchaseAPI.syncCollections(['purchases']));
+    const results = await Promise.allSettled(jobs);
+    const failed = results.find(r => r.status === 'rejected');
+    if (failed) console.warn('[Approvals] Phục hồi liên kết PR/Approval đã cập nhật local nhưng có nguồn KIO chưa lưu được:', failed.reason);
+    else console.info(`[Approvals] Đã phục hồi PR chờ duyệt: tạo ${created} approval request, sửa ${repaired} liên kết/cấp duyệt.`);
+  }
+  return { created, repaired };
+}
+
 async function persistApprovalServer(keys = ['approvalRequests','approvalLogs']) {
   if (typeof PurchaseAPI === 'undefined' || typeof PurchaseAPI.syncCollections !== 'function') return true;
   await PurchaseAPI.syncCollections(keys);
@@ -147,7 +219,7 @@ function approvalMySignature() {
   return (DB.eSignatures || []).find((s) => s.userId === uid);
 }
 function approvalLog(requestId, docType, docId, level, action, note, extra = {}) {
-  DB.approvalLogs.unshift({
+  const entry = {
     id: nextCode('NKPD-', DB.approvalLogs),
     requestId, docType, docId, level, action,
     actorId: DB.currentUser?.userId || DB.currentUser?.id || '',
@@ -157,7 +229,22 @@ function approvalLog(requestId, docType, docId, level, action, note, extra = {})
     signature: extra.signature || '',
     roleId: (Auth.currentRole() || {}).id || '',
     roleName: (Auth.currentRole() || {}).name || '',
-  });
+  };
+  DB.approvalLogs.unshift(entry);
+
+  // Persistence thật: nhật ký phê duyệt là append-only nên ghi thẳng record
+  // mới lên KIO, không cần đồng bộ lại toàn bộ collection.
+  if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.appendLogs([entry]).catch(() => {});
+
+  // Đồng thời đưa vào nhật ký chung của hệ thống (giống Purchases/CRM) để
+  // Quản trị viên xem được mọi hành động phê duyệt trong 1 màn Audit Log.
+  if (typeof SystemAPI !== 'undefined') {
+    SystemAPI.audit({
+      module: 'APPROVALS', entityType: 'APPROVAL_REQUEST', entityId: requestId,
+      action, description: `${entry.actorName || 'Người dùng'} ${approvalActionLabel(action)} — ${docId || requestId}${note ? ': ' + note : ''}`,
+      newData: { docType, docId, level, action },
+    }).catch(() => {});
+  }
 }
 function approvalIsOverdue(req) {
   return req.status === 'PENDING' && new Date() > new Date(req.dueAt);
@@ -218,6 +305,7 @@ const ApprovalEngine = {
     };
     DB.approvalRequests.unshift(req);
     approvalLog(req.id, docType, req.docId, levels[0].level, 'CREATE', `Tạo yêu cầu phê duyệt${req.amount ? ' — ' + fmtVND(req.amount) : ''}`);
+    if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.scheduleCollections(['requests']);
     return req;
   },
 
@@ -234,7 +322,8 @@ const ApprovalEngine = {
     if (!lvl) return false;
     const role = Auth.currentRole();
     if (!role) return false;
-    return role.id === lvl.role || role.id === 'ROLE_ADMIN';
+    // Ban giám đốc có quyền duyệt thay cấp 1 và vẫn tiếp tục duyệt cấp 2 nếu quy trình yêu cầu.
+    return role.id === lvl.role || role.id === 'ROLE_ADMIN' || role.id === 'ROLE_DIRECTOR';
   },
 
   approve(requestId, { note = '', signature = '' } = {}) {
@@ -273,6 +362,7 @@ const ApprovalEngine = {
       try { this.handlers[req.docType]?.onApproved?.(req); }
       catch (err) { console.error('[ApprovalEngine] onApproved lỗi:', err); Toast.err('Duyệt xong nhưng áp dụng thất bại', String(err?.message || err)); }
     }
+    if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.scheduleCollections(['requests']);
     return true;
   },
 
@@ -293,6 +383,7 @@ const ApprovalEngine = {
     Toast.warn('Đã từ chối yêu cầu', req.title);
     try { this.handlers[req.docType]?.onRejected?.(req); }
     catch (err) { console.error('[ApprovalEngine] onRejected lỗi:', err); }
+    if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.scheduleCollections(['requests']);
     return true;
   },
 
@@ -302,6 +393,7 @@ const ApprovalEngine = {
     req.status = 'CANCELLED';
     req.completedAt = new Date().toISOString();
     approvalLog(req.id, req.docType, req.docId, req.currentLevel, 'CANCEL', reason || '');
+    if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.scheduleCollections(['requests']);
     return true;
   },
 };
@@ -455,27 +547,45 @@ function approvalsWorkflowsView() {
 
 function approvalsLogsView() {
   const f = F('approvalsLogs', { q: '', docType: '' });
-  let list = DB.approvalLogs.filter((l) => !f.docType || l.docType === f.docType);
+  // Một yêu cầu duyệt chỉ hiển thị một dòng. Chi tiết các cấp/hành động xem bằng nút mắt.
+  const groups = new Map();
+  (DB.approvalLogs || []).forEach((l) => {
+    const key = l.requestId || `${l.docType}:${l.docId}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(l);
+  });
+  let list = [...groups.entries()].map(([key, logs]) => {
+    logs.sort((a,b) => new Date(b.time || 0) - new Date(a.time || 0));
+    const latest = logs[0] || {};
+    const req = (DB.approvalRequests || []).find(r => r.id === latest.requestId);
+    const approvers = [...new Set(logs.filter(x => x.action === 'APPROVE').map(x => x.actorName).filter(Boolean))];
+    return { key, latest, req, logs, approvers };
+  });
+  if (f.docType) list = list.filter(x => x.latest.docType === f.docType);
   if (f.q) {
     const q = f.q.toLowerCase();
-    list = list.filter((l) => (l.docId + ' ' + l.actorName + ' ' + l.note).toLowerCase().includes(q));
+    list = list.filter(x => [x.latest.docId, x.latest.requestId, x.req?.title, ...x.approvers, ...x.logs.map(l=>l.note)].join(' ').toLowerCase().includes(q));
   }
+  list.sort((a,b) => new Date(b.latest.time || 0) - new Date(a.latest.time || 0));
   const pg = paged(list, 'approvalsLogs', 15);
-  const rows = pg.items.map((l) => `<tr>
-    <td class="num">${fmtDateTimeVN(l.time)}</td>
-    <td>${cell2(esc(l.actorName || '—'), `${approvalActionLabel(l.action)}${l.roleName ? ' · ' + esc(l.roleName) : ''}`)}</td>
-    <td>${approvalDocTypeChip(l.docType)}</td>
-    <td>${l.requestId ? `<span class="code" data-act="approval-view" data-id="${esc(l.requestId)}" style="cursor:pointer">${esc(l.requestId)}</span>` : '—'}${l.docId ? `<div class="cell-sub">${esc(l.docId)}</div>` : ''}</td>
-    <td>${esc(l.note || '—')}</td>
-    <td class="right">${rowActions([{act:'approval-log-view',data:`data-id="${esc(l.id)}"`,icon:'fa-eye',title:'Xem chi tiết nhật ký'}])}</td>
-  </tr>`);
+  const rows = pg.items.map((x) => {
+    const l=x.latest, req=x.req;
+    return `<tr>
+      <td class="num">${fmtDateTimeVN(req?.requestedAt || x.logs[x.logs.length-1]?.time || l.time)}</td>
+      <td>${cell2(esc(req?.requestedByName || x.logs[x.logs.length-1]?.actorName || '—'), x.approvers.length ? `Đã duyệt: ${esc(x.approvers.join(', '))}` : approvalActionLabel(l.action))}</td>
+      <td>${approvalDocTypeChip(l.docType)}</td>
+      <td>${l.requestId ? `<span class="code">${esc(l.requestId)}</span>` : '—'}${l.docId ? `<div class="cell-sub">${esc(l.docId)}</div>` : ''}</td>
+      <td>${req ? approvalStatusBadge(req.status) : esc(l.note || '—')}</td>
+      <td class="right">${l.requestId ? rowActions([{act:'approval-view',data:`data-id="${esc(l.requestId)}"`,icon:'fa-eye',title:'Xem chi tiết phê duyệt'}]) : ''}</td>
+    </tr>`;
+  });
   return `<div class="card">
     <div class="toolbar">
       ${searchBox('approvalsLogs', 'Tìm theo mã chứng từ, người thực hiện, ghi chú…')}
       ${selectFilter('approvalsLogs', 'docType', APPROVAL_DOC_TYPE_LIST.map((dt) => [dt, APPROVAL_DOC_TYPES[dt].label]), 'Tất cả loại chứng từ')}
     </div>
-    ${tableShell([{ t: 'Thời gian', w: '160px' }, { t: 'Người thực hiện / Hành động' }, { t: 'Loại chứng từ' }, { t: 'Yêu cầu / Tham chiếu' }, { t: 'Ghi chú' }, {t:'',w:'70px'}], rows, { emptyTitle: 'Chưa có nhật ký phê duyệt' })}
-    ${pagiHTML('approvalsLogs', pg, 'dòng nhật ký')}
+    ${tableShell([{ t: 'Thời gian tạo', w: '160px' }, { t: 'Người đề nghị / Người duyệt' }, { t: 'Loại chứng từ' }, { t: 'Yêu cầu / Tham chiếu' }, { t: 'Trạng thái' }, {t:'',w:'70px'}], rows, { emptyTitle: 'Chưa có nhật ký phê duyệt' })}
+    ${pagiHTML('approvalsLogs', pg, 'yêu cầu phê duyệt')}
   </div>`;
 }
 
@@ -797,6 +907,14 @@ Object.assign(Actions, {
     if (!levels.length) { Toast.err('Thiếu cấp duyệt', 'Quy trình phải có ít nhất một cấp phê duyệt.'); return; }
     w.slaHours = sla > 0 ? sla : 24;
     w.levels = levels;
+	if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.scheduleCollections(['workflows']);
+    if (typeof SystemAPI !== 'undefined') {
+      SystemAPI.audit({
+        module: 'APPROVALS', entityType: 'APPROVAL_WORKFLOW', entityId: w.id, action: 'UPDATE',
+        description: `${DB.currentUser?.name || 'Người dùng'} cập nhật quy trình phê duyệt ${(APPROVAL_DOC_TYPES[w.docType] || {}).label || w.docType}`,
+        newData: { slaHours: w.slaHours, levels: w.levels },
+      }).catch(() => {});
+    }
     Modal.close(); render();
     Toast.ok('Đã lưu quy trình phê duyệt', `${(APPROVAL_DOC_TYPES[w.docType] || {}).label || w.docType}`);
   },
@@ -808,8 +926,16 @@ Object.assign(Actions, {
     let sig = (DB.eSignatures || []).find((s) => s.userId === uid);
     const code = approvalDjb2(fullName + uid + Date.now());
     const preview = approvalSignText(fullName);
+    const isNew = !sig;
     if (sig) { Object.assign(sig, { fullName, code, preview }); }
     else { sig = { userId: uid, fullName, code, preview, createdAt: new Date().toISOString() }; DB.eSignatures.unshift(sig); }
+    if (typeof ApprovalsAPI !== 'undefined') ApprovalsAPI.scheduleCollections(['signatures']);
+    if (typeof SystemAPI !== 'undefined') {
+      SystemAPI.audit({
+        module: 'APPROVALS', entityType: 'E_SIGNATURE', entityId: uid, action: isNew ? 'CREATE' : 'UPDATE',
+        description: `${DB.currentUser?.name || 'Người dùng'} ${isNew ? 'đăng ký' : 'cập nhật'} chữ ký điện tử: ${fullName}`,
+      }).catch(() => {});
+    }
     render();
     Toast.ok('Đã lưu chữ ký điện tử', fullName);
   },
