@@ -652,6 +652,7 @@ Views.approvals = function approvalsMainView() {
     signature: approvalsSignatureView,
   }[tab] || approvalsDashboardView;
   return `${pageHead('Quy trình phê duyệt', 'Phân quyền theo cấp · Nhật ký phê duyệt · Chữ ký điện tử · Cảnh báo quá hạn', approvalsHeadActions())}
+    ${moduleTabs(APPROVALS_TABS, tab)}
     ${bodyFn()}`;
 };
 

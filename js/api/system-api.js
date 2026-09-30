@@ -162,9 +162,13 @@ const SystemAPI = (() => {
     // Cùng logic trộn với bootstrap(): giữ lại tài khoản tạo qua hồ sơ nhân sự
     // (không có trong ACTORS) thay vì chỉ dựng lại từ danh sách actor demo.
     const mergedUsers = mergeUsers(defaults, remoteUsers || []);
+    // Cùng logic trộn với bootstrap(): giữ lại tài khoản tạo qua hồ sơ nhân sự
+    // (không có trong ACTORS) thay vì chỉ dựng lại từ danh sách actor demo.
+    const mergedUsers = mergeUsers(defaults, remoteUsers || []);
     const mergedRoles = ROLE_DEFS.map(d => ({ ...d }));
     const mergedAudit = Array.isArray(remoteAudit) ? remoteAudit : [];
 
+    applyUsers(mergedUsers, mergedAudit);
     applyUsers(mergedUsers, mergedAudit);
     cacheWrite({users:mergedUsers, roles:mergedRoles, auditLogs:mergedAudit, syncedAt:Date.now()});
 
