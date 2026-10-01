@@ -1438,51 +1438,6 @@ function openPRForm(materialId) {
 
 
       <!-- ===================================================
-           NGÂN SÁCH
-      ==================================================== -->
-
-      <div
-        style="
-          display:flex;
-          align-items:center;
-          justify-content:space-between;
-          background:var(--surface-2);
-          border:1px solid var(--border);
-          border-radius:var(--r);
-          padding:10px 14px;
-          margin-bottom:14px;
-          font-size:12.4px
-        "
-      >
-
-        <span>
-
-          Ngân sách còn lại:
-
-          <b
-            class="num"
-            style="color:var(--green)"
-          >
-            ${fmtVND(deptBudget.remaining)}
-          </b>
-
-          / Total
-          ${fmtShort(deptBudget.totalBudget)}
-
-        </span>
-
-        <span class="chip t-blue">
-
-          <i class="fa-solid fa-piggy-bank"></i>
-
-          Trong hạn mức
-
-        </span>
-
-      </div>
-
-
-      <!-- ===================================================
            DANH SÁCH NGUYÊN LIỆU
       ==================================================== -->
 

@@ -200,8 +200,23 @@ async function approvalReconcilePendingPrs({ persist = true } = {}) {
 }
 
 async function persistApprovalServer(keys = ['approvalRequests','approvalLogs']) {
-  if (typeof PurchaseAPI === 'undefined' || typeof PurchaseAPI.syncCollections !== 'function') return true;
-  await PurchaseAPI.syncCollections(keys);
+  const list = Array.isArray(keys) ? keys : [keys];
+  const approvalMap = {
+    approvalRequests: 'requests',
+    approvalLogs: 'logs',
+    approvalWorkflows: 'workflows',
+    eSignatures: 'signatures',
+  };
+  const approvalKeys = [...new Set(list.map(k => approvalMap[k]).filter(Boolean))];
+  const purchaseKeys = [...new Set(list.filter(k => k === 'purchases'))];
+  const jobs = [];
+  if (approvalKeys.length && typeof ApprovalsAPI !== 'undefined' && typeof ApprovalsAPI.syncCollections === 'function') {
+    jobs.push(ApprovalsAPI.syncCollections(approvalKeys));
+  }
+  if (purchaseKeys.length && typeof PurchaseAPI !== 'undefined' && typeof PurchaseAPI.syncCollections === 'function') {
+    jobs.push(PurchaseAPI.syncCollections(purchaseKeys));
+  }
+  if (jobs.length) await Promise.all(jobs);
   return true;
 }
 function approvalDjb2(str) {
@@ -398,6 +413,33 @@ const ApprovalEngine = {
   },
 };
 
+/* Đăng ký PR vào hàng chờ phê duyệt NGAY tại thời điểm tạo PR.
+ * Không chờ người dùng mở menu Phê duyệt mới reconcile, nhờ vậy badge đổi số
+ * ngay trong cùng lần click "Gửi đề nghị mua". */
+function approvalRegisterPendingPrNow(pr) {
+  if (!pr || pr.status !== 'mh_cho_duyet') return null;
+  let req = ApprovalEngine.pendingFor('PR', pr.id);
+  if (!req) {
+    req = ApprovalEngine.create({
+      docType: 'PR', docId: pr.id, title: `Đề nghị mua hàng ${pr.id}`,
+      amount: approvalPrAmount(pr), note: pr.reason || ''
+    });
+  } else {
+    approvalEnsurePrLevels(req, pr);
+  }
+  if (!req) return null;
+  const lvl = ApprovalEngine.currentLevelOf(req) || (req.levels || []).find(l => l.status === 'PENDING');
+  pr.approvalRequestId = req.id;
+  pr.approvalCurrentLevel = lvl?.level || '';
+  pr.approvalCurrentRole = lvl?.role || '';
+  pr.approvalCurrentLabel = lvl?.label || (lvl?.role ? approvalRoleName(lvl.role) : '');
+  // schedule 0ms: ghi server ngay nhưng không chặn UI; state local đã có request nên badge tăng tức thì.
+  try { ApprovalsAPI?.scheduleCollections?.(['requests'], 0); } catch (_) {}
+  try { PurchaseAPI?.scheduleCollections?.(['purchases'], 0); } catch (_) {}
+  try { window.SidebarBadges?.markReady?.('approvals'); } catch (_) {}
+  return req;
+}
+
 /* Gắn đếm "đang chờ duyệt" + cảnh báo quá hạn lên sidebar (mục Approvals đã có sẵn trong NAV) */
 (function attachApprovalsNavCount() {
   const item = (typeof NAV !== 'undefined' ? NAV : []).flatMap((g) => g.items).find((i) => i.id === 'approvals');
@@ -414,7 +456,6 @@ const APPROVALS_TABS = [
   { id: 'approvals', label: 'Tổng quan', tab: 'dashboard' },
   { id: 'approvals', label: 'Việc cần duyệt', tab: 'pending' },
   { id: 'approvals', label: 'Quy trình phê duyệt', tab: 'workflows' },
-  { id: 'approvals', label: 'Nhật ký phê duyệt', tab: 'logs' },
   { id: 'approvals', label: 'Cảnh báo quá hạn', tab: 'overdue' },
   { id: 'approvals', label: 'Chữ ký điện tử', tab: 'signature' },
 ];
@@ -483,24 +524,113 @@ function fmtDateTimeVN(iso) {
   return d.toLocaleString('vi-VN');
 }
 
-function approvalsPendingView() {
-  const f = F('approvals', { q: '', docType: '', status: 'PENDING' });
-  let list = DB.approvalRequests.filter((r) => (!f.status || r.status === f.status) && (!f.docType || r.docType === f.docType));
-  if (f.q) {
-    const q = f.q.toLowerCase();
-    list = list.filter((r) => (r.title + ' ' + r.docId + ' ' + r.requestedByName).toLowerCase().includes(q));
+function approvalDateYMDLocal(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value).slice(0, 10);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+}
+function approvalTodayYMD() {
+  if (typeof currentDateYMD === 'function') return currentDateYMD();
+  return approvalDateYMDLocal(new Date());
+}
+
+/* Lịch sử phê duyệt được gộp ngay trong "Việc cần duyệt".
+ * Mặc định chỉ hiển thị ngày hiện tại; lịch sử ngày cũ vẫn được giữ nguyên
+ * trên KIO và chỉ xuất hiện khi người dùng chọn khoảng ngày tương ứng. */
+function approvalsInlineHistoryView() {
+  const today = approvalTodayYMD();
+  const f = F('approvalsHistory', { q: '', docType: '', from: today, to: today });
+  // Sau khi state cũ đã tồn tại nhưng chưa có from/to, vẫn mặc định về hôm nay.
+  if (!f.from && !f.to && !f.__dateInitialized) {
+    f.from = today; f.to = today; f.__dateInitialized = true;
   }
-  list.sort((a, b) => (approvalIsOverdue(b) - approvalIsOverdue(a)) || b.requestedAt.localeCompare(a.requestedAt));
+  let list = [...(DB.approvalLogs || [])];
+  if (f.docType) list = list.filter(l => l.docType === f.docType);
+  if (f.from) list = list.filter(l => approvalDateYMDLocal(l.time) >= f.from);
+  if (f.to) list = list.filter(l => approvalDateYMDLocal(l.time) <= f.to);
+  if (f.q) {
+    const q = String(f.q).toLowerCase();
+    list = list.filter(l => [l.requestId,l.docId,l.actorName,l.roleName,l.note,approvalActionLabel(l.action)]
+      .join(' ').toLowerCase().includes(q));
+  }
+  list.sort((a,b) => new Date(b.time || 0) - new Date(a.time || 0));
+  const pg = paged(list, 'approvalsHistory', 15);
+  const rows = pg.items.map(l => {
+    const req = (DB.approvalRequests || []).find(r => r.id === l.requestId);
+    return `<tr>
+      <td class="num">${fmtDateTimeVN(l.time)}</td>
+      <td>${cell2(esc(l.actorName || '—'), esc(l.roleName || approvalRoleName(l.roleId) || '—'))}</td>
+      <td>${approvalDocTypeChip(l.docType)}</td>
+      <td>${cell2(l.requestId ? `<span class="code">${esc(l.requestId)}</span>` : '—', l.docId ? `Tham chiếu: <span class="code">${esc(l.docId)}</span>` : '')}</td>
+      <td>${cell2(esc(approvalActionLabel(l.action)), esc(l.note || ''))}</td>
+      <td>${req ? approvalStatusBadge(req.status) : '—'}</td>
+      <td class="right">${l.requestId ? rowActions([{act:'approval-view',data:`data-id="${esc(l.requestId)}"`,icon:'fa-eye',title:'Xem chi tiết phê duyệt'}]) : ''}</td>
+    </tr>`;
+  });
+  return `<div class="card" style="margin-top:16px">
+    <div class="card-head"><div><h3>Lịch sử phê duyệt</h3><p>Mặc định hiển thị hoạt động ngày hiện tại; chọn ngày khác để xem lịch sử cũ.</p></div><span class="chip"><i class="fa-regular fa-calendar"></i>${esc(f.from === today && f.to === today ? 'Hôm nay' : 'Đã lọc theo ngày')}</span></div>
+    <div class="toolbar">
+      ${searchBox('approvalsHistory', 'Tìm mã yêu cầu, chứng từ, người duyệt…')}
+      ${selectFilter('approvalsHistory', 'docType', APPROVAL_DOC_TYPE_LIST.map(dt => [dt, APPROVAL_DOC_TYPES[dt].label]), 'Tất cả loại chứng từ')}
+      <label style="display:flex;align-items:center;gap:5px"><span class="muted" style="font-size:11px;white-space:nowrap">Từ ngày</span><input class="inp" type="date" data-f="approvalsHistory.from" value="${esc(f.from || today)}" style="width:145px"></label>
+      <label style="display:flex;align-items:center;gap:5px"><span class="muted" style="font-size:11px;white-space:nowrap">Đến ngày</span><input class="inp" type="date" data-f="approvalsHistory.to" value="${esc(f.to || today)}" style="width:145px"></label>
+    </div>
+    ${tableShell([
+      {t:'Thời gian',w:'165px'},{t:'Người thực hiện'},{t:'Loại chứng từ'},{t:'Yêu cầu / Tham chiếu'},
+      {t:'Hành động / Ghi chú'},{t:'Trạng thái'},{t:'',w:'70px'}
+    ], rows, {emptyTitle:'Không có lịch sử phê duyệt trong ngày đã chọn', emptyDesc:'Chọn ngày khác để xem lịch sử cũ.'})}
+    ${pagiHTML('approvalsHistory', pg, 'hoạt động')}
+  </div>`;
+}
+
+function approvalRequestActivityTime(r) {
+  if (!r) return '';
+  // Với yêu cầu đã xử lý, dùng thời điểm hành động cuối cùng để phần
+  // "Việc cần duyệt" đồng thời đóng vai trò lịch sử phê duyệt.
+  const levelTimes = (r.levels || []).map(l => l && l.time).filter(Boolean);
+  const candidates = [r.updatedAt, r.approvedAt, r.rejectedAt, r.cancelledAt, ...levelTimes, r.requestedAt].filter(Boolean);
+  if (!candidates.length) return '';
+  return candidates.sort((a,b) => new Date(b||0) - new Date(a||0))[0];
+}
+
+function approvalsPendingView() {
+  const today = approvalTodayYMD();
+  const f = F('approvals', { q: '', docType: '', status: 'PENDING', from: today, to: today });
+  // State cũ có thể chưa có bộ lọc ngày. Lần đầu mở luôn mặc định hôm nay.
+  if (!f.from && !f.to && !f.__dateInitialized) {
+    f.from = today; f.to = today; f.__dateInitialized = true;
+  }
+
+  let list = [...(DB.approvalRequests || [])].filter((r) =>
+    (!f.status || r.status === f.status) && (!f.docType || r.docType === f.docType)
+  );
+
+  if (f.from) list = list.filter(r => approvalDateYMDLocal(approvalRequestActivityTime(r)) >= f.from);
+  if (f.to) list = list.filter(r => approvalDateYMDLocal(approvalRequestActivityTime(r)) <= f.to);
+
+  if (f.q) {
+    const q = String(f.q).toLowerCase();
+    list = list.filter((r) => [r.title, r.docId, r.requestedByName, r.id]
+      .join(' ').toLowerCase().includes(q));
+  }
+
+  list.sort((a, b) =>
+    (approvalIsOverdue(b) - approvalIsOverdue(a)) ||
+    (new Date(approvalRequestActivityTime(b) || 0) - new Date(approvalRequestActivityTime(a) || 0))
+  );
   const pg = paged(list, 'approvals', 10);
 
   const rows = pg.items.map((r) => {
     const lvl = ApprovalEngine.currentLevelOf(r);
     const canAct = r.status === 'PENDING' && ApprovalEngine.canAct(r);
     const overdue = approvalIsOverdue(r);
+    const activityTime = approvalRequestActivityTime(r);
     return `<tr>
       <td>${cell2(`<span class="code">${esc(r.id)}</span>`, approvalDocTypeChip(r.docType))}</td>
       <td>${cell2(esc(r.title), r.docId ? `Tham chiếu: <span class="code">${esc(r.docId)}</span>` : '')}</td>
-      <td>${cell2(esc(r.requestedByName || '—'), fmtDateTimeVN(r.requestedAt))}</td>
+      <td>${cell2(esc(r.requestedByName || '—'), fmtDateTimeVN(activityTime || r.requestedAt))}</td>
       <td class="right num">${r.amount ? fmtVND(r.amount) : '—'}</td>
       <td>${r.status === 'PENDING' && lvl ? `Cấp ${lvl.level}/${r.levels.length}<div class="cell-sub">${esc(approvalRoleName(lvl.role))}</div>` : '—'}</td>
       <td>${approvalStatusBadge(r.status)}${overdue ? `<div class="cell-sub" style="color:var(--red);font-weight:700">Quá hạn ${approvalOverdueHours(r)} giờ</div>` : ''}</td>
@@ -519,11 +649,13 @@ function approvalsPendingView() {
       ${searchBox('approvals', 'Tìm theo tiêu đề, mã tham chiếu, người đề nghị…')}
       ${selectFilter('approvals', 'docType', APPROVAL_DOC_TYPE_LIST.map((dt) => [dt, APPROVAL_DOC_TYPES[dt].label]), 'Tất cả loại chứng từ')}
       ${selectFilter('approvals', 'status', [['PENDING', 'Đang chờ duyệt'], ['APPROVED', 'Đã duyệt'], ['REJECTED', 'Từ chối'], ['CANCELLED', 'Đã hủy']], 'Tất cả trạng thái')}
+      <label style="display:flex;align-items:center;gap:5px"><span class="muted" style="font-size:11px;white-space:nowrap">Từ ngày</span><input class="inp" type="date" data-f="approvals.from" value="${esc(f.from || today)}" style="width:145px"></label>
+      <label style="display:flex;align-items:center;gap:5px"><span class="muted" style="font-size:11px;white-space:nowrap">Đến ngày</span><input class="inp" type="date" data-f="approvals.to" value="${esc(f.to || today)}" style="width:145px"></label>
     </div>
     ${tableShell([
-      { t: 'Mã yêu cầu' }, { t: 'Nội dung' }, { t: 'Người đề nghị' }, { t: 'Giá trị', cls: 'right' },
+      { t: 'Mã yêu cầu' }, { t: 'Nội dung' }, { t: 'Người đề nghị / Thời gian' }, { t: 'Giá trị', cls: 'right' },
       { t: 'Cấp hiện tại' }, { t: 'Trạng thái' }, { t: '', w: '120px' },
-    ], rows, { emptyTitle: 'Không có yêu cầu phù hợp' })}
+    ], rows, { emptyTitle: 'Không có yêu cầu phù hợp trong khoảng ngày đã chọn', emptyDesc: 'Đổi trạng thái hoặc khoảng ngày để xem lịch sử cũ.' })}
     ${pagiHTML('approvals', pg, 'yêu cầu')}
   </div>`;
 }
@@ -642,17 +774,20 @@ function approvalsSignatureView() {
 }
 
 Views.approvals = function approvalsMainView() {
+  // bootstrap() áp cache approval/purchase ngay phần đồng bộ trước await đầu tiên,
+  // nên lần render đầu khi chuyển menu không còn bị một frame rỗng do data.js/cache cũ.
+  try { ApprovalsAPI?.bootstrap?.(); } catch (_) {}
+  try { PurchaseAPI?.bootstrap?.(); } catch (_) {}
   const tab = State.tab || 'dashboard';
   const bodyFn = {
     dashboard: approvalsDashboardView,
     pending: approvalsPendingView,
     workflows: approvalsWorkflowsView,
-    logs: approvalsLogsView,
+    logs: approvalsPendingView, // route cũ: gộp Nhật ký vào Việc cần duyệt
     overdue: approvalsOverdueView,
     signature: approvalsSignatureView,
   }[tab] || approvalsDashboardView;
-  return `${pageHead('Quy trình phê duyệt', 'Phân quyền theo cấp · Nhật ký phê duyệt · Chữ ký điện tử · Cảnh báo quá hạn', approvalsHeadActions())}
-    ${moduleTabs(APPROVALS_TABS, tab)}
+  return `${pageHead('Quy trình phê duyệt', 'Phân quyền theo cấp · Lịch sử duyệt · Chữ ký điện tử · Cảnh báo quá hạn', approvalsHeadActions())}
     ${bodyFn()}`;
 };
 
@@ -1112,7 +1247,7 @@ if (APPROVAL_INTEGRATE_PURCHASE_FLOW) {
  *
  *      <script src="js/app.js?v=20260915-lg46"></script>
  *
- *      <script src="js/modules/mod-approvals.js?v=20260915-approvals1"></script>
+ *      <script src="js/modules/mod-approvals.js?v=20260930-unifiedapproval1"></script>
  *      <script src="js/modules/mod-accounting.js?v=20260915-bomflow1"></script>
  *      <script src="js/modules/mod-logistics.js?v=20260915-lg46"></script>
  *      <script src="js/modules/mod-rnd-actions.js?v=20260915-rnd1"></script>

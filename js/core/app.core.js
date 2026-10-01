@@ -574,6 +574,170 @@ const Exporter = {
 };
 
 /* ------------------------------------------------------------ 7. ROUTER */
+// [WORK BADGES] Mỗi menu con có record đang chờ người dùng xử lý sẽ hiện badge đỏ.
+// Badge menu cha = tổng badge của các menu con đang có việc. Record đã hoàn tất
+// không còn tính badge. Các collection chưa hydrate sẽ trả 0 thay vì dùng số giả.
+function navStatus(v){ return String(v || '').trim().toUpperCase(); }
+function navCountWhere(rows, fn){ try { return (Array.isArray(rows) ? rows : []).filter(fn).length; } catch (_) { return 0; } }
+function navPendingStatus(v){ return ['PENDING','WAITING','NEW','OPEN','DRAFT','WAITING_APPROVAL','PENDING_APPROVAL','WAITING_CONFIRMATION','PENDING_CONFIRMATION','WAITING_WAREHOUSE','WAITING_WAREHOUSE_APPROVAL','APPROVED','READY','READY_TO_SEND','SENT_TO_SUPPLIER','SHIPPING','PARTIAL_RECEIVED','ASSIGNED','IN_TRANSIT','QC_PENDING'].includes(navStatus(v)); }
+
+/* [BADGE ROLE RULE]
+ * Badge chỉ dành cho công việc mà vai trò hiện tại CÓ QUYỀN THAO TÁC.
+ * Quyền xem (VIEW) không làm phát sinh badge. Ví dụ Mua hàng/QC chỉ xem Tồn kho
+ * thì không được nhận badge công việc của Kho.
+ */
+function navHasAnyPermission(perms){
+  try {
+    if (!Array.isArray(perms) || !perms.length) return false;
+    return perms.some(p => Auth.hasPermission(p));
+  } catch (_) { return false; }
+}
+function navBadgeActionAllowed(key){
+  const roleId = (Auth.currentRole() || {}).id || '';
+  if (roleId === 'ROLE_ADMIN') return true;
+
+  const rules = {
+    // Mua hàng
+    'purchase-pr': ['PURCHASE_PR_CREATE','PURCHASE_PR_APPROVE'],
+    'purchase-quotes': ['PURCHASE_PR_CREATE','PURCHASE_PO_CREATE'],
+    'purchase-po': ['PURCHASE_PO_CREATE','PURCHASE_PO_SEND'],
+    'purchase-debts': ['ACCOUNTING_OPERATE','PAYMENT_APPROVE'],
+
+    // Kho — bắt buộc quyền thao tác Kho, INVENTORY_VIEW không đủ.
+    'warehouse-receipts': ['INVENTORY_OPERATE'],
+    'warehouse-issues': ['INVENTORY_OPERATE'],
+    'warehouse-transfers': ['INVENTORY_OPERATE'],
+    'warehouse-stocktake': ['INVENTORY_OPERATE','INVENTORY_ADJUST'],
+    'warehouse-defects': ['INVENTORY_OPERATE'],
+    'warehouse-production-plan': ['INVENTORY_OPERATE'],
+    'warehouse-store-replenishment': ['INVENTORY_OPERATE'],
+
+    // Sản xuất
+    'production-plan': ['PRODUCTION_OPERATE','PRODUCTION_APPROVE'],
+    'production-orders': ['PRODUCTION_OPERATE','PRODUCTION_APPROVE'],
+    'production-progress': ['PRODUCTION_OPERATE','PRODUCTION_APPROVE'],
+
+    // Nhà hàng / cửa hàng
+    'restaurant-pos': ['RESTAURANT_OPERATE'],
+    'restaurant-kitchen': ['RESTAURANT_OPERATE'],
+    'restaurant-replenishment': ['RESTAURANT_OPERATE'],
+    'restaurant-issue': ['RESTAURANT_OPERATE'],
+
+    // Kế toán / CRM
+    'accounting-ar': ['ACCOUNTING_OPERATE','PAYMENT_APPROVE'],
+    'accounting-ap': ['ACCOUNTING_OPERATE','PAYMENT_APPROVE'],
+    'crm-orders': ['CRM_OPERATE','SALES_ORDER_OPERATE','SALES_APPROVE'],
+    'crm-debts': ['CRM_OPERATE','SALES_ORDER_OPERATE','ACCOUNTING_OPERATE'],
+    'crm-complaints': ['CRM_OPERATE','SALES_ORDER_OPERATE'],
+
+    // QC
+    'quality-iqc': ['QC_INSPECT','QC_APPROVE'],
+    'quality-pqc': ['QC_INSPECT','QC_APPROVE'],
+    'quality-fqc': ['QC_INSPECT','QC_APPROVE'],
+    'quality-capa': ['QC_INSPECT','QC_APPROVE'],
+    'quality-recall': ['QC_INSPECT','QC_APPROVE'],
+
+    // Logistics / bảo trì
+    'logistics-deliveries': ['LOGISTICS_OPERATE'],
+    'logistics-maintenance': ['LOGISTICS_OPERATE'],
+    'maintenance-workorders': ['MAINTENANCE_OPERATE'],
+
+    // R&D
+    'rnd-approvals': ['RND_OPERATE'],
+  };
+
+  if (key === 'approval-pending') {
+    // Có quyền xem approvals chưa đủ; request còn phải đúng CẤP DUYỆT của role.
+    return Auth.canAccess('approvals', 'pending') || Auth.canAccess('approvals', null);
+  }
+  return navHasAnyPermission(rules[key] || []);
+}
+
+function navApprovalActionableCount(){
+  const roleId = (Auth.currentRole() || {}).id || '';
+  if (!roleId) return 0;
+  return navCountWhere(DB?.approvalRequests, req => {
+    if (navStatus(req?.status) !== 'PENDING') return false;
+    if (roleId === 'ROLE_ADMIN' || roleId === 'ROLE_DIRECTOR') return true;
+    const currentLevel = Number(req?.currentLevel || 1);
+    const lvl = (Array.isArray(req?.levels) ? req.levels : []).find(x => Number(x?.level) === currentLevel);
+    return !!lvl && String(lvl.role || '') === roleId;
+  });
+}
+
+function navWorkCount(key){
+  // Không hiển thị số từ local cache ở first-paint. Đợi warmup server hoàn tất
+  // rồi hiện thẳng số đúng, tránh 2 -> 5 trong vài chục ms.
+  if (window.SidebarBadges && !window.SidebarBadges.isReady?.('all')) return 0;
+  if (!navBadgeActionAllowed(key)) return 0;
+
+  const S = navStatus;
+  switch (key) {
+    // Mua hàng
+    case 'purchase-pr': return navCountWhere(DB?.purchases, x => ['MH_CHO_DUYET','PENDING_APPROVAL'].includes(S(x.status)));
+    case 'purchase-quotes': return navCountWhere(DB?.purchases, p => ['MH_DA_DUYET','APPROVED'].includes(S(p.status)) && !(DB?.supplierQuotations||[]).some(q => String(q.prId||'')===String(p.id||'') && (q.confirmed || q.confirmedAt || S(q.status)==='CONFIRMED')));
+    case 'purchase-po': return navCountWhere(DB?.purchaseOrders, x => ['DRAFT','READY_TO_SEND','SENT_TO_SUPPLIER','SHIPPING','PARTIAL_RECEIVED'].includes(S(x.status)));
+    case 'purchase-debts': return navCountWhere(DB?.supplierPayments, x => navPendingStatus(x.status)) + navCountWhere(DB?.supplierRefunds, x => navPendingStatus(x.status));
+
+    // Kho
+    case 'warehouse-receipts': return navCountWhere(DB?.purchaseOrders, x => ['SHIPPING','PARTIAL_RECEIVED'].includes(S(x.status))) + navCountWhere(DB?.goodsReceipts, x => ['WAITING_RECEIPT','PENDING_RECEIPT'].includes(S(x.status)));
+    case 'warehouse-issues': {
+      const req = navCountWhere(DB?.productionMaterialRequests, x => ['APPROVED','WAITING_WAREHOUSE_APPROVAL'].includes(S(x.status)));
+      const sales = navCountWhere(DB?.goodsIssues, x => S(x.status)==='PENDING_CONFIRMATION');
+      const returns = navCountWhere(DB?.materialReturnRequests, x => ['WAITING_WAREHOUSE','WAITING_WAREHOUSE_CONFIRMATION','PENDING_WAREHOUSE'].includes(S(x.status)));
+      return req + sales + returns;
+    }
+    case 'warehouse-transfers': return navCountWhere(DB?.stockTransfers, x => ['PENDING','WAITING','PENDING_CONFIRMATION','WAITING_CONFIRMATION','IN_TRANSIT'].includes(S(x.status)));
+    case 'warehouse-stocktake': return navCountWhere(DB?.inventoryCounts, x => ['DRAFT','IN_PROGRESS','PENDING'].includes(S(x.status)));
+    case 'warehouse-defects': return navCountWhere(DB?.materialReturnRequests, x => ['WAITING_WAREHOUSE','WAITING_WAREHOUSE_CONFIRMATION','PENDING_WAREHOUSE'].includes(S(x.status))) + navCountWhere(DB?.inventory, x => Number(x.qtyRejected||0)>0);
+    case 'warehouse-production-plan': return navCountWhere(DB?.productionPlans, x => ['WAITING_APPROVAL','APPROVED'].includes(S(x.status)));
+    case 'warehouse-store-replenishment': return navCountWhere(DB?.restaurantReplenishmentRequests, x => ['PENDING','WAITING_WAREHOUSE','WAITING_APPROVAL','APPROVED'].includes(S(x.status)));
+
+    // Sản xuất
+    case 'production-plan': return navCountWhere(DB?.productionPlans, x => ['APPROVED','MATERIAL_ISSUED'].includes(S(x.status)));
+    case 'production-orders': return navCountWhere(DB?.productionOrders, x => ['LSX_CHO_SAN_XUAT','LSX_DANG_SAN_XUAT','LSX_DANG_QC'].includes(S(x.status)));
+    case 'production-progress': return navCountWhere(DB?.productionOrders, x => ['LSX_CHO_SAN_XUAT','LSX_DANG_SAN_XUAT'].includes(S(x.status)));
+
+    // Nhà hàng / cửa hàng
+    case 'restaurant-pos': return navCountWhere(DB?.restaurantPosOrders, x => ['NEW','PENDING_PAYMENT','OPEN'].includes(S(x.status)));
+    case 'restaurant-kitchen': return navCountWhere(DB?.restaurantPosOrders, x => ['NEW','PENDING','WAITING_KITCHEN','COOKING'].includes(S(x.kitchenStatus || x.status)));
+    case 'restaurant-replenishment': return navCountWhere(DB?.restaurantReplenishmentRequests, x => ['PENDING','WAITING_APPROVAL','WAITING_WAREHOUSE'].includes(S(x.status)));
+    case 'restaurant-issue': return navCountWhere(DB?.restaurantReplenishmentRequests, x => ['APPROVED','WAITING_ISSUE'].includes(S(x.status)));
+
+    // Kế toán / CRM
+    case 'accounting-ar': return navCountWhere(DB?.orders, x => Number(x.remainingAmount ?? x.debt ?? x.balanceDue ?? 0) > 0);
+    case 'accounting-ap': return navCountWhere(DB?.purchaseOrders, x => ['RECEIVED','PARTIAL_RECEIVED'].includes(S(x.status)) && Number(x.remainingAmount ?? x.payable ?? x.balanceDue ?? 0) > 0);
+    case 'crm-orders': return navCountWhere(DB?.orders, x => ['DH_CHO_XAC_NHAN','PENDING','NEW','CONFIRMED','DH_CHO_SAN_XUAT'].includes(S(x.status)));
+    case 'crm-debts': return navCountWhere(DB?.orders, x => Number(x.remainingAmount ?? x.debt ?? x.balanceDue ?? 0) > 0);
+    case 'crm-complaints': return navCountWhere(DB?.crmComplaints, x => !['CLOSED','RESOLVED','DONE'].includes(S(x.status)));
+
+    // QC
+    case 'quality-iqc': return navCountWhere(DB?.goodsReceipts, x => ['QC_PENDING','PENDING'].includes(S(x.inspectionStatus || x.status)));
+    case 'quality-pqc': return navCountWhere(DB?.productionOrders, x => ['LSX_DANG_SAN_XUAT','LSX_DANG_QC'].includes(S(x.status)) && (x.stages||[]).some(st => ['PENDING_QC','QC_PENDING','WAITING_QC'].includes(S(st.qcStatus || st.status))));
+    case 'quality-fqc': return navCountWhere(DB?.productionFinalInspections, x => ['PENDING','WAITING','QC_PENDING'].includes(S(x.status)));
+    case 'quality-capa': return navCountWhere(DB?.qualityCapa, x => !['CLOSED','DONE','COMPLETED'].includes(S(x.status)));
+    case 'quality-recall': return navCountWhere(DB?.qualityProductRecalls, x => !['CLOSED','DONE','COMPLETED'].includes(S(x.status)));
+
+    // Logistics / bảo trì
+    case 'logistics-deliveries': return navCountWhere(DB?.logisticsDeliveries, x => ['PENDING','WAITING','READY','ASSIGNED','IN_TRANSIT'].includes(S(x.status)));
+    case 'logistics-maintenance': return navCountWhere(DB?.logisticsMaintenance, x => ['PENDING','DUE','OVERDUE','IN_PROGRESS'].includes(S(x.status)));
+    case 'maintenance-workorders': return navCountWhere(DB?.maintenanceWorkOrders, x => ['NEW','OPEN','PENDING','IN_PROGRESS'].includes(S(x.status)));
+
+    // R&D / Phê duyệt
+    case 'rnd-approvals': return navCountWhere(DB?.rndApprovals, x => ['PENDING','WAITING'].includes(S(x.status)));
+    case 'approval-pending': return navApprovalActionableCount();
+    default: return 0;
+  }
+}
+function navEntryCount(it){
+  if (!it) return 0;
+  if (Array.isArray(it.children) && it.children.length) {
+    // Parent chỉ là tổng các menu con mà role hiện tại thật sự nhìn thấy và có badge.
+    // Không fallback sang cảnh báo/module khác để tránh role chỉ VIEW cũng bị badge.
+    return it.children.reduce((sum,c) => sum + Number(typeof c.count==='function' ? c.count() : 0), 0);
+  }
+  return Number(typeof it.count==='function' ? it.count() : 0) || 0;
+}
 const NAV = [
   { group: 'TỔNG QUAN', items: [
     { id: 'dashboard', label: 'Dashboard', icon: 'fa-gauge-high' },
@@ -585,18 +749,13 @@ const NAV = [
       icon: 'fa-cart-shopping',
       children: [
         { id: 'dashboard', label: 'Tổng quan' },
-        { id: 'pr', label: 'Đề nghị mua hàng', count: () => window.SidebarBadges?.purchasePendingCount?.() || 0, alert: true },
-        { id: 'quotes', label: 'Báo giá nhà cung cấp' },
-        { id: 'po', label: 'Đơn đặt hàng' },
-        { id: 'debts', label: 'Công nợ NCC' },
+        { id: 'pr', label: 'Đề nghị mua hàng', count: () => navWorkCount('purchase-pr'), alert: true },
+        { id: 'quotes', label: 'Báo giá nhà cung cấp', count: () => navWorkCount('purchase-quotes'), alert: true },
+        { id: 'po', label: 'Đơn đặt hàng', count: () => navWorkCount('purchase-po'), alert: true },
+        { id: 'debts', label: 'Công nợ NCC', count: () => navWorkCount('purchase-debts'), alert: true },
         { id: 'price_history', label: 'Lịch sử giá mua' },
         { id: 'suppliers', label: 'Nhà cung cấp' }
       ],
-      // Badge chỉ hiển thị sau khi collection purchases đã được đối chiếu server.
-      // Tránh hiện số từ cache cũ rồi biến mất vài mili giây sau.
-      count: () => (window.SidebarBadges?.isReady?.('purchases')
-        ? window.SidebarBadges.purchasePendingCount()
-        : 0),
       alert: true
     },
     {
@@ -605,20 +764,19 @@ const NAV = [
       icon: 'fa-boxes-stacked',
       children: [
         { id: 'dashboard', label: 'Tổng quan' },
-        { id: 'receipts', label: 'Nhập kho' },
-        { id: 'issues', label: 'Xuất kho' },
-        { id: 'transfers', label: 'Chuyển kho' },
-        { id: 'stocktake', label: 'Kiểm kê' },
+        { id: 'receipts', label: 'Nhập kho', count: () => navWorkCount('warehouse-receipts'), alert: true },
+        { id: 'issues', label: 'Xuất kho', count: () => navWorkCount('warehouse-issues'), alert: true },
+        { id: 'transfers', label: 'Chuyển kho', count: () => navWorkCount('warehouse-transfers'), alert: true },
+        { id: 'stocktake', label: 'Kiểm kê', count: () => navWorkCount('warehouse-stocktake'), alert: true },
         { id: 'inventory', label: 'Tồn kho' },
         { id: 'locations', label: 'Quản lý kho' },
         // Tạm ẩn theo yêu cầu: Lô và hạn sử dụng
         // { id: 'batches', label: 'Lô và hạn sử dụng' },
-        { id: 'defects', label: 'Hàng lỗi & hàng trả về' },
-        { id: 'production_plan', label: 'Kế hoạch sản xuất & gia công' },
-        { id: 'store_replenishment', label: 'Duyệt bổ sung cửa hàng' },
+        { id: 'defects', label: 'Hàng lỗi & hàng trả về', count: () => navWorkCount('warehouse-defects'), alert: true },
+        { id: 'production_plan', label: 'Kế hoạch sản xuất & gia công', count: () => navWorkCount('warehouse-production-plan'), alert: true },
+        { id: 'store_replenishment', label: 'Duyệt bổ sung cửa hàng', count: () => navWorkCount('warehouse-store-replenishment'), alert: true },
         // Tạm ẩn: Cảnh báo kho, Barcode / QR Code
       ],
-      count: () => (typeof Q !== 'undefined' && Q.nearExpiryLots) ? Q.nearExpiryLots().length + Q.expiredLots().length : 0,
       alert: true
     },
     {
@@ -627,16 +785,12 @@ const NAV = [
       icon: 'fa-industry',
       children: [
         { id: 'dashboard', label: 'Tổng quan sản xuất' },
-        { id: 'orders', label: 'Lệnh sản xuất' },
+        { id: 'orders', label: 'Lệnh sản xuất', count: () => navWorkCount('production-orders'), alert: true },
         { id: 'bom', label: 'BOM / Định mức' },
-        { id: 'plan', label: 'Kế hoạch sản xuất' },
-        { id: 'progress', label: 'Tiến độ sản xuất' },
+        { id: 'plan', label: 'Kế hoạch sản xuất', count: () => navWorkCount('production-plan'), alert: true },
+        { id: 'progress', label: 'Tiến độ sản xuất', count: () => navWorkCount('production-progress'), alert: true },
         // Tạm ẩn: Nhập kho thành phẩm, Theo dõi bán thành phẩm
       ],
-      // Tương tự Purchase: không dùng số từ cache sản xuất chưa xác minh.
-      count: () => (window.SidebarBadges?.isReady?.('production')
-        ? window.SidebarBadges.productionActiveCount()
-        : 0)
     },
     {
       id: 'subcontracting',
@@ -655,13 +809,13 @@ const NAV = [
       icon: 'fa-utensils',
       children: [
         { id: 'dashboard', label: 'Tổng quan' },
-        { id: 'pos', label: 'Order / Bán hàng' },
-        { id: 'kitchen', label: 'Bếp / Chế biến' },
+        { id: 'pos', label: 'Order / Bán hàng', count: () => navWorkCount('restaurant-pos'), alert: true },
+        { id: 'kitchen', label: 'Bếp / Chế biến', count: () => navWorkCount('restaurant-kitchen'), alert: true },
         { id: 'recipe', label: 'Menu / Công thức món' },
         { id: 'branches', label: 'Chi nhánh' },
         { id: 'store_stock', label: 'Tồn kho cửa hàng' },
-        { id: 'replenishment', label: 'Yêu cầu bổ sung' },
-        { id: 'issue', label: 'Xuất kho nguyên liệu' },
+        { id: 'replenishment', label: 'Yêu cầu bổ sung', count: () => navWorkCount('restaurant-replenishment'), alert: true },
+        { id: 'issue', label: 'Xuất kho nguyên liệu', count: () => navWorkCount('restaurant-issue'), alert: true },
         { id: 'revenue', label: 'Doanh thu' }
         // Báo cáo cửa hàng đã tích hợp vào Tổng quan.
       ]
@@ -673,8 +827,8 @@ const NAV = [
       children: [
         { id: 'dashboard', label: 'Tổng quan tài chính' },
         { id: 'general_ledger', label: 'Hạch toán' },
-        { id: 'ar', label: 'Công nợ phải thu' },
-        { id: 'ap', label: 'Công nợ phải chi' },
+        { id: 'ar', label: 'Công nợ phải thu', count: () => navWorkCount('accounting-ar'), alert: true },
+        { id: 'ap', label: 'Công nợ phải chi', count: () => navWorkCount('accounting-ap'), alert: true },
         { id: 'cashflow_inout', label: 'Thu – Chi' },
         { id: 'banking', label: 'Ngân hàng' },
         { id: 'costing', label: 'Giá thành' },
@@ -702,13 +856,13 @@ const NAV = [
       icon: 'fa-shield-halved',
       children: [
         { id: 'dashboard', label: 'Tổng quan chất lượng' },
-        { id: 'iqc', label: 'Kiểm tra đầu vào' },
-        { id: 'pqc', label: 'Kiểm tra bán thành phẩm' },
-        { id: 'fqc', label: 'Kiểm tra thành phẩm' },
+        { id: 'iqc', label: 'Kiểm tra đầu vào', count: () => navWorkCount('quality-iqc'), alert: true },
+        { id: 'pqc', label: 'Kiểm tra bán thành phẩm', count: () => navWorkCount('quality-pqc'), alert: true },
+        { id: 'fqc', label: 'Kiểm tra thành phẩm', count: () => navWorkCount('quality-fqc'), alert: true },
         { id: 'subcontracting_qc', label: 'Kiểm tra gia công' },
         { id: 'coa', label: 'Hồ sơ kiểm nghiệm' },
-        { id: 'capa', label: 'CAPA' },
-        { id: 'recall', label: 'Thu hồi sản phẩm' }
+        { id: 'capa', label: 'CAPA', count: () => navWorkCount('quality-capa'), alert: true },
+        { id: 'recall', label: 'Thu hồi sản phẩm', count: () => navWorkCount('quality-recall'), alert: true }
       ]
     },
     {
@@ -720,7 +874,7 @@ const NAV = [
         { id: 'equipment', label: 'Danh sách máy móc' },
         { id: 'equipment_catalog', label: 'Danh mục máy móc' },
         { id: 'schedule', label: 'Lịch bảo trì' },
-        { id: 'work_orders', label: 'Phiếu sửa chữa' },
+        { id: 'work_orders', label: 'Phiếu sửa chữa', count: () => navWorkCount('maintenance-workorders'), alert: true },
         { id: 'logs', label: 'Nhật ký máy' }
       ]
     },
@@ -732,8 +886,8 @@ const NAV = [
         { id: 'dashboard', label: 'Tổng quan' },
         { id: 'customers', label: 'Khách hàng' },
         { id: 'transactions', label: 'Lịch sử giao dịch' },
-        { id: 'orders', label: 'Đơn hàng bán' },
-        { id: 'debts', label: 'Công nợ khách hàng' },
+        { id: 'orders', label: 'Đơn hàng bán', count: () => navWorkCount('crm-orders'), alert: true },
+        { id: 'debts', label: 'Công nợ khách hàng', count: () => navWorkCount('crm-debts'), alert: true },
       ]
     },
     {
@@ -742,8 +896,8 @@ const NAV = [
       icon: 'fa-truck',
       children: [
         { id: 'dashboard', label: 'Tổng quan vận tải' },
-        { id: 'deliveries', label: 'Đơn giao hàng' },
-        { id: 'maintenance', label: 'Bảo trì xe' },
+        { id: 'deliveries', label: 'Đơn giao hàng', count: () => navWorkCount('logistics-deliveries'), alert: true },
+        { id: 'maintenance', label: 'Bảo trì xe', count: () => navWorkCount('logistics-maintenance'), alert: true },
         { id: 'fleet', label: 'Danh sách xe' },
         { id: 'vehicle-types', label: 'Danh mục xe' },
         { id: 'drivers', label: 'Danh sách tài xế' },
@@ -761,7 +915,7 @@ const NAV = [
         { id: 'versions', label: 'Phiên bản công thức' },
         { id: 'trials', label: 'Thử nghiệm' },
         { id: 'costs', label: 'Chi phí nghiên cứu' },
-        { id: 'approvals', label: 'Quy trình duyệt' },
+        { id: 'approvals', label: 'Quy trình duyệt', count: () => navWorkCount('rnd-approvals'), alert: true },
         { id: 'reports', label: 'Báo cáo R&D' }
       ]
     },
@@ -771,10 +925,8 @@ const NAV = [
       icon: 'fa-circle-check',
       children: [
         { id: 'dashboard', label: 'Tổng quan' },
-        { id: 'pending', label: 'Việc cần duyệt', count: () => window.SidebarBadges?.approvalPendingCount?.() || 0, alert: true },
+        { id: 'pending', label: 'Việc cần duyệt', count: () => navWorkCount('approval-pending'), alert: true },
         { id: 'workflows', label: 'Quy trình phê duyệt' },
-        { id: 'logs', label: 'Nhật ký phê duyệt' },
-        { id: 'overdue', label: 'Cảnh báo quá hạn' },
         { id: 'signature', label: 'Chữ ký điện tử' }
       ]
     },
@@ -1074,7 +1226,7 @@ function renderNav() {
     <div class="nav-group">${esc(g.group)}</div>
 
     ${g.items.map(it => {
-      const n = it.count ? it.count() : null;
+      const n = navEntryCount(it);
       const hasChildren = Array.isArray(it.children) && it.children.length > 0;
 
       if (hasChildren) {

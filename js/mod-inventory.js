@@ -11,13 +11,22 @@ function inventoryItemCategory(item, type) {
   return item.category || (type === 'SEMI_FINISHED' ? 'Bán thành phẩm' : 'Thành phẩm');
 }
 function inventoryCategories(type) {
-  const configured = (DB.itemCategories || []).filter((c) => c.type === type && c.status !== 'inactive').map((c) => c.name);
+  // Danh mục đã khai báo trên server là master duy nhất cho dropdown/filter.
+  // Không tự biến group/category cũ của dữ liệu seed thành một danh mục mới
+  // (ví dụ VT-004 có group "Dầu chiên" nhưng server không có CAT tương ứng).
+  const configured = (DB.itemCategories || [])
+    .filter((c) => c.type === type && c.status !== 'inactive' && c.name)
+    .map((c) => c.name);
+  if (configured.length) {
+    return [...new Set(configured)].sort((a,b)=>String(a).localeCompare(String(b),'vi'));
+  }
+  // Chỉ fallback dữ liệu cũ khi server chưa có master danh mục nào.
   const derived = type === 'RAW_MATERIAL'
     ? (DB.materials || []).map((x) => x.group)
     : type === 'SEMI_FINISHED'
       ? (DB.semiFinishedProducts || []).map((x) => x.category)
       : (DB.products || []).map((x) => x.category);
-  return [...new Set([...configured, ...derived].filter(Boolean))].sort((a,b)=>String(a).localeCompare(String(b),'vi'));
+  return [...new Set(derived.filter(Boolean))].sort((a,b)=>String(a).localeCompare(String(b),'vi'));
 }
 
 /* ------------------------------------------------------------ VẬT TƯ */

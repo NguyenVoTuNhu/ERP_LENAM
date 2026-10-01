@@ -1,0 +1,18 @@
+LÊ NAM ERP - CLEAN/LIGHT SOURCE 2026-09-30
+Baseline: lenam_fix_badges_zero_lots_20260930.zip
+
+Chỉ dọn file không tham gia runtime hoặc file trùng byte-for-byte.
+KHÔNG chỉnh sửa logic nghiệp vụ, API, module JS, CSS hay index.html.
+
+Đã bỏ:
+- assets/assets/ (bản vendor/assets lồng trùng, không có tham chiếu runtime)
+- PDF / SQL / MD / TXT tài liệu không được app gọi
+- các bản JS trùng byte-for-byte ở thư mục js/ khi index.html đang dùng bản tương ứng js/modules/legacy/ hoặc js/core/
+- các file *.html rác trong thư mục font
+
+Đã GIỮ:
+- toàn bộ JS/CSS/API/module đang chạy
+- index.html
+- assets đang dùng/giữ cho giao diện
+- docs/restaurant_sales_realistic_test_data.json vì js/data/restaurant-sales-test-data.js đang gọi file này
+- README.md để giữ tài liệu cấu trúc dự án

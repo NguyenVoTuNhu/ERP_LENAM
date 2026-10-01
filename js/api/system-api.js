@@ -166,7 +166,6 @@ const SystemAPI = (() => {
     const mergedAudit = Array.isArray(remoteAudit) ? remoteAudit : [];
 
     applyUsers(mergedUsers, mergedAudit);
-    applyUsers(mergedUsers, mergedAudit);
     cacheWrite({users:mergedUsers, roles:mergedRoles, auditLogs:mergedAudit, syncedAt:Date.now()});
 
     const seeds = [];

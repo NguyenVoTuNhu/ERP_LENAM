@@ -363,6 +363,52 @@ const Exporter = {
 };
 
 /* ------------------------------------------------------------ 7. ROUTER */
+// Badge công việc: chỉ đếm các record còn cần người dùng xử lý.
+// Child badge được tính trực tiếp từ dữ liệu đã hydrate; parent badge là tổng child.
+function navStatus(v){ return String(v || '').trim().toUpperCase(); }
+function navCountWhere(rows, fn){ try { return (Array.isArray(rows) ? rows : []).filter(fn).length; } catch (_) { return 0; } }
+function navWorkCount(key){
+  switch (key) {
+    case 'purchase-pr':
+      return navCountWhere(DB?.purchases, x => ['MH_CHO_DUYET','PENDING_APPROVAL'].includes(navStatus(x.status)));
+    case 'warehouse-receipts':
+      return navCountWhere(DB?.goodsReceipts, x => ['QC_PENDING','PENDING','WAITING_RECEIPT'].includes(navStatus(x.inspectionStatus || x.status)));
+    case 'warehouse-issues': {
+      const req = navCountWhere(DB?.productionMaterialRequests, x => ['APPROVED','WAITING_WAREHOUSE_APPROVAL'].includes(navStatus(x.status)));
+      const sales = navCountWhere(DB?.goodsIssues, x => navStatus(x.status) === 'PENDING_CONFIRMATION');
+      const returns = navCountWhere(DB?.materialReturnRequests, x => ['WAITING_WAREHOUSE','WAITING_WAREHOUSE_CONFIRMATION','PENDING_WAREHOUSE'].includes(navStatus(x.status)));
+      return req + sales + returns;
+    }
+    case 'warehouse-transfers':
+      return navCountWhere(DB?.stockTransfers, x => ['PENDING','WAITING','PENDING_CONFIRMATION','WAITING_CONFIRMATION'].includes(navStatus(x.status)));
+    case 'warehouse-alerts':
+      return (typeof Q !== 'undefined' && Q.nearExpiryLots) ? Q.nearExpiryLots().length + Q.expiredLots().length : 0;
+    case 'production-plan':
+      // MATERIAL_ISSUED = Kho đã cấp NVL, Sản xuất cần tạo LSX.
+      return navCountWhere(DB?.productionPlans, x => ['APPROVED','MATERIAL_ISSUED'].includes(navStatus(x.status)));
+    case 'production-orders':
+      return navCountWhere(DB?.productionOrders, x => ['LSX_CHO_SAN_XUAT','LSX_DANG_SAN_XUAT','LSX_DANG_QC'].includes(navStatus(x.status)));
+    case 'production-material-request':
+      return navCountWhere(DB?.productionMaterialRequests, x => ['APPROVED','WAITING_WAREHOUSE_APPROVAL'].includes(navStatus(x.status)));
+    case 'quality-iqc':
+      return navCountWhere(DB?.goodsReceipts, x => ['QC_PENDING','PENDING'].includes(navStatus(x.inspectionStatus || x.status)));
+    case 'quality-fqc':
+      return navCountWhere(DB?.productionFinalInspections, x => ['PENDING','WAITING','QC_PENDING'].includes(navStatus(x.status)));
+    case 'approval-pending':
+      return navCountWhere(DB?.approvalRequests, x => navStatus(x.status) === 'PENDING');
+    case 'logistics-deliveries':
+      return navCountWhere(DB?.logisticsDeliveries, x => ['PENDING','WAITING','READY','ASSIGNED','IN_TRANSIT'].includes(navStatus(x.status)));
+    default: return 0;
+  }
+}
+function navEntryCount(it){
+  if (!it) return 0;
+  if (Array.isArray(it.children) && it.children.length) {
+    const childTotal = it.children.reduce((sum, c) => sum + Number(typeof c.count === 'function' ? c.count() : 0), 0);
+    if (childTotal > 0) return childTotal;
+  }
+  return Number(typeof it.count === 'function' ? it.count() : 0) || 0;
+}
 const NAV = [
   { group: 'TỔNG QUAN', items: [
     { id: 'dashboard', label: 'Dashboard', icon: 'fa-gauge-high' },
@@ -374,7 +420,7 @@ const NAV = [
       icon: 'fa-cart-shopping',
       children: [
         { id: 'dashboard', label: 'Tổng quan' },
-        { id: 'pr', label: 'Đề nghị mua hàng' },
+        { id: 'pr', label: 'Đề nghị mua hàng', count: () => navWorkCount('purchase-pr'), alert: true },
         { id: 'quotes', label: 'Báo giá nhà cung cấp' },
         { id: 'po', label: 'Đơn đặt hàng' },
         { id: 'debts', label: 'Công nợ nhà cung cấp' },
@@ -393,14 +439,14 @@ const NAV = [
       icon: 'fa-boxes-stacked',
       children: [
         { id: 'dashboard', label: 'Tổng quan' },
-        { id: 'receipts', label: 'Nhập kho' },
-        { id: 'issues', label: 'Xuất kho' },
-        { id: 'transfers', label: 'Chuyển kho' },
+        { id: 'receipts', label: 'Nhập kho', count: () => navWorkCount('warehouse-receipts'), alert: true },
+        { id: 'issues', label: 'Xuất kho', count: () => navWorkCount('warehouse-issues'), alert: true },
+        { id: 'transfers', label: 'Chuyển kho', count: () => navWorkCount('warehouse-transfers'), alert: true },
         { id: 'stocktake', label: 'Kiểm kê' },
         { id: 'inventory', label: 'Tồn kho' },
         { id: 'batches', label: 'Lô và hạn sử dụng' },
         { id: 'defects', label: 'Hàng lỗi & hàng trả về' },
-        { id: 'alerts', label: 'Cảnh báo kho' },
+        { id: 'alerts', label: 'Cảnh báo kho', count: () => navWorkCount('warehouse-alerts'), alert: true },
         { id: 'barcode', label: 'Barcode / QR Code' }
       ],
       count: () => (typeof Q !== 'undefined' && Q.nearExpiryLots) ? Q.nearExpiryLots().length + Q.expiredLots().length : 0,
@@ -412,12 +458,12 @@ const NAV = [
       icon: 'fa-industry',
       children: [
         { id: 'dashboard', label: 'Tổng quan sản xuất' },
-        { id: 'orders', label: 'Lệnh sản xuất' },
+        { id: 'orders', label: 'Lệnh sản xuất', count: () => navWorkCount('production-orders'), alert: true },
         { id: 'bom', label: 'BOM / Định mức' },
         { id: 'routing', label: 'Routing công đoạn' },
-        { id: 'plan', label: 'Kế hoạch sản xuất' },
+        { id: 'plan', label: 'Kế hoạch sản xuất', count: () => navWorkCount('production-plan'), alert: true },
         { id: 'progress', label: 'Tiến độ sản xuất' },
-        { id: 'issue_nvl', label: 'Xuất NVL sản xuất' },
+        { id: 'issue_nvl', label: 'Xuất NVL sản xuất', count: () => navWorkCount('production-material-request'), alert: true },
         { id: 'receipt_tp', label: 'Nhập kho thành phẩm' },
         { id: 'wip', label: 'Theo dõi bán thành phẩm' },
         { id: 'scrap', label: 'Hao hụt' },
@@ -506,9 +552,9 @@ const NAV = [
       icon: 'fa-shield-halved',
       children: [
         { id: 'dashboard', label: 'Tổng quan chất lượng' },
-        { id: 'iqc', label: 'Kiểm tra đầu vào' },
+        { id: 'iqc', label: 'Kiểm tra đầu vào', count: () => navWorkCount('quality-iqc'), alert: true },
         { id: 'pqc', label: 'Kiểm tra bán thành phẩm' },
-        { id: 'fqc', label: 'Kiểm tra thành phẩm' },
+        { id: 'fqc', label: 'Kiểm tra thành phẩm', count: () => navWorkCount('quality-fqc'), alert: true },
         { id: 'coa', label: 'Hồ sơ kiểm nghiệm' },
         { id: 'capa', label: 'CAPA' },
         { id: 'customer_claims', label: 'Khiếu nại khách hàng' },
@@ -550,7 +596,7 @@ const NAV = [
       icon: 'fa-truck',
       children: [
         { id: 'dashboard', label: 'Tổng quan vận tải' },
-        { id: 'deliveries', label: 'Đơn giao hàng' },
+        { id: 'deliveries', label: 'Đơn giao hàng', count: () => navWorkCount('logistics-deliveries'), alert: true },
         { id: 'dispatch', label: 'Điều phối' },
         { id: 'maintenance', label: 'Bảo trì xe' },
         { id: 'fleet', label: 'Danh mục xe' },
@@ -581,10 +627,8 @@ const NAV = [
       icon: 'fa-circle-check',
       children: [
         { id: 'dashboard', label: 'Tổng quan' },
-        { id: 'pending', label: 'Việc cần duyệt' },
+        { id: 'pending', label: 'Việc cần duyệt', count: () => navWorkCount('approval-pending'), alert: true },
         { id: 'workflows', label: 'Quy trình phê duyệt' },
-        { id: 'logs', label: 'Nhật ký phê duyệt' },
-        { id: 'overdue', label: 'Cảnh báo quá hạn' },
         { id: 'signature', label: 'Chữ ký điện tử' }
       ]
     },
@@ -815,7 +859,7 @@ function renderNav() {
     <div class="nav-group">${esc(g.group)}</div>
 
     ${g.items.map(it => {
-      const n = it.count ? it.count() : null;
+      const n = navEntryCount(it);
       const hasChildren = Array.isArray(it.children) && it.children.length > 0;
 
       if (hasChildren) {
@@ -839,6 +883,7 @@ function renderNav() {
               ${it.children.map((child, idx) => {
                 const tab = child.tab || child.id;
                 const isChildActive = isParentActive && (curTab ? curTab === tab : idx === 0);
+                const childN = Number(typeof child.count === 'function' ? child.count() : 0) || 0;
 
                 return `
                   <button
@@ -848,6 +893,7 @@ function renderNav() {
                     data-tab="${tab}"
                     type="button">
                     <span>${esc(child.label)}</span>
+                    ${childN ? `<span class="nav-count ${child.alert ? 'alert' : ''}">${childN}</span>` : ''}
                   </button>
                 `;
               }).join('')}

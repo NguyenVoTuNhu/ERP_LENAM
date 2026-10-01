@@ -72,7 +72,12 @@ const SalesCRM = (() => {
       .sort((a, b) => {
         const ea = (DB.inventoryLots || []).find(l => l.id === a.lotId)?.expiryDate || '9999-12-31';
         const eb = (DB.inventoryLots || []).find(l => l.id === b.lotId)?.expiryDate || '9999-12-31';
-        return ea.localeCompare(eb); // FEFO
+        const byExpiry = ea.localeCompare(eb); // FEFO
+        if (byExpiry) return byExpiry;
+        const la=(DB.inventoryLots||[]).find(l=>l.id===a.lotId), lb=(DB.inventoryLots||[]).find(l=>l.id===b.lotId);
+        const ra=(DB.goodsReceipts||[]).find(gr=>(gr.items||[]).some(i=>i.lotId===a.lotId))?.date || la?.createdAt || la?.mfgDate || '9999-12-31';
+        const rb=(DB.goodsReceipts||[]).find(gr=>(gr.items||[]).some(i=>i.lotId===b.lotId))?.date || lb?.createdAt || lb?.mfgDate || '9999-12-31';
+        return String(ra).localeCompare(String(rb)); // FIFO khi HSD bằng nhau
       });
   }
 

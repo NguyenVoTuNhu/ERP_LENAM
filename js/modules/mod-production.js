@@ -880,7 +880,12 @@ Views.productionMaterialRequests = function () {
 const _productionViewBeforeFlow = Views.production;
 Views.production = function () {
   const tab=State.tab || (State.params&&State.params.tab);
-  if(tab==='bom') return Views.productionBom();
+  if(tab==='bom') {
+    // InventoryAPI.bootstrap() nạp snapshot master trong cache đồng bộ trước await,
+    // vì vậy BOM render ngay master mới nhất đã có thay vì hiện data.js cũ vài ms.
+    try { InventoryAPI?.bootstrap?.(); } catch (_) {}
+    return Views.productionBom();
+  }
   if(tab==='plan') return Views.productionPlanFlow();
   if(tab==='issue_nvl') return Views.productionPlanFlow(); // route cũ: YCNVL đã gộp vào Kế hoạch sản xuất
   return _productionViewBeforeFlow ? _productionViewBeforeFlow(State.params) : '';

@@ -2627,7 +2627,7 @@ const Q = {
         return { ...inv, lot };
       })
       .filter((inv) => inv.lot && new Date(inv.lot.expiryDate + 'T00:00:00') > today && inv.lot.qcStatus !== 'FAILED' && inv.lot.qcStatus !== 'QUARANTINE')
-      .sort((a, b) => a.lot.expiryDate.localeCompare(b.lot.expiryDate));
+      .sort((a, b) => { const e=a.lot.expiryDate.localeCompare(b.lot.expiryDate); if(e) return e; const ra=(DB.goodsReceipts||[]).find(gr=>(gr.items||[]).some(i=>i.lotId===a.lotId))?.date || a.lot.createdAt || a.lot.mfgDate || '9999-12-31'; const rb=(DB.goodsReceipts||[]).find(gr=>(gr.items||[]).some(i=>i.lotId===b.lotId))?.date || b.lot.createdAt || b.lot.mfgDate || '9999-12-31'; return String(ra).localeCompare(String(rb)); });
   },
 
   /** Các lô cận ngày hết hạn */

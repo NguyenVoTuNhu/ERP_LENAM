@@ -18,9 +18,6 @@ const KIO_CONFIG = Object.freeze({
     supplierRefunds: 'lenam_supplier_refunds',
     purchasePriceHistory: 'lenam_purchase_price_history',
     supplierEvaluations: 'lenam_supplier_evaluations',
-    // Phê duyệt PR dùng dữ liệu thật trên server để đổi role/F5 vẫn giữ đúng cấp duyệt.
-    approvalRequests: 'lenam_approval_requests',
-    approvalLogs: 'lenam_approval_logs',
   }),
 
   inventoryTables: Object.freeze({
