@@ -381,11 +381,34 @@ const KioStore = (() => {
 
   // [DATA REPAIR] Thay toàn bộ collection bằng snapshot đã chuẩn hóa.
   // Chỉ dùng khi đã phát hiện dữ liệu vật lý trùng/lỗi; không dùng cho sync thường ngày.
-  async function replaceCollection(table, items) {
+  async function replaceCollection(table, items, options = {}) {
     assertReady();
+    const incoming = Array.isArray(items) ? items : [];
+
+    // DATA-SAFE: các collection nghiệp vụ quan trọng không bao giờ được xoá sạch
+    // chỉ vì state/cache frontend đang rỗng. Nếu thực sự cần xoá hết, caller phải
+    // truyền { allowEmpty: true, reason: '...' } một cách tường minh.
+    const EMPTY_PROTECTED_TABLES = new Set([
+      'lenam_customers',
+      'lenam_sales_orders',
+      'lenam_purchase_requests',
+      'lenam_inventory_balances',
+      'lenam_materials',
+      'lenam_finished_products',
+      'lenam_users'
+    ]);
+    if (incoming.length === 0 && EMPTY_PROTECTED_TABLES.has(String(table))) {
+      const allowEmpty = options?.allowEmpty === true && String(options?.reason || '').trim().length >= 8;
+      if (!allowEmpty) {
+        const remote = await listCollection(table, { force: true }).catch(() => []);
+        const remoteCount = Array.isArray(remote) ? remote.length : 0;
+        throw new Error(`[DATA-SAFE] Chặn replaceCollection(${table}, []): server hiện có ${remoteCount} record. Muốn xoá toàn bộ phải truyền allowEmpty + reason rõ ràng.`);
+      }
+    }
+
     const rows = await listRows(table, { force: true });
     if (rows.length) await deleteRows(table, rows);
-    const local = (Array.isArray(items) ? items : []).map(encodeItem);
+    const local = incoming.map(encodeItem);
     for (const encoded of local) await insertEncoded(table, encoded);
     invalidateTable(table);
     return true;

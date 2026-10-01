@@ -256,7 +256,7 @@
       selectFilter(key,'driverId',(L.drivers||[]).map(d=>[d.id,d.name]),'Tất cả tài xế'),
       lgDateInput(key,'dateFrom','Từ ngày'),lgDateInput(key,'dateTo','Đến ngày')
     ]);
-    return `${header(dispatchOnly?'Điều phối giao hàng':'Đơn giao hàng',dispatchOnly?'Phân xe, tài xế và thời gian xuất phát cho các đơn đang chờ.':'Theo dõi đơn giao từ lúc lập đến khi chốt chi phí chuyến.',`<button class="btn btn-primary" data-act="lg-delivery-new"><i class="fa-solid fa-plus"></i>Tạo đơn giao</button>`)}<div class="grid g-auto-sm" style="margin-bottom:14px">${card('Chờ Kho xuất',waitWarehouse,'fa-box','orange')}${card('Chờ điều phối',L.deliveries.filter(d=>d.status==='WAIT_DISPATCH').length,'fa-clock','orange')}${card('Đã điều phối',L.deliveries.filter(d=>d.status==='DISPATCHED').length,'fa-calendar-check','blue')}${card('Đang giao',L.deliveries.filter(d=>d.status==='IN_TRANSIT').length,'fa-truck-fast','teal')}${card('Đã chốt',L.deliveries.filter(d=>d.status==='CLOSED').length,'fa-circle-check','green')}</div><div class="card">${filters}${table([{t:'Đơn giao / SO'},{t:'Khách hàng'},{t:'Hạn giao'},{t:'Xe'},{t:'Tài xế'},{t:'Khối lượng',cls:'right'},{t:'Trạng thái'},{t:'',cls:'right'}],rows,'Không có đơn giao phù hợp bộ lọc')}</div>`;
+    return `${header(dispatchOnly?'Điều phối giao hàng':'Đơn giao hàng',dispatchOnly?'Phân xe, tài xế và thời gian xuất phát cho các đơn đang chờ.':'Theo dõi đơn giao từ lúc lập đến khi xác nhận giao và tự động chốt chuyến.',`<button class="btn btn-primary" data-act="lg-delivery-new"><i class="fa-solid fa-plus"></i>Tạo đơn giao</button>`)}<div class="grid g-auto-sm" style="margin-bottom:14px">${card('Chờ Kho xuất',waitWarehouse,'fa-box','orange')}${card('Chờ điều phối',L.deliveries.filter(d=>d.status==='WAIT_DISPATCH').length,'fa-clock','orange')}${card('Đã điều phối',L.deliveries.filter(d=>d.status==='DISPATCHED').length,'fa-calendar-check','blue')}${card('Đang giao',L.deliveries.filter(d=>d.status==='IN_TRANSIT').length,'fa-truck-fast','teal')}${card('Đã chốt',L.deliveries.filter(d=>d.status==='CLOSED').length,'fa-circle-check','green')}</div><div class="card">${filters}${table([{t:'Đơn giao / SO'},{t:'Khách hàng'},{t:'Hạn giao'},{t:'Xe'},{t:'Tài xế'},{t:'Khối lượng',cls:'right'},{t:'Trạng thái'},{t:'',cls:'right'}],rows,'Không có đơn giao phù hợp bộ lọc')}</div>`;
   }
 
   function fleetView() {
@@ -311,13 +311,29 @@
   }
 
   function deliveryDetail(d) {
-    const v=vehicle(d.vehicleId),dr=driver(d.driverId),norm=normFuel(d),variance=n(d.fuelLiters)-norm;
-    const itemRows = (d.items || []).map(it => `<tr><td>${e(it.name||it.productId)}<div class="cell-sub">${e(it.productId||'')}</div></td><td class="right num">${num(it.orderedQty,2)}</td><td class="right num">${num(it.deliveredQty,2)}</td><td class="right num">${num(it.returnedQty,2)}</td><td>${e(it.unit||'')}</td></tr>`).join('');
+    const v=vehicle(d.vehicleId),dr=driver(d.driverId),norm=normFuel(d);
+    const actualFuel=n(d.fuelLiters), hasActualFuel=actualFuel>0;
+    const variance=hasActualFuel ? actualFuel-norm : null;
+    const actualCost=tripCost(d), hasActualCost=actualCost>0;
+    const customerFee=n(d.shippingFee), hasCustomerFee=customerFee>0;
+    const actualCostPerKm=n(d.actualKm)>0 && hasActualCost ? actualCost/n(d.actualKm) : 0;
+    const topRateLabel=actualCostPerKm>0?'Chi phí thực tế/km':'Đơn giá dự kiến/km';
+    const topRateValue=actualCostPerKm>0?money(actualCostPerKm):(n(d.routeRatePerKm)>0?money(d.routeRatePerKm):'—');
+    const itemRows = (d.items || []).map(it => `<tr><td><b>${e(it.name||it.productId)}</b></td><td><span class="code">${e(it.productId||'—')}</span></td><td class="right num">${num(it.orderedQty,2)}</td><td class="right num">${num(it.deliveredQty,2)}</td><td class="right num">${num(it.returnedQty,2)}</td><td>${e(it.unit||'')}</td></tr>`).join('');
     const orderRef = d.orderId ? `<button class="btn btn-sm" data-act="open-order" data-id="${e(d.orderId)}"><i class="fa-solid fa-arrow-up-right-from-square"></i>${e(d.orderId)}</button>` : '—';
-    return `<div class="grid g-3" style="margin-bottom:14px">${card('Trạng thái', (statusBadge(d.status)), 'fa-circle-info','blue')}${card('Quãng đường',`${num(d.actualKm,1)} / ${num(d.estimatedKm,1)} km`,'fa-road','teal')}${card('Chi phí/km',n(d.actualKm)?money(costPerKm(d)):'—','fa-coins','orange')}</div>
-      <div class="form-grid cols-2"><div class="field"><label>Khách hàng</label><div class="inp">${e(d.customer)}</div></div><div class="field"><label>Hạn giao</label><div class="inp">${dateFmt(d.promisedDate)} ${e(d.promisedTime||'')}</div></div><div class="field"><label>Địa chỉ</label><div class="inp">${e(d.address)}</div></div><div class="field"><label>Người nhận / SĐT</label><div class="inp">${e(d.recipient||'—')}${d.phone?` · ${e(d.phone)}`:''}</div></div><div class="field"><label>Tham chiếu đơn bán</label><div>${orderRef}</div></div><div class="field"><label>Phí vận chuyển thu khách</label><div class="inp">${money(d.shippingFee||0)}</div></div><div class="field"><label>Chi phí vận chuyển dự kiến</label><div class="inp">${n(d.estimatedTransportFee)>0?money(d.estimatedTransportFee):'—'}${n(d.routeRatePerKm)>0?` · ${money(d.routeRatePerKm)}/km`:''}</div></div><div class="field"><label>Xe</label><div class="inp">${e(v?.plate||'Chưa điều phối')}</div></div><div class="field"><label>Tài xế</label><div class="inp">${e(dr?.name||'Chưa điều phối')}</div></div><div class="field"><label>Tuyến</label><div class="inp">${e(d.route||'—')}</div></div><div class="field"><label>Khối lượng vận chuyển</label><div class="inp">${n(d.cargoKg)>0?`${num(d.cargoKg,2)} kg`:'Chưa cập nhật'}</div></div>${d.deliveryNote?`<div class="field" style="grid-column:1/-1"><label>Ghi chú giao hàng</label><div class="inp">${e(d.deliveryNote)}</div></div>`:''}</div>
-      ${(d.items||[]).length?`<div class="form-sec-title">Chi tiết hàng giao</div>${table([{t:'Thành phẩm'},{t:'Theo đơn',cls:'right'},{t:'Khách nhận',cls:'right'},{t:'Trả về',cls:'right'},{t:'ĐVT'}],itemRows,'Chưa có dòng hàng')}`:''}
-      <div class="form-sec-title">Chi phí & nhiên liệu</div><div class="grid g-auto-sm">${card('Nhiên liệu thực tế',`${num(d.fuelLiters,1)} L`,'fa-gas-pump','blue')}${card('Nhiên liệu định mức',`${num(norm,1)} L`,'fa-gauge','slate')}${card('Chênh lệch',`${variance>=0?'+':''}${num(variance,1)} L`,'fa-scale-balanced',variance>0?'orange':'green')}${card('Chi phí vận chuyển thực tế',d.status==='CLOSED'?money(tripCost(d)):'Chưa chốt chuyến','fa-money-bill','teal')}${card('Phí vận chuyển thu khách',money(d.shippingFee||0),'fa-receipt','indigo')}${(()=>{if(d.status!=='CLOSED')return card('Chính sách phí vận chuyển','Xác định sau khi chốt chuyến','fa-scale-balanced','slate');const diff=n(d.shippingFee)-tripCost(d);if(Math.abs(diff)<0.5)return card('Chính sách phí vận chuyển','Thu đúng chi phí','fa-scale-balanced','green');if(diff<0)return card('Doanh nghiệp hỗ trợ',money(Math.abs(diff)),'fa-hand-holding-dollar','orange');return card('Thu cao hơn chi phí',money(diff),'fa-arrow-trend-up','green');})()}</div>`;
+    const policyCard = (()=>{
+      if(d.status!=='CLOSED') return card('Chính sách phí vận chuyển','Chờ hoàn tất chuyến','fa-scale-balanced','slate');
+      if(!hasActualCost) return card('Chính sách phí vận chuyển','Chờ quyết toán chi phí','fa-scale-balanced','slate');
+      if(!hasCustomerFee) return card('Phí vận chuyển thu khách','Chưa xác định','fa-receipt','slate');
+      const diff=customerFee-actualCost;
+      if(Math.abs(diff)<0.5) return card('Chính sách phí vận chuyển','Thu đúng chi phí','fa-scale-balanced','green');
+      if(diff<0) return card('Doanh nghiệp hỗ trợ',money(Math.abs(diff)),'fa-hand-holding-dollar','orange');
+      return card('Thu cao hơn chi phí',money(diff),'fa-arrow-trend-up','green');
+    })();
+    return `<div class="grid g-3" style="margin-bottom:14px">${card('Trạng thái', (statusBadge(d.status)), 'fa-circle-info','blue')}${card('Quãng đường',`${num(d.actualKm,1)} / ${num(d.estimatedKm,1)} km`,'fa-road','teal')}${card(topRateLabel,topRateValue,'fa-coins','orange')}</div>
+      <div class="form-grid cols-2"><div class="field"><label>Khách hàng</label><div class="inp">${e(d.customer)}</div></div><div class="field"><label>Hạn giao</label><div class="inp">${dateFmt(d.promisedDate)} ${e(d.promisedTime||'')}</div></div><div class="field"><label>Địa chỉ</label><div class="inp">${e(d.address)}</div></div><div class="field"><label>Người nhận / SĐT</label><div class="inp">${e(d.recipient||'—')}${d.phone?` · ${e(d.phone)}`:''}</div></div><div class="field"><label>Tham chiếu đơn bán</label><div>${orderRef}</div></div><div class="field"><label>Phí vận chuyển thu khách</label><div class="inp">${hasCustomerFee?money(customerFee):'Chưa xác định'}</div></div><div class="field"><label>Chi phí vận chuyển dự kiến</label><div class="inp">${n(d.estimatedTransportFee)>0?money(d.estimatedTransportFee):'—'}${n(d.routeRatePerKm)>0?` · ${money(d.routeRatePerKm)}/km`:''}</div></div><div class="field"><label>Xe</label><div class="inp">${e(v?.plate||'Chưa điều phối')}</div></div><div class="field"><label>Tài xế</label><div class="inp">${e(dr?.name||'Chưa điều phối')}</div></div><div class="field"><label>Tuyến</label><div class="inp">${e(d.route||'—')}</div></div><div class="field"><label>Khối lượng vận chuyển</label><div class="inp">${n(d.cargoKg)>0?`${num(d.cargoKg,2)} kg`:'Chưa cập nhật'}</div></div>${d.deliveryNote?`<div class="field" style="grid-column:1/-1"><label>Ghi chú giao hàng</label><div class="inp">${e(d.deliveryNote)}</div></div>`:''}</div>
+      ${(d.items||[]).length?`<div class="form-sec-title">Chi tiết hàng giao</div>${table([{t:'Thành phẩm'},{t:'Mã'},{t:'Theo đơn',cls:'right'},{t:'Khách nhận',cls:'right'},{t:'Trả về',cls:'right'},{t:'ĐVT'}],itemRows,'Chưa có dòng hàng')}`:''}
+      <div class="form-sec-title">Chi phí chuyến</div><div class="grid g-auto-sm">${card('Quãng đường thực tế',n(d.actualKm)>0?`${num(d.actualKm,1)} km`:'Chưa cập nhật','fa-road','teal')}${card('Đơn giá dự kiến',n(d.routeRatePerKm)>0?`${money(d.routeRatePerKm)}/km`:'—','fa-calculator','slate')}${card('Chi phí dự kiến',n(d.estimatedTransportFee)>0?money(d.estimatedTransportFee):'—','fa-file-invoice-dollar','blue')}${card('Nhiên liệu định mức',norm>0?`${num(norm,1)} L`:'—','fa-gauge','slate')}${card('Nhiên liệu thực tế',hasActualFuel?`${num(actualFuel,1)} L`:'Chưa nhập','fa-gas-pump','blue')}${card('Chênh lệch nhiên liệu',variance==null?'—':`${variance>=0?'+':''}${num(variance,1)} L`,'fa-scale-balanced',variance==null?'slate':variance>0?'orange':'green')}${card('Chi phí thực tế',hasActualCost?money(actualCost):'Chưa quyết toán','fa-money-bill','teal')}${card('Phí thu khách',hasCustomerFee?money(customerFee):'Chưa xác định','fa-receipt','indigo')}${policyCard}</div>`;
   }
 
   // ---- Form helpers --------------------------------------------------------
@@ -340,23 +356,31 @@
     const orders = eligibleSalesOrders();
     return `<option value="">-- Chọn đơn hàng đã xuất kho --</option>` + orders.map(o => `<option value="${e(o.id)}" ${o.id===selected?'selected':''}>${e(o.id)} · ${e((typeof Q!=='undefined'&&Q.customer?Q.customer(o.customerId)?.name:'')||o.customerName||o.customerId||'Khách hàng')}</option>`).join('');
   }
+  function logisticsUnitIsKg(unit) {
+    const u=String(unit||'').trim().toLowerCase().replace(/\s+/g,'');
+    return ['kg','kgs','kilogram','kilograms','kilôgam','kilogam'].includes(u);
+  }
+  function orderItemWeightInfo(it) {
+    const p = (typeof Q !== 'undefined' && Q.product) ? Q.product(it?.productId) : null;
+    const unit = it?.unit || p?.unit || '';
+    if (logisticsUnitIsKg(unit)) return { packedWeightKg:1, shippingWeightKg:Math.max(0,n(it?.qty)), unit, isKg:true };
+    const packedWeightKg = n(it?.packedWeightKg) || (n(p?.packedWeightG)>0 ? n(p.packedWeightG)/1000 : n(p?.packedWeightKg));
+    return { packedWeightKg, shippingWeightKg:Math.round(n(it?.qty)*packedWeightKg*1000)/1000, unit, isKg:false };
+  }
+
   function orderShippingWeightKg(o) {
     if (!o) return 0;
     const fromOrder = n(o.shippingWeightKg);
     if (fromOrder > 0) return Math.round(fromOrder * 1000) / 1000;
-    const total = (o.items || []).reduce((sum, it) => {
-      const p = (typeof Q !== 'undefined' && Q.product) ? Q.product(it.productId) : null;
-      const perUnit = n(it.packedWeightKg) || (n(p?.packedWeightG)>0 ? n(p.packedWeightG)/1000 : n(p?.packedWeightKg));
-      return sum + n(it.qty) * perUnit;
-    }, 0);
+    const total = (o.items || []).reduce((sum, it) => sum + orderItemWeightInfo(it).shippingWeightKg, 0);
     return Math.round(total * 1000) / 1000;
   }
   function orderSnapshot(o) {
     const customer = (typeof Q !== 'undefined' && Q.customer) ? Q.customer(o.customerId) : null;
     const items = (o.items || []).map(it => {
       const p = (typeof Q !== 'undefined' && Q.product) ? Q.product(it.productId) : null;
-      const packedWeightKg = n(it.packedWeightKg) || (n(p?.packedWeightG)>0 ? n(p.packedWeightG)/1000 : n(p?.packedWeightKg));
-      return { productId:it.productId, name:it.name || p?.name || it.productId, unit:it.unit || p?.unit || '', orderedQty:n(it.qty), packedWeightKg, shippingWeightKg:Math.round(n(it.qty)*packedWeightKg*1000)/1000, deliveredQty:0, returnedQty:0 };
+      const w = orderItemWeightInfo(it);
+      return { productId:it.productId, name:it.name || p?.name || it.productId, unit:w.unit, orderedQty:n(it.qty), packedWeightKg:w.packedWeightKg, shippingWeightKg:w.shippingWeightKg, deliveredQty:0, returnedQty:0 };
     });
     return {
       customer: customer?.name || o.customerName || o.customerId || '',
@@ -415,7 +439,7 @@
   }
   function openDeliveryForm() {
     load(); const t=today();
-    Modal.open({title:'Tạo đơn giao hàng',sub:'Đơn giao được tạo trực tiếp từ Đơn hàng bán đã hoàn tất xuất kho.',size:'lg',body:`<div class="form-grid cols-2"><div class="field" style="grid-column:1/-1"><label>Đơn bán tham chiếu *</label><select class="inp" id="lgOrderId">${crmOrderOptions()}</select></div><div class="field"><label>Khách hàng</label><input class="inp" id="lgCustomer" readonly></div><div class="field"><label>Khối lượng vận chuyển (kg)</label><input class="inp num" id="lgCargo" type="number" readonly placeholder="Tự tính từ đơn bán"><small>Tự tính = số lượng × khối lượng đóng gói/ĐVT của từng thành phẩm.</small></div><div class="field" style="grid-column:1/-1"><label>Địa chỉ giao</label><input class="inp" id="lgAddress" readonly></div><div class="field"><label>Ngày giao *</label><input class="inp" id="lgPromiseDate" type="date" min="${t}" value="${t}"></div><div class="field"><label>Giờ cam kết *</label><input class="inp" id="lgPromiseTime" type="time" value="10:00"></div><div class="field"><label>Km dự kiến (dự phòng)</label><input class="inp num" id="lgEstKm" type="number" min="0" step="0.1" value="0" placeholder="OpenStreetMap/OSRM sẽ tính khi điều phối"><small>Có thể nhập tay nếu dịch vụ bản đồ miễn phí không phản hồi.</small></div><div class="field"><label>Ghi chú</label><input class="inp" id="lgNote"></div><div id="lgOrderPreview" style="grid-column:1/-1"><div class="note-box">Chọn đơn hàng đã được Kho xuất thành phẩm để tạo chuyến giao.</div></div></div>`,foot:'<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="lg-delivery-save"><i class="fa-solid fa-floppy-disk"></i>Lưu đơn giao</button>'});
+    Modal.open({title:'Tạo đơn giao hàng',sub:'Đơn giao được tạo trực tiếp từ Đơn hàng bán đã hoàn tất xuất kho.',size:'lg',body:`<div class="form-grid cols-2"><div class="field" style="grid-column:1/-1"><label>Đơn bán tham chiếu *</label><select class="inp" id="lgOrderId">${crmOrderOptions()}</select></div><div class="field"><label>Khách hàng</label><input class="inp" id="lgCustomer" readonly></div><div class="field"><label>Khối lượng vận chuyển (kg)</label><input class="inp num" id="lgCargo" type="number" readonly placeholder="Tự tính từ đơn bán"><small>ĐVT Kg: khối lượng = số lượng nhập CRM; ĐVT khác: số lượng × khối lượng đóng gói/ĐVT.</small></div><div class="field" style="grid-column:1/-1"><label>Địa chỉ giao</label><input class="inp" id="lgAddress" readonly></div><div class="field"><label>Ngày giao *</label><input class="inp" id="lgPromiseDate" type="date" min="${t}" value="${t}"></div><div class="field"><label>Giờ cam kết *</label><input class="inp" id="lgPromiseTime" type="time" value="10:00"></div><div class="field"><label>Km dự kiến (dự phòng)</label><input class="inp num" id="lgEstKm" type="number" min="0" step="0.1" value="0" placeholder="OpenStreetMap/OSRM sẽ tính khi điều phối"><small>Có thể nhập tay nếu dịch vụ bản đồ miễn phí không phản hồi.</small></div><div class="field"><label>Ghi chú</label><input class="inp" id="lgNote"></div><div id="lgOrderPreview" style="grid-column:1/-1"><div class="note-box">Chọn đơn hàng đã được Kho xuất thành phẩm để tạo chuyến giao.</div></div></div>`,foot:'<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="lg-delivery-save"><i class="fa-solid fa-floppy-disk"></i>Lưu đơn giao</button>'});
     const select = document.querySelector('#lgOrderId'); if (select) select.addEventListener('change', () => renderOrderPreview(select.value));
   }
   function deliveryCargoKg(d) {
@@ -713,7 +737,7 @@
     order.logisticsDeliveryId=L.deliveries[0].id; order.logisticsStatus='WAIT_DISPATCH'; if(typeof SalesCRM!=='undefined') SalesCRM.saveLocal(['orders']);
     rerender('Đã tạo đơn giao',`${order.id} · đã đồng bộ sản phẩm và số lượng từ Đơn hàng bán.`);
   };
-  Actions['lg-delivery-view']=(d)=>{const x=delivery(d.id);if(!x)return;let buttons='';const members=tripMembers(x),tripReadyToClose=members.length>0&&members.every(r=>['DELIVERED','PARTIAL','CLOSED'].includes(r.status));if(x.status==='WAIT_DISPATCH')buttons+=`<button class="btn btn-primary" data-act="lg-dispatch" data-id="${e(x.id)}"><i class="fa-solid fa-route"></i>Điều phối</button>`;if(x.status==='DISPATCHED'||x.status==='READY')buttons+=`<button class="btn btn-primary" data-act="lg-trip-start" data-id="${e(x.id)}"><i class="fa-solid fa-play"></i>Bắt đầu chuyến</button>`;if(x.status==='IN_TRANSIT')buttons+=`<button class="btn btn-primary" data-act="lg-trip-complete" data-id="${e(x.id)}"><i class="fa-solid fa-flag-checkered"></i>Xác nhận giao</button>`;if(['DELIVERED','PARTIAL'].includes(x.status)&&tripReadyToClose)buttons+=`<button class="btn btn-primary" data-act="lg-trip-close" data-id="${e(x.id)}"><i class="fa-solid fa-receipt"></i>Chốt chuyến</button>`;Modal.open({title:`Chi tiết đơn giao · ${x.id}`,size:'xl',body:deliveryDetail(x),foot:`<button class="btn" data-act="modal-close">Đóng</button>${buttons}`});};
+  Actions['lg-delivery-view']=(d)=>{const x=delivery(d.id);if(!x)return;let buttons='';const members=tripMembers(x),tripReadyToClose=members.length>0&&members.every(r=>['DELIVERED','PARTIAL','CLOSED'].includes(r.status));if(x.status==='WAIT_DISPATCH')buttons+=`<button class="btn btn-primary" data-act="lg-dispatch" data-id="${e(x.id)}"><i class="fa-solid fa-route"></i>Điều phối</button>`;if(x.status==='DISPATCHED'||x.status==='READY')buttons+=`<button class="btn btn-primary" data-act="lg-trip-start" data-id="${e(x.id)}"><i class="fa-solid fa-play"></i>Bắt đầu chuyến</button>`;if(x.status==='IN_TRANSIT')buttons+=`<button class="btn btn-primary" data-act="lg-trip-complete" data-id="${e(x.id)}"><i class="fa-solid fa-flag-checkered"></i>Xác nhận giao</button>`;Modal.open({title:`Chi tiết đơn giao · ${x.id}`,size:'xl',body:deliveryDetail(x),foot:`<button class="btn" data-act="modal-close">Đóng</button>${buttons}`});};
   Actions['lg-dispatch']=(d)=>{const x=delivery(d.id);if(x)openDispatch(x);};
   Actions['lg-dispatch-save']=(d)=>{
     const x=delivery(d.id), vid=document.querySelector('#lgVehicle')?.value, did=document.querySelector('#lgDriver')?.value, start=document.querySelector('#lgStart')?.value;
@@ -785,11 +809,25 @@
           <div class="field lg-complete-field"><label><i class="fa-regular fa-note-sticky"></i>Ghi chú giao hàng <span class="muted">(không bắt buộc)</span></label><textarea class="inp" id="lgCompleteNote" rows="2" placeholder="Ghi chú giao hàng…"></textarea></div>
         </div>
       </div>`;
+    const tripRows=tripMembers(x);
+    const isPotentialFinalPoint=tripRows.filter(r=>!['DELIVERED','PARTIAL','CLOSED'].includes(r.status)).length<=1;
+    const tripKm=Math.max(n(x.estimatedKm), ...tripRows.map(r=>n(r.actualKm)), 0);
+    const tripVehicle=vehicle(x.vehicleId);
+    const tripFuelNorm=tripVehicle&&tripKm>0?tripKm*n(tripVehicle.fuelNorm)/100:0;
+    const closeFields=`<div class="form-sec-title" style="margin-top:14px"><i class="fa-solid fa-receipt"></i>Chi phí chuyến</div>
+      <div class="form-grid cols-2">
+        <div class="field"><label>Nhiên liệu thực tế (L)</label><input class="inp num" id="lgFuel" type="number" min="0" step="0.1" value="${num(tripFuelNorm,1)}"></div>
+        <div class="field"><label>Chi phí nhiên liệu</label><input class="inp num" id="lgFuelCost" data-money="1" type="text" inputmode="numeric" value="0"></div>
+        <div class="field"><label>Phí cầu đường</label><input class="inp num" id="lgToll" data-money="1" type="text" inputmode="numeric" value="0"></div>
+        <div class="field"><label>Phí bãi xe</label><input class="inp num" id="lgParking" data-money="1" type="text" inputmode="numeric" value="0"></div>
+        <div class="field"><label>Chi phí khác</label><input class="inp num" id="lgOther" data-money="1" type="text" inputmode="numeric" value="0"></div>
+      </div>`;
+    const bodyWithClose=body + (isPotentialFinalPoint?closeFields:'');
     Modal.open({
       title:`Xác nhận giao hàng · ${x.id}`,
       sub:x.orderId?`Theo đơn bán ${x.orderId}`:'Chuyến giao trực tiếp',
       size:'lg',
-      body,
+      body:bodyWithClose,
       foot:`<button class="btn lg-complete-cancel" data-act="modal-close">Hủy</button><button class="btn btn-primary lg-complete-confirm" data-act="lg-trip-complete-save" data-id="${e(x.id)}"><i class="fa-solid fa-check"></i>Xác nhận</button>`,
       onMount:(m)=>{
         m.classList.add('lg-complete-modal');
@@ -813,9 +851,33 @@
     const v=vehicle(x.vehicleId);if(v)v.odometer=n(v.odometer)+km;
     const order=((DB.orders||[]).find(o=>o.id===x.orderId)); if(order){order.status='dh_da_giao';order.logisticsStatus=x.status;order.logisticsDeliveredAt=x.actualDelivered;order.deliveredDate=String(x.actualDelivered||'').slice(0,10)||today();order.logisticsDeliveryId=x.id;}
     const receiptId=returnedItems.length?postLogisticsReturns(x,returnedItems,document.querySelector('#lgCompleteNote')?.value.trim()||''):'';
-    if(order&&typeof SalesCRM!=='undefined')SalesCRM.saveLocal(['orders']);
-    rerender('Đã xác nhận giao hàng',returnedItems.length?`Hàng trả đã vào Kho Hàng trả về${receiptId?` · ${receiptId}`:''}.`:'Giao hàng hoàn tất.');
+
+    // Xác nhận điểm giao cuối = chốt chuyến luôn. Không còn bước "Chốt chuyến" riêng.
+    const members=tripMembers(x);
+    const allDelivered=members.every(r=>['DELIVERED','PARTIAL','CLOSED'].includes(r.status));
+    if(allDelivered){
+      const fuel=Math.max(0,n(document.querySelector('#lgFuel')?.value));
+      const fuelCost=Math.max(0,parseMoney(document.querySelector('#lgFuelCost')?.value));
+      const toll=Math.max(0,parseMoney(document.querySelector('#lgToll')?.value));
+      const parking=Math.max(0,parseMoney(document.querySelector('#lgParking')?.value));
+      const other=Math.max(0,parseMoney(document.querySelector('#lgOther')?.value));
+      const totalCost=fuelCost+toll+parking+other;
+      const totalCargo=members.reduce((sum,row)=>sum+deliveryCargoKg(row),0)||members.length;
+      const tripKm=Math.max(...members.map(row=>n(row.actualKm)),0);
+      members.forEach(row=>{
+        const share=totalCargo>0?deliveryCargoKg(row)/totalCargo:1/members.length;
+        row.fuelLiters=fuel*share; row.fuelCost=fuelCost*share; row.tollCost=toll*share; row.parkingCost=parking*share; row.otherCost=other*share; row.tripActualKm=tripKm; row.status='CLOSED';
+        const linkedOrder=(DB.orders||[]).find(o=>o.id===row.orderId);
+        if(linkedOrder){linkedOrder.actualTransportCost=totalCost*share;linkedOrder.transportCostPerKm=tripKm>0?(totalCost*share)/tripKm:0;linkedOrder.logisticsStatus='CLOSED';linkedOrder.logisticsClosedAt=nowIso();}
+      });
+    }
+    if(typeof SalesCRM!=='undefined')SalesCRM.saveLocal(['orders']);
+    const msg=allDelivered
+      ? `Giao hàng đã xác nhận và chuyến đã tự động chốt.${returnedItems.length?` Hàng trả đã vào Kho Hàng trả về${receiptId?` · ${receiptId}`:''}.`:''}`
+      : (returnedItems.length?`Hàng trả đã vào Kho Hàng trả về${receiptId?` · ${receiptId}`:''}.`:'Điểm giao đã hoàn tất; chuyến còn điểm giao khác.');
+    rerender(allDelivered?'Đã xác nhận & chốt chuyến':'Đã xác nhận giao hàng',msg);
   };
+  // Legacy: giữ handler để tương thích dữ liệu/call cũ; UI không còn nút chốt chuyến riêng.
   Actions['lg-trip-close']=(d)=>{
     const x=delivery(d.id);if(!x)return;const members=tripMembers(x);
     if(!members.every(r=>['DELIVERED','PARTIAL','CLOSED'].includes(r.status))){Toast.warn('Chưa thể chốt chuyến','Còn điểm giao trong chuyến chưa xác nhận giao hàng.');return;}

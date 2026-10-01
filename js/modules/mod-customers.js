@@ -514,17 +514,19 @@ function openCustomerForm(id) {
           <input class="inp" name="tax" value="${esc(c?.tax || '')}" placeholder="0312345678" /></div>
         <div class="field"><label>Nhóm ngành</label>
           <select class="inp" name="group">${groups.map((g) => `<option ${c?.group === g ? 'selected' : ''}>${esc(g)}</option>`).join('')}</select></div>
-        <div class="field"><label>Tỉnh / Thành phố</label>
-          <input class="inp" name="province" value="${esc(c?.province || '')}" placeholder="Bình Dương" /></div>
+        <div class="field"><label>Tỉnh / Thành phố <span class="req">*</span></label>
+          <select class="inp" name="province" id="custProvince"><option value="">-- Chọn Tỉnh/Thành phố --</option></select></div>
+        <div class="field"><label>Phường / Xã / Đặc khu <span class="req">*</span></label>
+          <select class="inp" name="ward" id="custWard"><option value="">-- Chọn Phường/Xã/Đặc khu --</option></select></div>
       </div>
-      <div class="field"><label>Địa chỉ</label><input class="inp" name="address" value="${esc(c?.address || '')}" placeholder="Lô A2, KCN Sóng Thần…" /></div>
+      <div class="field"><label>Địa chỉ chi tiết <span class="req">*</span></label><input class="inp" name="addressDetail" id="custAddressDetail" value="${esc(c?.addressDetail || (!c?.ward ? (c?.address || '') : ''))}" placeholder="Số nhà, tên đường, tòa nhà..." /><div class="cell-sub">Địa chỉ mới sau sáp nhập dùng 2 cấp: Tỉnh/Thành phố → Phường/Xã/Đặc khu.</div></div>
 
       <div class="form-sec-title"><i class="fa-solid fa-address-card"></i>Đầu mối liên hệ</div>
       <div class="form-grid">
         <div class="field" data-field="contact"><label>Người liên hệ <span class="req">*</span></label>
           <input class="inp" name="contact" value="${esc(c?.contact || '')}" placeholder="Nguyễn Văn A" /><div class="err">Vui lòng nhập người liên hệ</div></div>
         <div class="field" data-field="phone"><label>Số điện thoại <span class="req">*</span></label>
-          <input class="inp" name="phone" value="${esc(c?.phone || '')}" placeholder="0912 345 678" /><div class="err">Số điện thoại phải có ít nhất 9 chữ số</div></div>
+          <input class="inp" name="phone" type="tel" inputmode="numeric" maxlength="10" pattern="[0-9]{10}" value="${esc(String(c?.phone || '').replace(/\D/g, '').slice(0, 10))}" placeholder="0912345678" oninput="this.value=this.value.replace(/\D/g,'').slice(0,10)" /><div class="err">Số điện thoại phải đúng 10 chữ số</div></div>
         <div class="field" data-field="email"><label>Email</label>
           <input class="inp" name="email" value="${esc(c?.email || '')}" placeholder="lienhe@congty.vn" /><div class="err">Email không hợp lệ</div></div>
         <div class="field"><label>Nhân viên phụ trách</label>
@@ -548,19 +550,26 @@ function openCustomerForm(id) {
     foot: `<button class="btn" data-act="modal-close">Hủy</button>
            <button class="btn btn-primary" data-act="save-customer" data-id="${c?.id || ''}"><i class="fa-solid fa-floppy-disk"></i>${c ? 'Lưu thay đổi' : 'Thêm khách hàng'}</button>`,
   });
+  if (typeof VNAddress !== 'undefined') {
+    VNAddress.init({provinceId:'custProvince',wardId:'custWard',province:c?.province||'',ward:c?.ward||''});
+  }
 }
 
 /** Kiểm tra dữ liệu form khách hàng — trả về object hoặc null nếu lỗi */
 function validateCustomerForm(form) {
   const get = (n) => form.querySelector(`[name="${n}"]`);
   const data = {};
-  ['name', 'tax', 'group', 'province', 'address', 'contact', 'phone', 'email', 'owner', 'status', 'debt', 'opportunityStatus', 'opportunityNote'].forEach((n) => { data[n] = get(n) ? get(n).value.trim() : ''; });
+  ['name', 'tax', 'group', 'province', 'ward', 'addressDetail', 'contact', 'phone', 'email', 'owner', 'status', 'debt', 'opportunityStatus', 'opportunityNote'].forEach((n) => { data[n] = get(n) ? get(n).value.trim() : ''; });
   let ok = true;
   const fail = (field) => { const f = form.querySelector(`[data-field="${field}"]`); if (f) f.classList.add('invalid'); ok = false; };
   form.querySelectorAll('.field').forEach((f) => f.classList.remove('invalid'));
   if (!data.name) fail('name');
   if (!data.contact) fail('contact');
-  if (data.phone.replace(/\D/g, '').length < 9) fail('phone');
+  if (!data.province || !data.ward || !data.addressDetail) { Toast.err('Thiếu địa chỉ', 'Vui lòng chọn Tỉnh/Thành phố, Phường/Xã/Đặc khu và nhập địa chỉ chi tiết theo địa giới sau sáp nhập.'); ok = false; }
+  data.district = '';
+  data.address = (typeof VNAddress !== 'undefined') ? VNAddress.compose(data.addressDetail, data.ward, '', data.province) : [data.addressDetail,data.ward,data.province].filter(Boolean).join(', ');
+  data.phone = data.phone.replace(/\D/g, '');
+  if (!/^\d{10}$/.test(data.phone)) fail('phone');
   if (data.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) fail('email');
   if (!ok) return null;
   data.debt = Number(String(data.debt).replace(/\D/g, '')) || 0;

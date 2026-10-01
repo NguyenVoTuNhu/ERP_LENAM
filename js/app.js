@@ -763,22 +763,54 @@ const Actions = {
   'save-customer-care': (d) => { saveCustomerCare(d.customerId);},
   'cust-tab': (d) => { State.customerTab = d.tab; const c = Q.customer(d.id); Drawer.setBody(customerDrawerBody(c)); drawCustomerChart(c); },
   'edit-customer': (d) => switchTo(() => openCustomerForm(d.id)),
-  'save-customer': (d) => {
+  'save-customer': async (d) => {
     const form = $('#custForm');
     const data = validateCustomerForm(form);
     if (!data) { Toast.err('Dữ liệu chưa hợp lệ', 'Vui lòng kiểm tra lại các trường được đánh dấu đỏ.'); return; }
+
+    const previous = d.id ? JSON.parse(JSON.stringify(Q.customer(d.id) || {})) : null;
+    let id = d.id || '';
+    let created = false;
+
     if (d.id) {
-      Object.assign(Q.customer(d.id), data);
-      Toast.ok('Đã cập nhật khách hàng', `${d.id} · ${data.name}`);
+      const current = Q.customer(d.id);
+      if (!current) { Toast.err('Không tìm thấy khách hàng', d.id); return; }
+      Object.assign(current, data);
     } else {
-      const id = nextCode('KH-', DB.customers, 3);
+      id = nextCode('KH-', DB.customers, 3);
       DB.customers.push({ ...data, id, since: DB.today, note: '' });
+      created = true;
       logActivity('thêm khách hàng mới', id, data.name, 'fa-address-book', 'blue');
-      Toast.ok('Đã thêm khách hàng mới', `${id} · ${data.name}`);
     }
+
     SEARCH_INDEX = null;
-    if (typeof SalesCRM !== 'undefined') SalesCRM.saveLocal();
-    Modal.close(); go('customers');
+
+    try {
+      // Ghi KIO và CHỜ server xác nhận trước khi báo thành công/đóng form.
+      // Không schedule toàn CRM vì thao tác này chỉ thay đổi customers.
+      if (typeof CRMAPI !== 'undefined' && CRMAPI.syncCollections) {
+        await CRMAPI.syncCollections(['customers']);
+        await CRMAPI.refreshKeys?.(['customers'], { force: true });
+      } else if (typeof SalesCRM !== 'undefined') {
+        SalesCRM.saveLocal(['customers']);
+      }
+
+      Modal.close();
+      // Route đúng là CRM/customers. go('customers') là module không tồn tại trong
+      // role.modules nên trước đây vừa báo thành công vừa phát sinh toast Không có quyền.
+      go('crm', { tab: 'customers' });
+      Toast.ok(created ? 'Đã thêm khách hàng mới' : 'Đã cập nhật khách hàng', `${id} · ${data.name}`);
+    } catch (err) {
+      // Rollback UI nếu server không xác nhận để không tạo trạng thái giả thành công.
+      if (created) DB.customers = (DB.customers || []).filter(c => c.id !== id);
+      else {
+        const current = Q.customer(id);
+        if (current && previous) Object.assign(current, previous);
+      }
+      SEARCH_INDEX = null;
+      render();
+      Toast.err('Không lưu được khách hàng', err?.message || 'Server chưa xác nhận dữ liệu.');
+    }
   },
   'delete-customer': (d) => {
     const customer = Q.customer(d.id);
@@ -973,10 +1005,12 @@ const Actions = {
       const p=Q.product(productId);
       const price=parseMoney(row.querySelector('input[name="price"]')?.value)||Number(p?.price||0);
       const vatRate=Math.max(0,Number(row.querySelector('select[name="vatRate"]')?.value ?? 0)||0);
-      const packedWeightKg=Math.max(0, Number(p?.packedWeightG||0)>0 ? Number(p.packedWeightG)/1000 : Number(p?.packedWeightKg||0));
+      const packedWeightKg=typeof crmPackedWeightKg==='function'?crmPackedWeightKg(productId):Math.max(0, Number(p?.packedWeightG||0)>0 ? Number(p.packedWeightG)/1000 : Number(p?.packedWeightKg||0));
       return {index,productId,qty,price,vatRate,p,packedWeightKg};
     });
-    if(!rows.length||rows.some(x=>!x.productId||x.qty<=0)){Toast.err('Dòng hàng chưa hợp lệ','Mỗi dòng phải chọn thành phẩm và nhập số lượng lớn hơn 0.');return;}
+    if(!rows.length||rows.some(x=>!x.productId||!Number.isFinite(x.qty)||x.qty<=0)){Toast.err('Dòng hàng chưa hợp lệ','Mỗi dòng phải chọn thành phẩm và nhập số lượng lớn hơn 0.');return;}
+    const invalidIntegerRow=rows.find(x=>!(typeof crmIsKgProduct==='function'&&crmIsKgProduct(x.p))&&!Number.isInteger(x.qty));
+    if(invalidIntegerRow){Toast.err('Số lượng chưa hợp lệ',`${invalidIntegerRow.p?.name||invalidIntegerRow.productId} có ĐVT ${invalidIntegerRow.p?.unit||''}: chỉ được nhập số nguyên lớn hơn 0.`);return;}
     if(new Set(rows.map(x=>x.productId)).size!==rows.length){Toast.err('Thành phẩm bị trùng','Vui lòng gộp cùng thành phẩm vào một dòng.');return;}
     const items=rows.map((x,i)=>{const amount=x.qty*x.price;const vatAmount=Math.round(amount*x.vatRate/100);return {no:i+1,productId:x.productId,name:x.p?.name||x.productId,spec:x.p?.spec||'',unit:x.p?.unit||'',qty:x.qty,price:x.price,amount,vatRate:x.vatRate,vatAmount,lineTotal:amount+vatAmount,packedWeightKg:x.packedWeightKg,shippingWeightKg:Math.round(x.qty*x.packedWeightKg*1000)/1000};});
     const shippingWeightKg=Math.round(items.reduce((sum,it)=>sum+Number(it.shippingWeightKg||0),0)*1000)/1000;
@@ -989,6 +1023,8 @@ const Actions = {
     const nowIso=new Date().toISOString();
     const order={id,customerId,date,dueDate,paymentDueDate,ownerId,status:'dh_cho_xu_ly',quoteId:null,opportunityId,items,subtotal,discountPct:0,discount:0,vatRate:null,vat,shippingFee,otherCosts,otherCost,total,shippingWeightKg,deliveryAddress,deliveryProvince,deliveryDistrict,deliveryWard,deliveryAddressDetail,deliveryLat,deliveryLng,deliveryRecipient,deliveryPhone,deliveryNote,note:$('#crmOrderNote')?.value.trim()||'',createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||DB.currentUser?.fullName||''),createdAt:nowIso};
     DB.orders.unshift(order);
+    // Đơn bán vừa tạo phải xuất hiện NGAY ở Việc cần duyệt của Trưởng Kinh doanh.
+    if (typeof approvalRegisterPendingSalesOrderNow === 'function') approvalRegisterPendingSalesOrderNow(order);
     if(opportunityId){const opp=(DB.crmOpportunities||[]).find(x=>x.id===opportunityId);if(opp){opp.customerId=opp.customerId||customerId;opp.stage='CLOSED_WON';opp.probability=100;opp.updatedAt=actualToday;opp.orderId=id;}}
     SalesCRM.saveLocal(['orders']); SEARCH_INDEX=null; Modal.close();
     if(typeof SystemAPI!=='undefined') SystemAPI.audit({module:'CRM',entityType:'SALES_ORDER',entityId:id,action:'CREATE',description:`${DB.currentUser?.name||'Người dùng'} tạo đơn hàng ${id}`,newData:{status:order.status,total:order.total}});
@@ -1218,10 +1254,12 @@ const Actions = {
       const product = Q.product(productId);
       const price = parseMoney(row.querySelector('input[name="price"]')?.value) || Number(product?.price || 0);
       const vatRate = Math.max(0, Number(row.querySelector('select[name="vatRate"]')?.value ?? 0) || 0);
-      const packedWeightKg = Math.max(0, Number(product?.packedWeightG||0)>0 ? Number(product.packedWeightG)/1000 : Number(product?.packedWeightKg || 0));
+      const packedWeightKg = typeof crmPackedWeightKg==='function'?crmPackedWeightKg(productId):Math.max(0, Number(product?.packedWeightG||0)>0 ? Number(product.packedWeightG)/1000 : Number(product?.packedWeightKg || 0));
       return { index, productId, qty, price, vatRate, product, packedWeightKg };
     });
-    if (!rows.length || rows.some(x => !x.productId || x.qty <= 0)) { Toast.err('Dòng hàng chưa hợp lệ', 'Mỗi dòng phải chọn thành phẩm và nhập số lượng lớn hơn 0.'); return; }
+    if (!rows.length || rows.some(x => !x.productId || !Number.isFinite(x.qty) || x.qty <= 0)) { Toast.err('Dòng hàng chưa hợp lệ', 'Mỗi dòng phải chọn thành phẩm và nhập số lượng lớn hơn 0.'); return; }
+    const invalidIntegerRow = rows.find(x => !(typeof crmIsKgProduct==='function' && crmIsKgProduct(x.product)) && !Number.isInteger(x.qty));
+    if (invalidIntegerRow) { Toast.err('Số lượng chưa hợp lệ', `${invalidIntegerRow.product?.name||invalidIntegerRow.productId} có ĐVT ${invalidIntegerRow.product?.unit||''}: chỉ được nhập số nguyên lớn hơn 0.`); return; }
     if (new Set(rows.map(x => x.productId)).size !== rows.length) { Toast.err('Thành phẩm bị trùng', 'Vui lòng gộp cùng thành phẩm vào một dòng.'); return; }
     const items = rows.map((x, i) => { const amount=x.qty*x.price; const vatAmount=Math.round(amount*x.vatRate/100); return { no:i+1, productId:x.productId, name:x.product?.name||x.productId, spec:x.product?.spec||'', unit:x.product?.unit||'', qty:x.qty, price:x.price, amount, vatRate:x.vatRate, vatAmount, lineTotal:amount+vatAmount, packedWeightKg:x.packedWeightKg, shippingWeightKg:Math.round(x.qty*x.packedWeightKg*1000)/1000 }; });
     const shippingWeightKg = Math.round(items.reduce((sum,it)=>sum+Number(it.shippingWeightKg||0),0)*1000)/1000;
@@ -5182,9 +5220,14 @@ async function prepareSalesOrderFormData(triggerEl = null, { background = false 
   if (!background) Toast.info('Đang tải Kho thành phẩm', 'Hệ thống đang đồng bộ tồn khả dụng để tạo đơn hàng chính xác.');
 
   __salesOrderFormDataPromise = (async () => {
-    // Khách hàng thuộc CRM; chỉ nạp nếu API có sẵn.
-    if (typeof CRMAPI !== 'undefined' && CRMAPI.ensureFresh) {
-      await CRMAPI.ensureFresh(['customers']);
+    // Đơn bán phải dùng thông tin khách hàng MỚI NHẤT (đặc biệt địa chỉ giao hàng).
+    // Force đọc customers từ KIO mỗi lần chuẩn bị form, không dùng TTL/cache cũ.
+    if (typeof CRMAPI !== 'undefined') {
+      if (typeof CRMAPI.refreshKeys === 'function') {
+        await CRMAPI.refreshKeys(['customers'], { force: true });
+      } else if (typeof CRMAPI.ensureFresh === 'function') {
+        await CRMAPI.ensureFresh(['customers']);
+      }
     }
     // Đây là nguồn dữ liệu quyết định thành phẩm có được phép bán hay không.
     if (typeof InventoryAPI !== 'undefined' && InventoryAPI.ensureFresh) {
@@ -6318,10 +6361,12 @@ function routeRefreshPlan(module, tab) {
           await Promise.allSettled([
             typeof ApprovalsAPI !== 'undefined' && ApprovalsAPI.bootstrap ? ApprovalsAPI.bootstrap() : null,
             typeof PurchaseAPI !== 'undefined' && PurchaseAPI.bootstrap ? PurchaseAPI.bootstrap() : null,
+            typeof CRMAPI !== 'undefined' && CRMAPI.bootstrap ? CRMAPI.bootstrap() : null,
           ].filter(Boolean));
-          // Sau khi CẢ PR và Approval đã có dữ liệu server, tự phục hồi PR cũ
-          // đang Chờ duyệt nhưng thiếu approval_request tương ứng.
+          // Sau khi dữ liệu nghiệp vụ + Approval đã có từ server, tự phục hồi
+          // request bị thiếu cho cả PR và Đơn hàng bán.
           if (typeof approvalReconcilePendingPrs === 'function') await approvalReconcilePendingPrs({ persist: true });
+          if (typeof approvalReconcilePendingSalesOrders === 'function') await approvalReconcilePendingSalesOrders({ persist: true });
           return true;
         },
         async ensureFresh(_keys, { force = false } = {}) {
@@ -6332,6 +6377,7 @@ function routeRefreshPlan(module, tab) {
           const jobs = [];
           if (typeof ApprovalsAPI !== 'undefined' && ApprovalsAPI.ensureFresh) jobs.push(ApprovalsAPI.ensureFresh(['requests','logs'], { force: true }));
           if (typeof PurchaseAPI !== 'undefined' && PurchaseAPI.ensureFresh) jobs.push(PurchaseAPI.ensureFresh(['purchases'], { force: true }));
+          if (typeof CRMAPI !== 'undefined' && CRMAPI.ensureFresh) jobs.push(CRMAPI.ensureFresh(['orders'], { force: true }));
           const parts = await Promise.allSettled(jobs);
           const changed = {};
           for (const part of parts) {
@@ -6339,13 +6385,15 @@ function routeRefreshPlan(module, tab) {
           }
           const repaired = typeof approvalReconcilePendingPrs === 'function'
             ? await approvalReconcilePendingPrs({ persist: true }) : {created:0,repaired:0};
-          if (repaired?.created || repaired?.repaired) changed.reconciled = true;
+          const salesRepaired = typeof approvalReconcilePendingSalesOrders === 'function'
+            ? await approvalReconcilePendingSalesOrders({ persist: true }) : {created:0,repaired:0};
+          if (repaired?.created || repaired?.repaired || salesRepaired?.created || salesRepaired?.repaired) changed.reconciled = true;
           // Kể cả server trả cùng dữ liệu, renderNav cần dùng DB mới nhất sau force refresh.
           changed.approvalsValidated = true;
           return changed;
         },
       },
-      keys: ['requests','logs','purchases'],
+      keys: ['requests','logs','purchases','orders'],
       deferred: false,
     };
   }
@@ -6954,9 +7002,16 @@ window.ApprovalPrimaryData = (() => {
         if (typeof PurchaseAPI.bootstrap === 'function') await PurchaseAPI.bootstrap();
         if (typeof PurchaseAPI.ensureFresh === 'function') jobs.push(PurchaseAPI.ensureFresh(['purchases'], { force }));
       }
+      if (typeof CRMAPI !== 'undefined') {
+        if (typeof CRMAPI.bootstrap === 'function') await CRMAPI.bootstrap();
+        if (typeof CRMAPI.ensureFresh === 'function') jobs.push(CRMAPI.ensureFresh(['orders'], { force }));
+      }
       await Promise.allSettled(jobs);
       if (typeof approvalReconcilePendingPrs === 'function') {
         await approvalReconcilePendingPrs({ persist: true });
+      }
+      if (typeof approvalReconcilePendingSalesOrders === 'function') {
+        await approvalReconcilePendingSalesOrders({ persist: true });
       }
       // Badge Mua hàng và Phê duyệt đều phụ thuộc PR/request vừa hydrate.
       window.SidebarBadges?.markReady?.('purchases');
@@ -6999,7 +7054,11 @@ function scheduleRouteDataRefresh(module = State.module, tab = State.tab) {
       if (typeof plan.api.bootstrap === 'function') await plan.api.bootstrap();
       // Tồn kho là dữ liệu biến động liên thiết bị. Không dùng TTL 2 phút ở route này:
       // mỗi lần route refresh phải hỏi KIO thật để tab đang mở không giữ snapshot cũ.
-      const forceRouteRefresh = module === 'warehouse' && tab === 'inventory';
+      // CRM của role Kinh doanh có thể vừa được warm riêng cho badge ngay sau login.
+      // Trong cửa sổ ngắn này không force lại cùng collection lần thứ hai; ensureFresh
+      // sẽ chỉ lấy những key màn hình còn thiếu (ví dụ customers của dashboard).
+      const crmBadgeWarmRecent = module === 'crm' && (Date.now() - Number(window.__crmRoleBadgeWarmAt || 0) < 2500);
+      const forceRouteRefresh = (module === 'warehouse' && tab === 'inventory') || (module === 'crm' && !crmBadgeWarmRecent);
       const changed = await plan.api.ensureFresh(plan.keys, { force: forceRouteRefresh });
       let repairedPurchaseWorkflow = false;
       if (module === 'purchases' && tab === 'pr') {
@@ -7146,6 +7205,29 @@ if (
   if (State.module === 'quality' && (State.tab === 'iqc' || State.tab === 'fqc')) {
     QualityPrimaryData.markReady();
   }
+  // [CRM FIRST PAINT = KIO SERVER]
+  // Không render CUSTOMER_ROWS/data.js cũ (ví dụ 25 KH) rồi vài ms sau mới nhảy
+  // lên số server thật (ví dụ 26). Khi F5/deep-link vào CRM, hydrate collection
+  // của đúng tab từ KIO trước first paint. Không dùng localStorage CRM.
+  if (State.module === 'crm') {
+    try {
+      const crmInitialMap = {
+        dashboard: ['customers','orders'],
+        customers: ['customers','customerCareLogs'],
+        care: ['customers','customerCareLogs'],
+        complaints: ['customers','orders','crmTickets'],
+        transactions: ['customers','orders','crmTickets','customerCareLogs'],
+        orders: ['customers','orders','crmTickets'],
+        reports: ['customers','orders']
+      };
+      const crmKeys = crmInitialMap[State.tab || 'dashboard'] || crmInitialMap.dashboard;
+      await CRMAPI?.bootstrap?.();
+      await CRMAPI?.ensureFresh?.(crmKeys, { force: true });
+    } catch (err) {
+      console.warn('[CRM] Không hydrate được dữ liệu KIO trước first paint:', err);
+    }
+  }
+
   if (State.module === 'warehouse' && (State.tab === 'dashboard' || !State.tab)) {
     // Role Kho đăng nhập mặc định vào Tổng quan. Máy/điện thoại mới không có
     // snapshot local nên first paint cũng phải hydrate server trước khi hiện app.
@@ -7191,21 +7273,65 @@ if (
   document.querySelector('.app')?.classList.remove('hidden');
   document.getElementById('startupMask')?.remove();
 
-  // Badge công việc toàn hệ thống: hydrate nền ngay sau first paint để sidebar
-  // phản ánh các việc cần làm mà không bắt người dùng phải click từng module.
+  // [BADGE READY FIX]
+  // Bản role-badge trước chặn mọi badge cho tới khi SidebarBadges.ready.all=true,
+  // nhưng ERPDataWarmup chưa bao giờ được start nên badge luôn bằng 0.
+  // Warm toàn bộ collection cần cho badge ở nền sau first paint, sau đó mới cho
+  // sidebar hiện số server thật. Như vậy không lóe số cache cũ và cũng không mất badge.
   setTimeout(async () => {
     try {
-      const jobs = [];
-      if (typeof PurchaseAPI !== 'undefined') jobs.push(PurchaseAPI.ensureFresh?.(['purchases','supplierQuotations','purchaseOrders','goodsReceipts','supplierPayments','supplierRefunds'], {force:false}));
-      if (typeof InventoryAPI !== 'undefined') jobs.push(InventoryAPI.ensureFresh?.(['goodsIssues','stockTransfers','inventoryCounts','materialReturnRequests','inventoryLots','inventory'], {force:false}));
-      if (typeof ProductionAPI !== 'undefined') jobs.push(ProductionAPI.ensureFresh?.(['productionPlans','productionOrders','productionMaterialRequests','productionFinalInspections'], {force:false}));
-      if (typeof CRMAPI !== 'undefined') jobs.push(CRMAPI.ensureFresh?.(['orders','complaints'], {force:false}));
-      if (typeof RestaurantQualityAPI !== 'undefined') jobs.push(RestaurantQualityAPI.ensureFresh?.(['restaurantPosOrders','restaurantReplenishmentRequests'], {force:false}));
-      if (typeof ApprovalsAPI !== 'undefined') jobs.push(ApprovalsAPI.ensureFresh?.(['approvalRequests'], {force:false}));
-      await Promise.allSettled(jobs.filter(Boolean));
+      const roleId = String(DB.currentUser?.roleId || Auth.currentRole?.()?.id || '');
+
+      // PERFORMANCE: Kinh doanh chỉ có badge nghiệp vụ CRM + Phê duyệt.
+      // Không warm Purchase/Kho/Sản xuất/Nhà hàng... chỉ để hiện 1 badge.
+      // Trước đây badge đợi ERPDataWarmup.warmRemaining() hoàn tất toàn hệ thống,
+      // gây hàng chục/100+ request list.php và badge xuất hiện rất muộn.
+      if (roleId === 'ROLE_SALES_MANAGER' || roleId === 'ROLE_SALES') {
+        const jobs = [];
+        if (typeof CRMAPI !== 'undefined') {
+          await CRMAPI.bootstrap?.();
+          jobs.push(CRMAPI.ensureFresh?.(['orders'], { force:true }));
+        }
+        if (roleId === 'ROLE_SALES_MANAGER' && typeof ApprovalsAPI !== 'undefined') {
+          await ApprovalsAPI.bootstrap?.();
+          jobs.push(ApprovalsAPI.ensureFresh?.(['requests'], { force:true }));
+        }
+        await Promise.allSettled(jobs.filter(Boolean));
+
+        // Đơn bán cũ đang Chờ duyệt nhưng chưa có request sẽ được bổ sung đúng luồng.
+        if (roleId === 'ROLE_SALES_MANAGER' && typeof approvalReconcilePendingSalesOrders === 'function') {
+          await approvalReconcilePendingSalesOrders({ persist:true });
+        }
+
+        window.__crmRoleBadgeWarmAt = Date.now();
+        window.SidebarBadges?.markReady?.('all');
+        if (typeof renderNav === 'function') renderNav();
+        console.info('[WorkBadges] Đã warm badge theo role Kinh doanh: CRM orders + approvals only.');
+        return;
+      }
+
+      // Các role khác giữ nguyên cơ chế hiện tại để không thay đổi nghiệp vụ ngoài phạm vi.
+      if (window.ERPDataWarmup?.start) {
+        await window.ERPDataWarmup.start();
+      } else {
+        const jobs = [];
+        if (typeof PurchaseAPI !== 'undefined') jobs.push(PurchaseAPI.ensureFresh?.(['purchases','supplierQuotations','purchaseOrders','goodsReceipts','supplierPayments','supplierRefunds'], {force:true}));
+        if (typeof InventoryAPI !== 'undefined') jobs.push(InventoryAPI.ensureFresh?.(['goodsIssues','stockTransfers','inventoryCounts','materialReturnRequests','inventoryLots','inventory'], {force:true}));
+        if (typeof ProductionAPI !== 'undefined') jobs.push(ProductionAPI.ensureFresh?.(['productionPlans','productionOrders','productionMaterialRequests','productionFinalInspections'], {force:true}));
+        if (typeof CRMAPI !== 'undefined') jobs.push(CRMAPI.ensureFresh?.(['orders','crmTickets'], {force:true}));
+        if (typeof RestaurantQualityAPI !== 'undefined') jobs.push(RestaurantQualityAPI.ensureFresh?.(['orders','replenishments','coa','capa','recalls'], {force:true}));
+        if (typeof ApprovalsAPI !== 'undefined') jobs.push(ApprovalsAPI.ensureFresh?.(['requests'], {force:true}));
+        await Promise.allSettled(jobs.filter(Boolean));
+      }
+      window.SidebarBadges?.markReady?.('all');
       if (typeof renderNav === 'function') renderNav();
-    } catch (err) { console.warn('[WorkBadges] Không hydrate đủ badge công việc:', err); }
-  }, 80);
+      console.info('[WorkBadges] Badge server-ready; sidebar đã render lại.');
+    } catch (err) {
+      console.warn('[WorkBadges] Không hydrate đủ badge công việc:', err);
+      window.SidebarBadges?.markReady?.('all');
+      if (typeof renderNav === 'function') renderNav();
+    }
+  }, 20);
 
   // Login QC thường vào Tổng quan. Warm IQC + FQC ngay sau render ở nền để khi
   // người dùng click vào danh sách thì dữ liệu đã sẵn sàng và hiện đúng ngay.

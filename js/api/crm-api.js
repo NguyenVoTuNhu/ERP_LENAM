@@ -47,12 +47,15 @@ const CRMAPI = (() => {
     );
   }
 
-  function readCache() {
-    return KioDataUtils.readJson(CACHE_KEY);
-  }
+  // CRM không dùng localStorage cache làm nguồn dữ liệu nữa.
+  // Chỉ KIO server + DB runtime hiện tại mới quyết định dữ liệu hiển thị.
+  // PENDING_KEY vẫn được giữ riêng cho outbox thao tác chưa kịp ghi server.
+  function readCache() { return null; }
+  function writeCache(_data) { return true; }
 
-  function writeCache(data) {
-    return KioDataUtils.writeJson(CACHE_KEY, data);
+  function clearLegacyCrmCache() {
+    try { localStorage.removeItem(CACHE_KEY); } catch (_) {}
+    try { localStorage.removeItem(LEGACY_LOCAL_KEY); } catch (_) {}
   }
 
   function snapshotCurrentDb() {
@@ -139,14 +142,37 @@ const CRMAPI = (() => {
     return readAll();
   }
 
+  async function safeRowsForSync(key) {
+    const rows = Array.isArray(DB[key]) ? DB[key] : [];
+    if (rows.length > 0) return rows;
+
+    // DATA-SAFE: trạng thái frontend rỗng sau F5/cache lỗi không được coi là
+    // yêu cầu xoá collection trên server. CRUD xoá record phải đi qua deleteKeys().
+    // Với syncCollection thì [] vốn là no-op, nhưng chặn tại đây để pending/outbox
+    // cũ không thể trở thành nguồn dữ liệu nghiệp vụ và để log nguyên nhân rõ ràng.
+    try {
+      const remote = await KioStore.listCollection(TABLES[key], { force: true });
+      if (Array.isArray(remote) && remote.length > 0) {
+        console.warn(`[CRMAPI][DATA-SAFE] Bỏ qua sync ${key}=[] vì server đang có ${remote.length} record.`);
+      } else {
+        console.info(`[CRMAPI][DATA-SAFE] Bỏ qua sync ${key}=[]; xoá collection phải dùng deleteKeys có chủ đích.`);
+      }
+    } catch (err) {
+      console.warn(`[CRMAPI][DATA-SAFE] Không xác minh được server cho ${key}; vẫn bỏ qua payload rỗng.`, err);
+    }
+    return null;
+  }
+
   function syncCollections(keys) {
     const wanted = normalizeKeys(keys);
     syncChain = syncChain.catch(() => {}).then(async () => {
       for (const key of wanted) {
-        await KioStore.syncCollection(
-          TABLES[key],
-          Array.isArray(DB[key]) ? DB[key] : []
-        );
+        const rows = await safeRowsForSync(key);
+        if (!rows) {
+          pendingKeys.delete(key);
+          continue;
+        }
+        await KioStore.syncCollection(TABLES[key], rows);
       }
       wanted.forEach(key => pendingKeys.delete(key));
       writeCache(snapshotCurrentDb());
@@ -213,18 +239,27 @@ const CRMAPI = (() => {
   async function bootstrap() {
     if (booted) return true;
     booted = true;
-    const cached = readCache();
+    clearLegacyCrmCache();
     const pendingState = KioDataUtils.readJson(PENDING_KEY);
-    if (cached && hasAnyData(cached)) {
-      apply(cached);
-      console.info('[CRMAPI] Đã nạp cache CRM; chờ refresh theo màn hình đang mở.');
-    } else {
-      // Không tự lấy dữ liệu legacy/demo làm nguồn nghiệp vụ. Route sẽ đọc lenam_* từ server.
-      Object.keys(TABLES).forEach(key => { DB[key] = []; });
-      console.info('[CRMAPI] Chưa có cache server; chờ tải dữ liệu thật từ KIO.');
-    }
-    const replay=normalizeKeys(pendingState?.keys||[]); replay.forEach(k=>pendingKeys.add(k));
-    if(replay.length) await syncCollections(replay);
+    // KHÔNG hydrate DB từ cache và cũng KHÔNG reset DB về [].
+    // Route CRM sẽ đọc KIO thật ngay khi vào màn hình. Điều này loại bỏ tình trạng
+    // cache rỗng ghi đè dữ liệu vừa render sau F5/chuyển trang.
+    console.info('[CRMAPI] CRM cache đã vô hiệu hóa; dữ liệu chỉ lấy từ KIO server.');
+    // DATA-SAFE: chỉ replay outbox khi cache thực sự còn payload không rỗng.
+    // Pending key cũ + DB=[] sau deploy/F5 phải bị loại bỏ, không được đẩy ngược
+    // state rỗng lên server.
+    const replay = normalizeKeys(pendingState?.keys || []).filter(key => {
+      const rows = Array.isArray(DB[key]) ? DB[key] : [];
+      if (rows.length > 0) return true;
+      console.warn(`[CRMAPI][DATA-SAFE] Bỏ pending rỗng khi bootstrap: ${key}`);
+      return false;
+    });
+    replay.forEach(k => pendingKeys.add(k));
+    if (replay.length) await syncCollections(replay);
+    try {
+      if (pendingKeys.size) KioDataUtils.writeJson(PENDING_KEY,{keys:[...pendingKeys],at:Date.now()});
+      else localStorage.removeItem(PENDING_KEY);
+    } catch (_) {}
     return true;
   }
 

@@ -215,51 +215,32 @@ const SalesCRM = (() => {
   }
 
   function saveLocal(keys = null, options = {}) {
-    // Cache local giúp mở giao diện nhanh, KHÔNG phải database chính.
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshotState()));
-    } catch (e) {
-      console.warn('[SalesCRM] Không lưu được cache CRM:', e);
-    }
+    // [CRM KIO-ONLY] Không còn dùng localStorage làm nguồn/cache nghiệp vụ CRM.
+    // Mọi dữ liệu CRM chỉ sống trong DB runtime và các bảng lenam_* trên KIO.
+    try { localStorage.removeItem(STORAGE_KEY); } catch (_) {}
 
-    // Cho phép các action quan trọng đã await KIO trực tiếp chỉ cập nhật cache,
-    // tránh schedule một lượt ghi thứ hai không cần thiết. Mặc định giữ nguyên
-    // hành vi cũ cho toàn bộ các nơi khác.
     if (options?.sync === false) return;
 
-    // Persistence thật: đồng bộ vào các bảng lenam_* riêng trên KIO.
     if (typeof CRMAPI !== 'undefined') {
-      if (keys) CRMAPI.scheduleCollections(keys, 180);
-      else CRMAPI.scheduleSync(180);
+      if (keys) CRMAPI.scheduleCollections(keys, 0);
+      else CRMAPI.scheduleSync(0);
     }
   }
 
   function restoreLocal() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return false;
-      const saved = JSON.parse(raw);
-      const ok = applyState(saved);
-      if (ok) console.info('[SalesCRM] Đã nạp cache CRM local trong khi chờ KIO.');
-      return ok;
-    } catch (e) {
-      console.warn('[SalesCRM] Cache CRM không hợp lệ:', e);
-      return false;
-    }
+    // [CRM KIO-ONLY] Tuyệt đối không hydrate DB từ cache cũ vì cache stale/rỗng
+    // từng làm danh sách khách hàng nhảy 25 -> 26 hoặc mất dữ liệu khi đổi trang.
+    try { localStorage.removeItem(STORAGE_KEY); } catch (_) {}
+    return false;
   }
 
   let __salesCrmBooted = false;
   async function bootstrap() {
     if (__salesCrmBooted) return true;
     __salesCrmBooted = true;
-    const hadLocal = restoreLocal();
-    if (typeof CRMAPI === 'undefined') return hadLocal;
-    const ok = await CRMAPI.bootstrap();
-    // Cập nhật lại cache local sau khi KIO đã nạp/migrate xong.
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshotState()));
-    } catch (_) {}
-    return ok || hadLocal;
+    restoreLocal();
+    if (typeof CRMAPI === 'undefined') return false;
+    return await CRMAPI.bootstrap();
   }
 
   function nextNumericCode(prefix, list, width = 4) {
@@ -470,8 +451,8 @@ function openOrderForm(customerId = '', opportunityId = '') {
         <div class="field"><label>Ngày giao dự kiến <b>*</b></label><input class="inp" type="date" id="crmOrderDue" value="${currentDateYMD()}" min="${currentDateYMD()}"></div>
         <div class="field"><label>Hạn thanh toán</label><input class="inp" type="date" id="crmPaymentDue" value="${currentDateYMD()}" min="${currentDateYMD()}"><div class="cell-sub">Dùng để cảnh báo công nợ quá hạn.</div></div>
         <div class="field"><label>Tỉnh / Thành phố <b>*</b></label><select class="inp" id="crmDeliveryProvince"><option value="">-- Chọn Tỉnh/Thành phố --</option></select></div>
-        <div class="field"><label>Quận / Huyện <b>*</b></label><select class="inp" id="crmDeliveryDistrict"><option value="">-- Chọn Quận/Huyện --</option></select></div>
-        <div class="field"><label>Phường / Xã</label><select class="inp" id="crmDeliveryWard"><option value="">-- Chọn Phường/Xã --</option></select></div>
+        <div class="field" style="display:none"><label>Quận / Huyện</label><select class="inp" id="crmDeliveryDistrict"><option value=""></option></select></div>
+        <div class="field"><label>Phường / Xã / Đặc khu <b>*</b></label><select class="inp" id="crmDeliveryWard"><option value="">-- Chọn Phường/Xã/Đặc khu --</option></select></div>
         <div class="field"><label>Địa chỉ chi tiết <b>*</b></label><input class="inp" id="crmDeliveryAddressDetail" placeholder="Số nhà, tên đường, tòa nhà..."> <div class="cell-sub" id="crmDeliveryAddressNote">Hệ thống tự ghép thành địa chỉ giao hàng đầy đủ; nhân viên không cần nhập tọa độ.</div></div>
         <input type="hidden" id="crmDeliveryLat" value="">
         <input type="hidden" id="crmDeliveryLng" value="">
@@ -515,11 +496,22 @@ function openOrderForm(customerId = '', opportunityId = '') {
     const detail = document.querySelector('#crmDeliveryAddressDetail');
     const recipient = document.querySelector('#crmDeliveryRecipient');
     const phone = document.querySelector('#crmDeliveryPhone');
-    const structured = {province:c?.province||'',district:c?.district||'',ward:c?.ward||''};
+    if (!c) { await initDeliveryAddress({}); return; }
+
+    // Ưu tiên cấu trúc địa chỉ mới nếu khách hàng đã có province/district/ward/addressDetail.
+    // Với dữ liệu khách hàng legacy chỉ có `address` đầy đủ, không ghép thêm tỉnh lần nữa.
+    const hasStructured = !!(c.addressDetail || c.ward);
+    const structured = hasStructured
+      ? {province:c.province||'', district:'', ward:c.ward||''}
+      : {province:'', district:'', ward:''};
     await initDeliveryAddress(structured);
-    if (detail && (!detail.value || detail.dataset.auto === '1')) { detail.value = c?.addressDetail || c?.address || ''; detail.dataset.auto = '1'; }
-    if (recipient && (!recipient.value || recipient.dataset.auto === '1')) { recipient.value = c?.contact || c?.name || ''; recipient.dataset.auto = '1'; }
-    if (phone && (!phone.value || phone.dataset.auto === '1')) { phone.value = c?.phone || ''; phone.dataset.auto = '1'; }
+
+    if (detail && (!detail.value || detail.dataset.auto === '1')) {
+      detail.value = hasStructured ? (c.addressDetail || '') : (c.address || '');
+      detail.dataset.auto = '1';
+    }
+    if (recipient && (!recipient.value || recipient.dataset.auto === '1')) { recipient.value = c.contact || c.name || ''; recipient.dataset.auto = '1'; }
+    if (phone && (!phone.value || phone.dataset.auto === '1')) { phone.value = String(c.phone || '').replace(/\D/g, '').slice(0,10); phone.dataset.auto = '1'; }
   };
   document.querySelector('#crmOrderCustomer')?.addEventListener('change', fillDeliveryFromCustomer);
   ['#crmDeliveryAddressDetail','#crmDeliveryRecipient','#crmDeliveryPhone'].forEach(sel => document.querySelector(sel)?.addEventListener('input', ev => { ev.currentTarget.dataset.auto = '0'; }));
@@ -527,9 +519,33 @@ function openOrderForm(customerId = '', opportunityId = '') {
   setTimeout(() => { bindCrmOrderWeightEvents(document); bindCrmOtherCostEvents(document); document.getElementById('crmShippingFee')?.addEventListener('input',()=>updateCrmOrderTotals(document)); updateCrmOrderTotals(document); }, 0);
 }
 
+function crmUnitIsKg(unit) {
+  const u = String(unit || '').trim().toLowerCase().replace(/\s+/g, '');
+  return ['kg','kgs','kilogram','kilograms','kilôgam','kilogam'].includes(u);
+}
+
+function crmIsKgProduct(productOrId) {
+  const p = typeof productOrId === 'string' ? Q.product(productOrId) : productOrId;
+  return !!p && crmUnitIsKg(p.unit);
+}
+
 function crmPackedWeightKg(productId) {
   const p = Q.product(productId);
+  // Thành phẩm có ĐVT = Kg: số lượng chính là khối lượng vận chuyển (1 đơn vị = 1 kg).
+  if (crmIsKgProduct(p)) return 1;
   return Math.max(0, Number(p?.packedWeightG||0)>0 ? Number(p.packedWeightG)/1000 : Number(p?.packedWeightKg || 0));
+}
+
+function applyCrmOrderQtyRule(row) {
+  if (!row) return;
+  const productId = row.querySelector('select[name="product"]')?.value || '';
+  const p = Q.product(productId);
+  const input = row.querySelector('input[name="qty"]');
+  if (!input) return;
+  const isKg = crmIsKgProduct(p);
+  input.min = isKg ? '0.001' : '1';
+  input.step = isKg ? '0.001' : '1';
+  input.inputMode = isKg ? 'decimal' : 'numeric';
 }
 
 function updateCrmOrderLineWeight(row) {
@@ -540,7 +556,10 @@ function updateCrmOrderLineWeight(row) {
   const out = row.querySelector('[data-role="line-weight"]');
   const hint = row.querySelector('[data-role="weight-hint"]');
   if (out) out.value = perUnit > 0 && qty > 0 ? (perUnit * qty).toFixed(3).replace(/\.?0+$/, '') : '';
-  if (hint) hint.textContent = productId ? (perUnit > 0 ? `${perUnit.toLocaleString('vi-VN',{maximumFractionDigits:3})} kg / ${Q.product(productId)?.unit || 'ĐVT'}` : 'Chưa khai báo khối lượng đóng gói') : '';
+  const p = Q.product(productId);
+  if (hint) hint.textContent = productId
+    ? (crmIsKgProduct(p) ? 'ĐVT Kg: khối lượng = số lượng đã nhập.' : (perUnit > 0 ? `${perUnit.toLocaleString('vi-VN',{maximumFractionDigits:3})} kg / ${p?.unit || 'ĐVT'}` : 'Chưa khai báo khối lượng đóng gói'))
+    : '';
 }
 
 function crmOtherCostLineHTML(item={}, first=false) {
@@ -590,17 +609,18 @@ function bindCrmOrderWeightEvents(root=document) {
   root.querySelectorAll?.('.crm-order-line').forEach(row => {
     if (row.dataset.weightBound === '1') { updateCrmOrderLineWeight(row); return; }
     row.dataset.weightBound = '1';
-    row.querySelector('select[name="product"]')?.addEventListener('change', () => { updateCrmOrderLineWeight(row); updateCrmOrderTotals(document); });
+    row.querySelector('select[name="product"]')?.addEventListener('change', () => { applyCrmOrderQtyRule(row); updateCrmOrderLineWeight(row); updateCrmOrderTotals(document); });
     row.querySelector('input[name="qty"]')?.addEventListener('input', () => { updateCrmOrderLineWeight(row); updateCrmOrderTotals(document); });
     row.querySelector('input[name="price"]')?.addEventListener('input', () => updateCrmOrderTotals(document));
     row.querySelector('select[name="vatRate"]')?.addEventListener('change', () => updateCrmOrderTotals(document));
+    applyCrmOrderQtyRule(row);
     updateCrmOrderLineWeight(row);
     updateCrmOrderTotals(document);
   });
 }
 
 function crmOrderLineHTML(options, first=false) {
-  return `<div class="crm-order-line" style="display:grid;grid-template-columns:minmax(230px,2fr) 90px 125px 92px 125px 44px;gap:8px;align-items:end;margin-bottom:8px">
+  return `<div class="crm-order-line" style="display:grid;grid-template-columns:minmax(230px,2fr) 125px 125px 92px 125px 44px;gap:8px;align-items:end;margin-bottom:8px">
     <div class="field" style="margin:0"><label>Thành phẩm</label><select class="inp" name="product"><option value="">-- Chọn thành phẩm --</option>${options}</select></div>
     <div class="field" style="margin:0"><label>Số lượng</label><input class="inp right num" name="qty" type="number" min="1" step="1"></div>
     <div class="field" style="margin:0"><label>Đơn giá</label><input class="inp right num" name="price" data-money="1" type="text" inputmode="numeric"></div>
@@ -621,7 +641,7 @@ function openOrderEditForm(id) {
     const stockText = available > 0 ? `tồn TP ${fmtN(available)} ${p.unit||''}` : 'HẾT HÀNG';
     return `<option value="${p.id}" data-price="${Number(p.price||0)}">${esc(p.id+' · '+p.name+' · '+stockText)}</option>`;
   }).join('');
-  const rows = (o.items||[]).map((it,idx)=>`<div class="crm-order-line" style="display:grid;grid-template-columns:minmax(230px,2fr) 90px 125px 92px 125px 44px;gap:8px;align-items:end;margin-bottom:8px">
+  const rows = (o.items||[]).map((it,idx)=>`<div class="crm-order-line" style="display:grid;grid-template-columns:minmax(230px,2fr) 125px 125px 92px 125px 44px;gap:8px;align-items:end;margin-bottom:8px">
     <div class="field" style="margin:0"><label>Thành phẩm</label><select class="inp" name="product"><option value="">-- Chọn thành phẩm --</option>${products.map(p=>{const av=Number(SalesCRM.finishedAvailable(p.id)||0);return `<option value="${p.id}" ${p.id===it.productId?'selected':''}>${esc(p.id+' · '+p.name+' · '+(av>0?`tồn TP ${fmtN(av)} ${p.unit||''}`:'HẾT HÀNG'))}</option>`;}).join('')}</select></div>
     <div class="field" style="margin:0"><label>Số lượng</label><input class="inp right num" name="qty" type="number" min="1" step="1" value="${Number(it.qty||0)}"></div>
     <div class="field" style="margin:0"><label>Đơn giá</label><input class="inp right num" name="price" data-money="1" type="text" inputmode="numeric" value="${Number(it.price||0)}"></div>
@@ -637,8 +657,8 @@ function openOrderEditForm(id) {
       <div class="field"><label>Ngày giao dự kiến *</label><input class="inp" type="date" id="crmOrderDue" value="${esc(o.dueDate||currentDateYMD())}"></div>
       <div class="field"><label>Hạn thanh toán</label><input class="inp" type="date" id="crmPaymentDue" value="${esc(o.paymentDueDate||o.dueDate||currentDateYMD())}"><div class="cell-sub">Dùng để cảnh báo công nợ quá hạn.</div></div>
       <div class="field"><label>Tỉnh / Thành phố *</label><select class="inp" id="crmDeliveryProvince"><option value="${esc(o.deliveryProvince||'')}">${esc(o.deliveryProvince||'-- Chọn Tỉnh/Thành phố --')}</option></select></div>
-      <div class="field"><label>Quận / Huyện *</label><select class="inp" id="crmDeliveryDistrict"><option value="${esc(o.deliveryDistrict||'')}">${esc(o.deliveryDistrict||'-- Chọn Quận/Huyện --')}</option></select></div>
-      <div class="field"><label>Phường / Xã</label><select class="inp" id="crmDeliveryWard"><option value="${esc(o.deliveryWard||'')}">${esc(o.deliveryWard||'-- Chọn Phường/Xã --')}</option></select></div>
+      <div class="field" style="display:none"><label>Quận / Huyện</label><select class="inp" id="crmDeliveryDistrict"><option value=""></option></select></div>
+      <div class="field"><label>Phường / Xã / Đặc khu *</label><select class="inp" id="crmDeliveryWard"><option value="${esc(o.deliveryWard||'')}">${esc(o.deliveryWard||'-- Chọn Phường/Xã/Đặc khu --')}</option></select></div>
       <div class="field"><label>Địa chỉ chi tiết *</label><input class="inp" id="crmDeliveryAddressDetail" value="${esc(o.deliveryAddressDetail || (!o.deliveryProvince ? (o.deliveryAddress||Q.customer(o.customerId)?.address||'') : ''))}" placeholder="Số nhà, tên đường, tòa nhà..."><div class="cell-sub" id="crmDeliveryAddressNote">Tọa độ được xử lý nội bộ khi Logistics cần tính tuyến.</div></div>
       <input type="hidden" id="crmDeliveryLat" value="${Number(o.deliveryLat||0)||''}">
       <input type="hidden" id="crmDeliveryLng" value="${Number(o.deliveryLng||0)||''}">
@@ -657,7 +677,7 @@ function openOrderEditForm(id) {
 
 function crmReadDeliveryAddressForm(){
   const x = (typeof VNAddress !== 'undefined') ? VNAddress.read('crmDelivery') : {province:document.querySelector('#crmDeliveryProvince')?.value?.trim()||'',district:document.querySelector('#crmDeliveryDistrict')?.value?.trim()||'',ward:document.querySelector('#crmDeliveryWard')?.value?.trim()||'',addressDetail:document.querySelector('#crmDeliveryAddressDetail')?.value?.trim()||''};
-  if(!x.address) x.address=[x.addressDetail,x.ward,x.district,x.province].filter(Boolean).join(', ');
+  if(!x.address) x.address=[x.addressDetail,x.ward,x.province].filter(Boolean).join(', ');
   return x;
 }
 
@@ -720,8 +740,8 @@ Views['order-detail'] = function (params) {
         <dt>Khách hàng</dt><dd>${esc(customer?.name||'—')}</dd><dt>Khu vực</dt><dd>${esc(customer?.province||'—')}</dd>
         <dt>Sale phụ trách</dt><dd>${esc(Q.employeeName(o.ownerId))}</dd><dt>Ngày đặt</dt><dd>${fmtDate(o.date)}</dd><dt>Ngày giao</dt><dd>${fmtDate(o.dueDate)}</dd>
         <dt>Địa chỉ giao</dt><dd>${esc(o.deliveryAddress||customer?.address||'—')}</dd><dt>Người nhận</dt><dd>${esc(o.deliveryRecipient||customer?.contact||'—')} ${o.deliveryPhone?`· ${esc(o.deliveryPhone)}`:''}</dd>
-        <dt>VAT theo sản phẩm</dt><dd><b>${fmtVND(Number(o.vat||0))}</b></dd><dt>Phí vận chuyển thu khách</dt><dd><b>${fmtVND(Number(o.shippingFee||0))}</b></dd><dt>Chi phí khác</dt><dd><b>${fmtVND(Number(o.otherCost||0))}</b>${(o.otherCosts||[]).length?`<div class="cell-sub" style="margin-top:4px">${(o.otherCosts||[]).map(x=>`${esc(x.name||'Chi phí khác')}: ${fmtVND(Number(x.amount||0))}`).join('<br>')}</div>`:''}</dd><dt>Chi phí vận chuyển thực tế</dt><dd>${o.actualTransportCost!=null?`<b>${fmtVND(Number(o.actualTransportCost||0))}</b>`:'<span class="muted">Chưa chốt chuyến</span>'}</dd>
-        <dt>Chính sách phí vận chuyển</dt><dd>${o.actualTransportCost!=null?(()=>{const diff=Number(o.shippingFee||0)-Number(o.actualTransportCost||0);if(Math.abs(diff)<0.5)return '<span class="badge green">Thu đúng chi phí</span>';if(diff<0)return `<span class="badge orange">Doanh nghiệp hỗ trợ ${fmtVND(Math.abs(diff))}</span>`;return `<span class="badge green">Thu cao hơn chi phí ${fmtVND(diff)}</span>`;})():'<span class="muted">Xác định sau khi chốt chuyến</span>'}</dd>
+        <dt>VAT theo sản phẩm</dt><dd><b>${fmtVND(Number(o.vat||0))}</b></dd><dt>Phí vận chuyển thu khách</dt><dd>${Number(o.shippingFee||0)>0?`<b>${fmtVND(Number(o.shippingFee||0))}</b>`:'<span class="muted">Chưa xác định</span>'}</dd><dt>Chi phí khác</dt><dd><b>${fmtVND(Number(o.otherCost||0))}</b>${(o.otherCosts||[]).length?`<div class="cell-sub" style="margin-top:4px">${(o.otherCosts||[]).map(x=>`${esc(x.name||'Chi phí khác')}: ${fmtVND(Number(x.amount||0))}`).join('<br>')}</div>`:''}</dd><dt>Chi phí vận chuyển thực tế</dt><dd>${Number(o.actualTransportCost||0)>0?`<b>${fmtVND(Number(o.actualTransportCost||0))}</b>`:'<span class="muted">Chưa quyết toán</span>'}</dd>
+        <dt>Chính sách phí vận chuyển</dt><dd>${Number(o.actualTransportCost||0)>0&&Number(o.shippingFee||0)>0?(()=>{const diff=Number(o.shippingFee||0)-Number(o.actualTransportCost||0);if(Math.abs(diff)<0.5)return '<span class="badge green">Thu đúng chi phí</span>';if(diff<0)return `<span class="badge orange">Doanh nghiệp hỗ trợ ${fmtVND(Math.abs(diff))}</span>`;return `<span class="badge green">Thu cao hơn chi phí ${fmtVND(diff)}</span>`;})():'<span class="muted">Chờ quyết toán / xác định phí thu khách</span>'}</dd>
         <dt>Trạng thái vận chuyển</dt><dd>${esc(o.logisticsStatus||'Chưa chuyển Logistics')}</dd><dt>Đơn giao</dt><dd>${o.logisticsDeliveryId?`<span class="code">${esc(o.logisticsDeliveryId)}</span>`:'—'}</dd>
         <dt>Người tạo</dt><dd>${esc(o.createdByName || Q.employeeName(o.createdBy) || '—')}</dd><dt>Người duyệt</dt><dd>${esc(o.approvedByName || Q.employeeName(o.approvedBy) || '—')}</dd><dt>Nguồn đơn</dt><dd>${o.opportunityId?`Cơ hội ${esc(o.opportunityId)}`:'Tạo trực tiếp'}</dd><dt>Phiếu xuất bán</dt><dd>${issues.length?issues.map(x=>`<span class="code">${esc(x.id)}</span>`).join(', '):'<span class="muted">Chưa có</span>'}</dd>
         <dt>Hoàn thành đơn</dt><dd>${o.completedAt?fmtDate(String(o.completedAt).slice(0,10)):'—'}</dd><dt>Hàng trả về</dt><dd>${(o.returnedItems||[]).length?(o.returnedItems||[]).map(x=>`${esc(Q.product(x.productId)?.name||x.productId)}: <b>${fmtN(x.qty)}</b>`).join('<br>'):'Không có'}</dd>

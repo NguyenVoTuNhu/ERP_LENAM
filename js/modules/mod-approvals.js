@@ -29,6 +29,7 @@ const APPROVAL_DOC_TYPES = {
   SPECIAL_ISSUE:        { label: 'Xuất kho đặc biệt',        icon: 'fa-dolly',                tone: 'teal'   },
   OVER_NORM_PRODUCTION: { label: 'Sản xuất ngoài định mức',  icon: 'fa-industry',             tone: 'orange' },
   RETURN_EXCHANGE:      { label: 'Đổi trả hàng',             icon: 'fa-rotate-left',          tone: 'slate'  },
+  SALES_ORDER:          { label: 'Đơn hàng bán',              icon: 'fa-file-invoice-dollar',  tone: 'blue'   },
 };
 const APPROVAL_DOC_TYPE_LIST = Object.keys(APPROVAL_DOC_TYPES);
 
@@ -77,6 +78,17 @@ DB.approvalWorkflows = DB.approvalWorkflows || [
       { level: 2, role: 'ROLE_ACCOUNTING', label: 'Kế toán đối chiếu công nợ', minAmount: 0 },
     ] },
 ];
+
+// Đơn hàng bán phải đi qua Trưởng phòng Kinh doanh trước khi Kho/SX xử lý.
+// Dùng ensure thay vì chỉ đặt trong mảng mặc định vì approvalWorkflows có thể
+// đã được hydrate từ KIO và thiếu workflow mới.
+if (!DB.approvalWorkflows.some(w => w && w.docType === 'SALES_ORDER')) {
+  DB.approvalWorkflows.push({
+    id: 'WF-SALES-ORDER', docType: 'SALES_ORDER', name: 'Duyệt đơn hàng bán', slaHours: 24,
+    levels: [{ level: 1, role: 'ROLE_SALES_MANAGER', label: 'Trưởng phòng Kinh doanh duyệt', minAmount: 0 }]
+  });
+}
+
 DB.approvalRequests = DB.approvalRequests || [];
 DB.approvalLogs = DB.approvalLogs || [];
 DB.eSignatures = DB.eSignatures || [];
@@ -197,6 +209,85 @@ async function approvalReconcilePendingPrs({ persist = true } = {}) {
     else console.info(`[Approvals] Đã phục hồi PR chờ duyệt: tạo ${created} approval request, sửa ${repaired} liên kết/cấp duyệt.`);
   }
   return { created, repaired };
+}
+
+
+/* Đồng bộ nghiệp vụ Đơn hàng bán -> Việc cần duyệt.
+ * Mọi đơn đang dh_cho_xu_ly bắt buộc có một SALES_ORDER request PENDING ở
+ * ROLE_SALES_MANAGER. Hàm này còn tự chữa dữ liệu cũ đã tạo trước bản fix. */
+async function approvalReconcilePendingSalesOrders({ persist = true } = {}) {
+  const orders = (DB.orders || []).filter(o => o && o.status === 'dh_cho_xu_ly' && !o.approvedAt);
+  if (!orders.length) return { created: 0, repaired: 0 };
+  const wf = approvalWorkflowOf('SALES_ORDER');
+  if (!wf) return { created: 0, repaired: 0 };
+  let created = 0, repaired = 0;
+  const now = new Date();
+
+  for (const order of orders) {
+    let req = (DB.approvalRequests || []).find(r => r.docType === 'SALES_ORDER' && r.docId === order.id && r.status === 'PENDING');
+    if (!req) {
+      const levels = approvalActiveLevels(wf, Number(order.total || 0)).map(l => ({
+        level: l.level, role: l.role, label: l.label, status: 'PENDING',
+        approverId: '', approverName: '', time: '', note: '', signature: ''
+      }));
+      if (!levels.length) continue;
+      const requestedAt = order.createdAt || `${order.date || approvalTodayYMD()}T00:00:00`;
+      const base = new Date(requestedAt);
+      const due = new Date((Number.isNaN(base.getTime()) ? now : base).getTime() + Number(wf.slaHours || 24) * 3600000);
+      req = {
+        id: nextCode('DUYET-2026-', DB.approvalRequests), workflowId: wf.id,
+        docType: 'SALES_ORDER', docId: order.id, title: `Đơn hàng bán ${order.id}`,
+        amount: Number(order.total || 0),
+        requestedBy: order.createdBy || order.ownerId || '',
+        requestedByName: order.createdByName || Q.employeeName?.(order.createdBy || order.ownerId) || '',
+        requestedAt: requestedAt,
+        status: 'PENDING', currentLevel: levels[0].level, levels,
+        dueAt: due.toISOString(), note: order.note || '', repairedFromSalesOrder: true
+      };
+      DB.approvalRequests.unshift(req);
+      created++;
+    } else {
+      const lvl = (req.levels || []).find(l => l.status === 'PENDING');
+      if (!lvl || lvl.role !== 'ROLE_SALES_MANAGER') {
+        req.levels = [{ level: 1, role: 'ROLE_SALES_MANAGER', label: 'Trưởng phòng Kinh doanh duyệt', status: 'PENDING', approverId:'', approverName:'', time:'', note:'', signature:'' }];
+        req.currentLevel = 1;
+        repaired++;
+      }
+      if (Number(req.amount || 0) !== Number(order.total || 0)) { req.amount = Number(order.total || 0); repaired++; }
+    }
+    const lvl = (req.levels || []).find(l => Number(l.level) === Number(req.currentLevel)) || (req.levels || []).find(l => l.status === 'PENDING');
+    order.approvalRequestId = req.id;
+    order.approvalCurrentLevel = lvl?.level || 1;
+    order.approvalCurrentRole = lvl?.role || 'ROLE_SALES_MANAGER';
+  }
+
+  if (persist && (created || repaired)) {
+    const jobs = [];
+    if (typeof ApprovalsAPI !== 'undefined' && ApprovalsAPI.syncCollections) jobs.push(ApprovalsAPI.syncCollections(['requests']));
+    if (typeof CRMAPI !== 'undefined' && CRMAPI.syncCollections) jobs.push(CRMAPI.syncCollections(['orders']));
+    await Promise.allSettled(jobs);
+    console.info(`[Approvals] Đã phục hồi đơn bán chờ duyệt: tạo ${created} request, sửa ${repaired}.`);
+  }
+  return { created, repaired };
+}
+
+function approvalRegisterPendingSalesOrderNow(order) {
+  if (!order || order.status !== 'dh_cho_xu_ly') return null;
+  let req = ApprovalEngine.pendingFor('SALES_ORDER', order.id);
+  if (!req) req = ApprovalEngine.create({
+    docType: 'SALES_ORDER', docId: order.id, title: `Đơn hàng bán ${order.id}`,
+    amount: Number(order.total || 0), note: order.note || ''
+  });
+  if (!req) return null;
+  const lvl = ApprovalEngine.currentLevelOf(req) || (req.levels || []).find(l => l.status === 'PENDING');
+  order.approvalRequestId = req.id;
+  order.approvalCurrentLevel = lvl?.level || 1;
+  order.approvalCurrentRole = lvl?.role || 'ROLE_SALES_MANAGER';
+  try { ApprovalsAPI?.scheduleCollections?.(['requests'], 0); } catch (_) {}
+  try { CRMAPI?.scheduleCollections?.(['orders'], 0); } catch (_) {}
+  try { window.SidebarBadges?.markReady?.('approvals'); window.SidebarBadges?.markReady?.('all'); } catch (_) {}
+  try { if (typeof renderNav === 'function') renderNav(); } catch (_) {}
+  return req;
 }
 
 async function persistApprovalServer(keys = ['approvalRequests','approvalLogs']) {
@@ -412,6 +503,32 @@ const ApprovalEngine = {
     return true;
   },
 };
+
+
+// Khi duyệt/từ chối tại "Việc cần duyệt", áp dụng lại đúng action nghiệp vụ CRM
+// để trạng thái đơn, giữ tồn và phiếu xuất vẫn đi theo chuỗi cũ.
+ApprovalEngine.registerHandler('SALES_ORDER', {
+  onApproved(req) {
+    const order = (DB.orders || []).find(o => o.id === req.docId);
+    if (!order || order.status !== 'dh_cho_xu_ly') return;
+    if (typeof Actions !== 'undefined' && Actions['crm-order-approve']) {
+      Actions['crm-order-approve']({ id: order.id });
+    }
+  },
+  onRejected(req) {
+    const order = (DB.orders || []).find(o => o.id === req.docId);
+    if (!order || order.status !== 'dh_cho_xu_ly') return;
+    // Không gọi prompt của action cũ; lưu lý do từ approval request nếu có.
+    const rejected = (req.levels || []).find(l => l.status === 'REJECTED');
+    order.status = 'dh_tu_choi';
+    order.rejectedBy = rejected?.approverId || DB.currentUser?.userId || DB.currentUser?.id || '';
+    order.rejectedByName = rejected?.approverName || DB.currentUser?.name || '';
+    order.rejectedAt = rejected?.time || new Date().toISOString();
+    order.rejectReason = rejected?.note || 'Từ chối tại Việc cần duyệt';
+    try { SalesCRM?.saveLocal?.(['orders']); } catch (_) {}
+    try { CRMAPI?.scheduleCollections?.(['orders'], 0); } catch (_) {}
+  }
+});
 
 /* Đăng ký PR vào hàng chờ phê duyệt NGAY tại thời điểm tạo PR.
  * Không chờ người dùng mở menu Phê duyệt mới reconcile, nhờ vậy badge đổi số

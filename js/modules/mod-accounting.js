@@ -603,8 +603,9 @@ function accArView() {
 }
 
 /* ---- 2.5 Phải chi — dùng chung dữ liệu Mua hàng ---- */
-// Khi vào tab này, render ngay bằng snapshot hiện có (giống Công nợ phải thu),
-// đồng thời hydrate ngầm các collection nguồn từ server rồi render lại khi xong.
+// Công nợ phải chi là màn tài chính nhạy với số liệu, vì vậy không được hiển thị
+// snapshot cũ rồi vài giây sau mới nhảy sang dữ liệu KIO. Khi user điều hướng
+// trực tiếp tới tab này, hydrate đúng 4 collection nguồn trước rồi render.
 let __accApHydrated = false;
 let __accApHydrating = false;
 
@@ -635,9 +636,15 @@ function accApEnsureFreshOnce() {
 }
 
 function accApView() {
-  // Giống công nợ phải thu: render ngay bằng dữ liệu hiện có, không chặn bằng màn hình "đang tải".
-  // Dữ liệu mới từ server được đồng bộ ngầm, xong sẽ tự render lại.
-  accApEnsureFreshOnce();
+  if (!__accApHydrated && typeof PurchaseAPI !== 'undefined') {
+    accApEnsureFreshOnce();
+    return `${pageHead('Công nợ phải chi','Nguồn duy nhất từ Đơn đặt hàng mua + lịch sử thanh toán nhà cung cấp','')}
+      <div class="card" style="padding:28px;text-align:center">
+        <div style="font-size:28px;margin-bottom:10px"><i class="fa-solid fa-spinner fa-spin"></i></div>
+        <b>Đang tải công nợ phải chi từ server...</b>
+        <div class="muted" style="margin-top:6px">Đang đồng bộ PO, thanh toán và hoàn tiền nhà cung cấp.</div>
+      </div>`;
+  }
   const f=F('acc-ap',{q:'',supplierId:'',status:'',from:'',to:''});
   const q=String(f.q||'').trim().toLowerCase();
   const supplierOpts=(DB.suppliers||[]).map(x=>[x.id,`${x.id} · ${x.name}`]);
@@ -727,105 +734,19 @@ function openFixedAssetForm(id = '') {
 }
 
 /* ---- 2.8 Thuế ---- */
-
-/** Bóc tách VAT đầu ra theo từng sản phẩm, có lọc theo sản phẩm + loại sản phẩm (ĐVT) + tên + thời gian */
-function accTaxOutputRows(f) {
-  const rows = {};
-  const q = (f.q || '').toLowerCase().trim();
-  AccFin.recognizedOrders().forEach((o) => {
-    if (f.from && o.date < f.from) return;
-    if (f.to && o.date > f.to) return;
-    (o.items || []).forEach((it) => {
-      if (f.productId && it.productId !== f.productId) return;
-      if (f.unit && it.unit !== f.unit) return;
-      if (q && !((it.productId + ' ' + it.name).toLowerCase().includes(q))) return;
-      const net = (it.amount || 0) * (1 - (o.discountPct || 0) / 100);
-      const vat = net * (o.vatRate || 0) / 100;
-      const r = rows[it.productId] || (rows[it.productId] = { productId: it.productId, name: it.name, unit: it.unit, qty: 0, net: 0, vat: 0, count: 0 });
-      r.qty += it.qty; r.net += net; r.vat += vat; r.count += 1;
-    });
-  });
-  return Object.values(rows).sort((a, b) => b.vat - a.vat);
-}
-
-/** Bóc tách VAT đầu vào theo từng vật tư/nhóm vật tư, có lọc theo nhóm + khoảng thời gian */
-function accTaxInputRows(f) {
-  const rows = {};
-  AccFin.activePOs().forEach((po) => {
-    if (f.from && po.date < f.from) return;
-    if (f.to && po.date > f.to) return;
-    (po.items || []).forEach((it) => {
-      const m = Q.material(it.materialId);
-      const group = m?.group || '—';
-      if (f.group && group !== f.group) return;
-      const vat = (it.amount || 0) * (po.vatRate || 0) / 100;
-      const r = rows[it.materialId] || (rows[it.materialId] = { materialId: it.materialId, name: it.name, unit: it.unit, group, qty: 0, net: 0, vat: 0 });
-      r.qty += it.qty; r.net += it.amount || 0; r.vat += vat;
-    });
-  });
-  return Object.values(rows).sort((a, b) => b.vat - a.vat);
-}
-
 function accTaxView() {
   const months = AccFin.last6Months();
   const outMap = AccFin.vatOutputByMonth(), inMap = AccFin.vatInputByMonth();
   let totalOut = 0, totalIn = 0;
-  const monthRows = months.map((m) => {
+  const rows = months.map((m) => {
     const out = outMap[m] || 0, inp = inMap[m] || 0;
     totalOut += out; totalIn += inp;
     const payable = out - inp;
     return `<tr><td>${AccFin.fmtMonthShort(m)}/${m.slice(0, 4)}</td><td class="right num">${fmtVND(out)}</td><td class="right num">${fmtVND(inp)}</td><td class="right num strong" style="color:${payable >= 0 ? 'var(--red)' : 'var(--green)'}">${payable >= 0 ? fmtVND(payable) : 'Được khấu trừ ' + fmtVND(-payable)}</td></tr>`;
   });
-
-  const fOut = F('acc-tax-out', { productId: '', unit: '', q: '', from: '', to: '' });
-  const outRows = accTaxOutputRows(fOut);
-  const outTotalVat = outRows.reduce((s, r) => s + r.vat, 0);
-  const productOptions = DB.products.map((p) => `<option value="${esc(p.id)}" ${fOut.productId === p.id ? 'selected' : ''}>${esc(p.id)} — ${esc(p.name)}</option>`).join('');
-  const outUnitOptions = [...new Set(DB.products.map((p) => p.unit).filter(Boolean))];
-
-  const fIn = F('acc-tax-in', { group: '', from: '', to: '' });
-  const inRows = accTaxInputRows(fIn);
-  const inTotalVat = inRows.reduce((s, r) => s + r.vat, 0);
-  const materialGroups = [...new Set(DB.materials.map((m) => m.group).filter(Boolean))];
-
-  return `${pageHead('Thuế', 'VAT đầu ra tính theo Đơn hàng bán, VAT đầu vào tính theo Đơn đặt hàng mua — không cần khai báo tay', '<button class="btn" data-act="acc-tax-export"><i class="fa-solid fa-file-export"></i>Xuất chi tiết (theo lọc)</button>')}
-    ${accTabsBar('tax')}
+  return `${pageHead('Thuế', 'VAT đầu ra tính theo Đơn hàng bán, VAT đầu vào tính theo Đơn đặt hàng mua — không cần khai báo tay', '<button class="btn" data-act="export-report" data-key="rp-material"><i class="fa-solid fa-file-export"></i>Xuất bảng kê</button>')}
     <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('VAT đầu ra (6 tháng)', fmtVND(totalOut), 'fa-arrow-up', 'red')}${mkpi('VAT đầu vào (6 tháng)', fmtVND(totalIn), 'fa-arrow-down', 'green')}${mkpi('Thuế TNDN ước tính tháng này', fmtVND(AccFin.pnlOf(AccFin.currentMonth()).tax), 'fa-landmark', 'indigo')}</div>
-
-    <div class="card" style="margin-bottom:14px">
-      <div class="card-head"><h3>Tổng hợp theo tháng</h3></div>
-      ${tableShell([{ t: 'Tháng' }, { t: 'VAT đầu ra', cls: 'right' }, { t: 'VAT đầu vào', cls: 'right' }, { t: 'Phải nộp / Được khấu trừ', cls: 'right' }], monthRows, { emptyTitle: 'Chưa có dữ liệu' })}
-    </div>
-
-    <div class="card" style="margin-bottom:14px">
-      <div class="card-head"><div><h3>VAT đầu ra theo sản phẩm</h3><p>Bóc tách từ dòng hàng của các đơn đã giao / hoàn thành</p></div></div>
-      <div class="toolbar">
-        <input class="inp" type="text" data-f="acc-tax-out.q" value="${esc(fOut.q)}" placeholder="Tìm theo mã/tên sản phẩm…" style="min-width:200px">
-        <select class="inp" data-f="acc-tax-out.productId"><option value="">Tất cả sản phẩm</option>${productOptions}</select>
-        <select class="inp" data-f="acc-tax-out.unit"><option value="">Tất cả loại sản phẩm (ĐVT)</option>${outUnitOptions.map((u) => `<option value="${esc(u)}" ${fOut.unit === u ? 'selected' : ''}>${esc(u)}</option>`).join('')}</select>
-        <input class="inp" type="date" data-f="acc-tax-out.from" value="${esc(fOut.from)}" title="Từ ngày">
-        <input class="inp" type="date" data-f="acc-tax-out.to" value="${esc(fOut.to)}" title="Đến ngày">
-        ${(fOut.productId || fOut.unit || fOut.q || fOut.from || fOut.to) ? '<button class="btn btn-sm" data-act="clear-filter" data-key="acc-tax-out"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>' : ''}
-        <span class="spacer"></span><span class="chip">${outRows.length} sản phẩm · VAT ${fmtVND(outTotalVat)}</span>
-      </div>
-      ${tableShell([{ t: 'Sản phẩm' }, { t: 'Loại (ĐVT)' }, { t: 'Số lượt bán', cls: 'center' }, { t: 'Số lượng bán', cls: 'right' }, { t: 'Doanh thu trước VAT', cls: 'right' }, { t: 'VAT đầu ra', cls: 'right' }, { t: 'Tổng thanh toán', cls: 'right' }],
-        outRows.map((r) => `<tr><td>${cell2(esc(r.name), esc(r.productId))}</td><td>${esc(r.unit)}</td><td class="center num">${r.count}</td><td class="right num">${fmtN(r.qty)} ${esc(r.unit)}</td><td class="right num">${fmtVND(r.net)}</td><td class="right num strong" style="color:var(--red)">${fmtVND(r.vat)}</td><td class="right num">${fmtVND(r.net + r.vat)}</td></tr>`),
-        { emptyTitle: 'Không có dữ liệu phù hợp bộ lọc' })}
-    </div>
-
-    <div class="card">
-      <div class="card-head"><div><h3>VAT đầu vào theo nhóm vật tư</h3><p>Bóc tách từ dòng hàng của các đơn đặt hàng mua</p></div></div>
-      <div class="toolbar">
-        <select class="inp" data-f="acc-tax-in.group"><option value="">Tất cả nhóm vật tư</option>${materialGroups.map((g) => `<option value="${esc(g)}" ${fIn.group === g ? 'selected' : ''}>${esc(g)}</option>`).join('')}</select>
-        <input class="inp" type="date" data-f="acc-tax-in.from" value="${esc(fIn.from)}">
-        <input class="inp" type="date" data-f="acc-tax-in.to" value="${esc(fIn.to)}">
-        ${(fIn.group || fIn.from || fIn.to) ? '<button class="btn btn-sm" data-act="clear-filter" data-key="acc-tax-in"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>' : ''}
-        <span class="spacer"></span><span class="chip">${inRows.length} vật tư · VAT ${fmtVND(inTotalVat)}</span>
-      </div>
-      ${tableShell([{ t: 'Vật tư' }, { t: 'Nhóm' }, { t: 'Số lượng mua', cls: 'right' }, { t: 'Giá trị trước VAT', cls: 'right' }, { t: 'VAT đầu vào', cls: 'right' }],
-        inRows.map((r) => `<tr><td>${cell2(esc(r.name), esc(r.materialId))}</td><td>${esc(r.group)}</td><td class="right num">${fmtN(r.qty)} ${esc(r.unit)}</td><td class="right num">${fmtVND(r.net)}</td><td class="right num strong" style="color:var(--green)">${fmtVND(r.vat)}</td></tr>`),
-        { emptyTitle: 'Không có dữ liệu phù hợp bộ lọc' })}
-    </div>`;
+    <div class="card">${tableShell([{ t: 'Tháng' }, { t: 'VAT đầu ra', cls: 'right' }, { t: 'VAT đầu vào', cls: 'right' }, { t: 'Phải nộp / Được khấu trừ', cls: 'right' }], rows, { emptyTitle: 'Chưa có dữ liệu' })}</div>`;
 }
 
 /* ---- 2.9 Ngân sách vs Thực tế ---- */
@@ -1703,16 +1624,6 @@ Object.assign(Actions, {
         Toast.err('Không xóa được trên server', err?.message || 'Vui lòng thử lại.');
       }
     } });
-  },
-   'acc-tax-export': () => {
-    const fOut = F('acc-tax-out', { productId: '', unit: '', q: '', from: '', to: '' });
-    const outRows = accTaxOutputRows(fOut);
-    const fIn = F('acc-tax-in', { group: '', from: '', to: '' });
-    const inRows = accTaxInputRows(fIn);
-    Exporter.csv('Chi-tiet-thue-VAT.csv',
-      ['Chiều', 'Mã hàng', 'Tên hàng', 'Loại/Nhóm', 'Số lượng', 'Giá trị trước VAT', 'VAT'],
-      [...outRows.map((r) => ['Đầu ra', r.productId, r.name, r.unit, r.qty, Math.round(r.net), Math.round(r.vat)]),
-        ...inRows.map((r) => ['Đầu vào', r.materialId, r.name, r.group, r.qty, Math.round(r.net), Math.round(r.vat)]),]);
   },
 });
 
