@@ -37,7 +37,8 @@ const SystemAPI = (() => {
     { id:'ROLE_HR', name:'Nhân sự', permissions:['HR_VIEW','HR_OPERATE'], modules:{hr:'*',bi:['hr']} },
     { id:'ROLE_MAINTENANCE', name:'Bảo trì', permissions:['MAINTENANCE_VIEW','MAINTENANCE_OPERATE'], modules:{maintenance:'*'} },
     { id:'ROLE_LOGISTICS', name:'Logistics', permissions:['LOGISTICS_VIEW','LOGISTICS_OPERATE','CRM_VIEW'], modules:{logistics:'*',crm:['orders']} },
-    { id:'ROLE_RESTAURANT', name:'Nhà hàng / Cửa hàng', permissions:['RESTAURANT_VIEW','RESTAURANT_OPERATE','INVENTORY_VIEW'], modules:{restaurant:'*',bi:['restaurant']} },
+    { id:'ROLE_RESTAURANT', name:'Quản lý Nhà hàng / Cửa hàng', permissions:['RESTAURANT_VIEW','RESTAURANT_OPERATE','INVENTORY_VIEW'], modules:{restaurant:'*',bi:['restaurant']} },
+    { id:'ROLE_RESTAURANT_STAFF', name:'Nhân viên cửa hàng', permissions:['RESTAURANT_VIEW','RESTAURANT_OPERATE','INVENTORY_VIEW'], modules:{restaurant:['dashboard','pos','tablet','qr','kitchen','orders','store_stock','replenishment','issue','revenue']} },
     { id:'ROLE_SUBCONTRACT', name:'Gia công', permissions:['SUBCONTRACT_VIEW','SUBCONTRACT_OPERATE','INVENTORY_VIEW'], modules:{subcontracting:'*',warehouse:['inventory']} },
     { id:'ROLE_RND', name:'R&D', permissions:['RND_VIEW','RND_OPERATE','INVENTORY_VIEW'], modules:{rnd:'*',warehouse:['inventory']} },
   ];
@@ -58,7 +59,10 @@ const SystemAPI = (() => {
     { id:'USR-HR',          empId:'NV-024', username:'nhansu',     fullName:'Mai Thị Hồng Nhung',     dept:'Hành chính - Nhân sự',   roleId:'ROLE_HR' },
     { id:'USR-MAINTENANCE', empId:'NV-025', username:'baotri',     fullName:'Lâm Văn Trí',            dept:'Bảo trì - Vệ sinh',      roleId:'ROLE_MAINTENANCE' },
     { id:'USR-LOGISTICS',   empId:'NV-019', username:'logistics',  fullName:'Đinh Thị Hương',         dept:'Kho vận',                roleId:'ROLE_LOGISTICS' },
-    { id:'USR-RESTAURANT',  empId:'',       username:'cuahang',    fullName:'Nhân viên cửa hàng',     dept:'Nhà hàng & Cửa hàng',    roleId:'ROLE_RESTAURANT' },
+    { id:'USR-RESTAURANT',  empId:'',       username:'cuahang',    fullName:'Quản lý Nhà hàng & Cửa hàng', dept:'Nhà hàng & Cửa hàng', roleId:'ROLE_RESTAURANT' },
+    { id:'USR-STORE-LVV',   empId:'',       username:'cuahang_lvv', fullName:'Nhân viên cửa hàng Lê Văn Việt', dept:'Nhà hàng & Cửa hàng', roleId:'ROLE_RESTAURANT_STAFF', storeId:'STORE-TEST-001' },
+    { id:'USR-STORE-PXL',   empId:'',       username:'cuahang_pxl', fullName:'Nhân viên cửa hàng Phan Xích Long', dept:'Nhà hàng & Cửa hàng', roleId:'ROLE_RESTAURANT_STAFF', storeId:'STORE-TEST-002' },
+    { id:'USR-STORE-BD',    empId:'',       username:'cuahang_bd', fullName:'Nhân viên cửa hàng Dĩ An', dept:'Nhà hàng & Cửa hàng', roleId:'ROLE_RESTAURANT_STAFF', storeId:'STORE-TEST-003' },
     { id:'USR-SUBCONTRACT', empId:'',       username:'giacong',    fullName:'Điều phối gia công',     dept:'Gia công',               roleId:'ROLE_SUBCONTRACT' },
     { id:'USR-RND',         empId:'',       username:'rnd',        fullName:'Nhân viên R&D',           dept:'R&D',                    roleId:'ROLE_RND' },
   ];
@@ -195,6 +199,7 @@ const SystemAPI = (() => {
       dept: user.dept || '',
       initials: typeof initials === 'function' ? initials(user.fullName || user.username) : '',
       email: user.empId ? ((DB.employees || []).find(e => e.id === user.empId)?.email || '') : '',
+      storeId: user.storeId || '',
     };
   }
 
@@ -296,6 +301,19 @@ const SystemAPI = (() => {
     return (DB.auditLogs || []).filter(a => String(a.entityId) === String(entityId) && (!entityType || a.entityType === entityType)).sort((a,b)=>String(a.createdAt).localeCompare(String(b.createdAt)));
   }
 
+  async function refreshAuditLogs({force=true}={}) {
+    try {
+      const remote = await KioStore.listCollection(TABLES.auditLogs, {force});
+      DB.auditLogs = Array.isArray(remote) ? remote : [];
+      cacheWrite({users:DB.users||[], roles:DB.roles||[], auditLogs:DB.auditLogs, syncedAt:Date.now()});
+      return DB.auditLogs;
+    } catch (err) {
+      console.warn('[SystemAPI] Không tải được audit log từ KIO:', err);
+      return DB.auditLogs || [];
+    }
+  }
+
+
   function showLogin() {
     return new Promise(resolve => {
       document.getElementById('startupMask')?.remove();
@@ -312,13 +330,13 @@ const SystemAPI = (() => {
         <div class="cell-sub" style="margin-top:12px;text-align:center">Tài khoản demo dùng mật khẩu <b>123456</b></div>
         <div class="auth-quick-title">Tài khoản dễ nhớ</div>
         <div class="auth-quick">
-          ${['admin','giamdoc','muahang','truongmuahang','kho','sanxuat','qc','kinhdoanh','truongkinhdoanh','ketoan','nhansu','baotri','logistics','cuahang','giacong','rnd'].map(u=>`<button type="button" class="auth-account" data-user="${u}">${u}</button>`).join('')}
+          ${['admin','giamdoc','muahang','truongmuahang','kho','sanxuat','qc','kinhdoanh','truongkinhdoanh','ketoan','nhansu','baotri','logistics','cuahang','cuahang_lvv','cuahang_pxl','cuahang_bd','giacong','rnd'].map(u=>`<button type="button" class="auth-account" data-user="${u}">${u}</button>`).join('')}
         </div>
       </form></div>`;
       const style=document.createElement('style'); style.id='authStyle'; style.textContent=`
         .auth-screen{position:fixed;inset:0;z-index:99999;background:linear-gradient(135deg,var(--surface-2),var(--bg));display:flex;align-items:center;justify-content:center;padding:20px}
         .auth-card{width:min(420px,100%);background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:30px;box-shadow:0 24px 60px rgba(0,0,0,.16)}
-        .auth-card h2{text-align:center;margin:8px 0}.auth-card>p{text-align:center;color:var(--text-3);font-size:13px;line-height:1.5;margin-bottom:22px}.auth-card label{display:block;font-size:12px;font-weight:700;margin:12px 0 6px}.auth-logo{width:56px;height:56px;margin:auto;border-radius:16px;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:24px}.auth-error{min-height:30px;color:var(--red);font-size:12px;padding-top:7px}.auth-quick-title{margin-top:16px;font-size:12px;font-weight:700;color:var(--text-2);text-align:center}.auth-quick{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-top:8px}.auth-account{border:1px solid var(--border);background:var(--surface-2);color:var(--text);border-radius:999px;padding:5px 9px;font-size:11px;cursor:pointer}.auth-account:hover{border-color:var(--primary);color:var(--primary)}`;
+        .auth-card h2{text-align:center;margin:8px 0}.auth-card>p{text-align:center;color:var(--text-3);font-size:13px;line-height:1.5;margin-bottom:22px}.auth-card label{display:block;font-size:12px;font-weight:700;margin:12px 0 6px}.auth-card .inp{width:100%;max-width:none;box-sizing:border-box}.auth-logo{width:56px;height:56px;margin:auto;border-radius:16px;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:24px}.auth-error{min-height:30px;color:var(--red);font-size:12px;padding-top:7px}.auth-quick-title{margin-top:16px;font-size:12px;font-weight:700;color:var(--text-2);text-align:center}.auth-quick{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-top:8px}.auth-account{border:1px solid var(--border);background:var(--surface-2);color:var(--text);border-radius:999px;padding:5px 9px;font-size:11px;cursor:pointer}.auth-account:hover{border-color:var(--primary);color:var(--primary)}`;
       if (!document.getElementById('authStyle')) document.head.appendChild(style);
       const form=document.getElementById('authLoginForm');
       form.querySelectorAll('.auth-account').forEach(btn => btn.addEventListener('click', () => {
@@ -347,5 +365,5 @@ const SystemAPI = (() => {
   // bao giờ đăng nhập được, vì login() luôn so sánh bằng SHA-256.
   const hashPassword = sha256;
 
-  return {bootstrap,refreshFromServer,restoreSession,showLogin,login,logout,flushBusinessDataBeforeRoleSwitch,audit,auditFor,currentUser,saveUsers,hashPassword,ROLE_DEFS,ACTORS,SESSION_KEY};
+  return {bootstrap,refreshFromServer,refreshAuditLogs,restoreSession,showLogin,login,logout,flushBusinessDataBeforeRoleSwitch,audit,auditFor,currentUser,saveUsers,hashPassword,ROLE_DEFS,ACTORS,SESSION_KEY};
 })();

@@ -28,6 +28,61 @@ DB.cashTransactions = DB.cashTransactions || [];   // sổ thu-chi thủ công (
 // hydrate từ bảng lenam_restaurant_bank_accounts trên KIO/server.
 DB.bankAccounts = DB.bankAccounts || [];
 DB.bankTransactions = DB.bankTransactions || [];
+DB.accountingEntries = DB.accountingEntries || [];
+const ACCOUNTING_ENTRY_TABLE = (typeof KIO_CONFIG!=='undefined' && KIO_CONFIG.accountingTables?.entries) || 'lenam_accounting_entries';
+let accountingEntriesLoaded = false;
+async function accountingEntriesEnsureFresh(force=false){
+  try {
+    if (!force && accountingEntriesLoaded) return DB.accountingEntries;
+    const rows = await KioStore.listCollection(ACCOUNTING_ENTRY_TABLE,{force});
+    DB.accountingEntries = Array.isArray(rows)?rows:[]; accountingEntriesLoaded=true;
+    if(State.module==='accounting' && State.tab==='entries') render();
+  } catch(err){ console.warn('[Accounting] Không tải được định khoản:',err); DB.accountingEntries=DB.accountingEntries||[]; }
+  return DB.accountingEntries;
+}
+async function accountingEntrySaveRecord(row){ await KioStore.saveSingleton(ACCOUNTING_ENTRY_TABLE,String(row.id),JSON.parse(JSON.stringify(row))); accountingEntriesLoaded=true; return true; }
+async function accountingEntryDeleteRecord(id){ await KioStore.deleteKeys(ACCOUNTING_ENTRY_TABLE,[String(id)]); DB.accountingEntries=(DB.accountingEntries||[]).filter(x=>String(x.id)!==String(id)); return true; }
+function accountingEntryById(id){ return (DB.accountingEntries||[]).find(x=>String(x.id)===String(id))||null; }
+function accountingEntryLabel(id){ const e=accountingEntryById(id); return e?`${e.number||e.id} · ${e.name||''}`:'—'; }
+function accountingEntryOptions(flow='',selected=''){
+  const type = flow==='THU'?'THU':flow==='CHI'?'CHI':'';
+  return `<option value="">-- Chọn định khoản --</option>`+(DB.accountingEntries||[]).filter(e=>e.active!==false && (!type || e.flow==='BOTH' || e.flow===type)).sort((a,b)=>String(a.number||a.id).localeCompare(String(b.number||b.id),'vi',{numeric:true})).map(e=>`<option value="${esc(e.id)}" ${String(e.id)===String(selected)?'selected':''}>${esc((e.number||e.id)+' · '+(e.name||''))}</option>`).join('');
+}
+
+const ACCOUNTING_AUTO_USAGE = {
+  '': 'Không tự động',
+  RESTAURANT_CASH_SALE: 'Nhà hàng · bán hàng thu tiền mặt',
+  RESTAURANT_BANK_SALE: 'Nhà hàng · bán hàng chuyển khoản',
+};
+function accountingAutoUsageLabel(code){ return ACCOUNTING_AUTO_USAGE[String(code||'')] || String(code||'—'); }
+function accountingResolveRestaurantEntry(paymentMethod='Tiền mặt'){
+  const method=String(paymentMethod||'Tiền mặt');
+  const usage=method==='Chuyển khoản'?'RESTAURANT_BANK_SALE':'RESTAURANT_CASH_SALE';
+  const active=(DB.accountingEntries||[]).filter(e=>e.active!==false);
+  const explicit=active.find(e=>String(e.autoUsage||'')===usage);
+  if(explicit) return explicit;
+  // Tương thích dữ liệu định khoản cũ: chỉ tự nhận diện khi có đúng MỘT định khoản
+  // bán hàng hợp lý (Nợ 111/112 và Có 511). Không bao giờ đoán giữa nhiều lựa chọn.
+  const debitNeed=method==='Chuyển khoản'?'112':'111';
+  const candidates=active.filter(e=>{
+    const debit=String(e.debitAccount||'').replace(/\s/g,'');
+    const credit=String(e.creditAccount||'').replace(/\s/g,'');
+    return (e.flow==='THU'||e.flow==='BOTH') && debit.split(',').some(x=>x.startsWith(debitNeed)) && credit.split(',').some(x=>x.startsWith('511'));
+  });
+  return candidates.length===1?candidates[0]:null;
+}
+window.accountingResolveRestaurantEntry=accountingResolveRestaurantEntry;
+function accountingEntryUsage(id){
+  const groups=[
+    ['customerPayments',DB.customerPayments||[],'THU'],['supplierPayments',DB.supplierPayments||[],'CHI'],['supplierRefunds',DB.supplierRefunds||[],'THU'],['cashTransactions',DB.cashTransactions||[],''],['bankTransactions',(DB.bankTransactions||[]).filter(r=>String(r.sourceType||'')==='MANUAL_BANK'),''],['posOrders',DB.posOrders||[],'THU']
+  ];
+  // Chỉ tính giao dịch ngân hàng nhập tay. Các dòng ngân hàng sinh tự động từ
+  // thu KH/trả NCC/POS là mirror của chứng từ nguồn, nếu cộng lại sẽ bị nhân đôi.
+  const rows=[]; for(const [kind,list,flow] of groups) for(const r of list) if(String(r.accountingEntryId||'')===String(id)) rows.push({kind,flow:flow||((r.type==='CHI'||r.type==='OUT')?'CHI':'THU'),amount:Number(r.amount||r.total||r.grandTotal||0),date:r.date||r.paidAt||'',id:r.id||''});
+  return rows;
+}
+window.accountingEntryOptions=accountingEntryOptions; window.accountingEntriesEnsureFresh=accountingEntriesEnsureFresh;
+accountingEntriesEnsureFresh(false);
 
 /* ---------------------------------------------------------------------------
  * BANK LEDGER PERSISTENCE
@@ -67,7 +122,7 @@ const AccountingBank = (() => {
     return true;
   }
 
-  async function record({ bankId, type, date, amount, note, sourceType = '', sourceId = '', createdBy = '' }) {
+  async function record({ bankId, type, date, amount, note, sourceType = '', sourceId = '', createdBy = '', accountingEntryId = '' }) {
     const bank = findBank(bankId);
     const value = Math.round(Number(amount || 0));
     if (!bank || !bankId || value <= 0) return null;
@@ -83,7 +138,7 @@ const AccountingBank = (() => {
     const tx = {
       id: makeId(), type: type === 'OUT' ? 'OUT' : 'IN',
       date: date || currentDateYMD(), amount: value, note: note || '',
-      sourceType, sourceId, createdBy: createdBy || DB.currentUser?.id || '',
+      sourceType, sourceId, accountingEntryId: accountingEntryId || '', createdBy: createdBy || DB.currentUser?.id || '',
       createdAt: new Date().toISOString(),
     };
     bank.transactions.unshift(tx);
@@ -484,10 +539,10 @@ function accTopDebtRows() {
 /** Toàn bộ dòng thu-chi (tự động + thủ công), sắp xếp mới nhất trước */
 function accAllCashRows() {
   const rows = [];
-  DB.customerPayments.forEach((p) => rows.push({ date: p.date, type: 'THU', amount: p.amount, note: p.note || `Thu tiền ${Q.customerName(p.customerId)}`, source: 'Tự động · Hợp đồng/Đơn hàng', ref: p.contractId || '', editable: false, id: p.id, kind: 'customerPayment' }));
-  DB.supplierPayments.forEach((p) => rows.push({ date: p.date, type: 'CHI', amount: p.amount, note: p.note || `Trả NCC ${Q.supplierName(p.supplierId)}`, source: 'Tự động · Mua hàng', ref: p.poId || '', editable: false, id: p.id, kind: 'supplierPayment' }));
-  (DB.supplierRefunds || []).forEach((r) => rows.push({ date: r.date, type: 'THU', amount: r.amount, note: r.note || `NCC hoàn tiền ${Q.supplierName(r.supplierId)}`, source: 'Tự động · Hoàn tiền NCC', ref: r.poId || '', editable: false, id: r.id, kind: 'supplierRefund' }));
-  DB.cashTransactions.forEach((t) => rows.push({ date: t.date, type: t.type, amount: t.amount, note: t.note || t.category, source: 'Thủ công · ' + (t.category || ''), ref: '', editable: true, id: t.id, kind: 'manual' }));
+  DB.customerPayments.forEach((p) => rows.push({ date: p.date, type: 'THU', amount: p.amount, note: p.note || `Thu tiền ${Q.customerName(p.customerId)}`, source: 'Tự động · Hợp đồng/Đơn hàng', ref: p.contractId || '', editable: false, id: p.id, kind: 'customerPayment', accountingEntryId:p.accountingEntryId||'' }));
+  DB.supplierPayments.forEach((p) => rows.push({ date: p.date, type: 'CHI', amount: p.amount, note: p.note || `Trả NCC ${Q.supplierName(p.supplierId)}`, source: 'Tự động · Mua hàng', ref: p.poId || '', editable: false, id: p.id, kind: 'supplierPayment', accountingEntryId:p.accountingEntryId||'' }));
+  (DB.supplierRefunds || []).forEach((r) => rows.push({ date: r.date, type: 'THU', amount: r.amount, note: r.note || `NCC hoàn tiền ${Q.supplierName(r.supplierId)}`, source: 'Tự động · Hoàn tiền NCC', ref: r.poId || '', editable: false, id: r.id, kind: 'supplierRefund', accountingEntryId:r.accountingEntryId||'' }));
+  DB.cashTransactions.forEach((t) => rows.push({ date: t.date, type: t.type, amount: t.amount, note: t.note || t.category, source: 'Thủ công · ' + (t.category || ''), ref: '', editable: true, id: t.id, kind: 'manual', accountingEntryId:t.accountingEntryId||'' }));
   return rows.sort((a, b) => String(b.date).localeCompare(String(a.date)));
 }
 accDashboardView.after = function () {
@@ -502,6 +557,25 @@ accDashboardView.after = function () {
 };
 
 /* ---- 2.2 Thu – Chi ---- */
+
+function accEntrySubtab(){ return F('acc-entry-ui',{subtab:'summary',q:'',flow:''}); }
+function accEntriesTabs(){ const f=accEntrySubtab(); return `<div class="tabs" style="margin-bottom:14px"><button class="tab ${f.subtab==='summary'?'active':''}" data-act="acc-entry-subtab" data-id="summary">Tổng hợp định khoản</button><button class="tab ${f.subtab==='master'?'active':''}" data-act="acc-entry-subtab" data-id="master">Khai báo định khoản</button></div>`; }
+function accEntrySummaryView(){
+  const entries=DB.accountingEntries||[];
+  const rows=entries.map(e=>{ const use=accountingEntryUsage(e.id); const thu=use.filter(x=>x.flow==='THU').reduce((s,x)=>s+x.amount,0), chi=use.filter(x=>x.flow==='CHI').reduce((s,x)=>s+x.amount,0); return `<tr><td><span class="code">${esc(e.number||e.id)}</span></td><td><b>${esc(e.name||'—')}</b><div class="cell-sub">Nợ ${esc(e.debitAccount||'—')} / Có ${esc(e.creditAccount||'—')}</div></td><td>${e.flow==='THU'?'<span class="badge green">Thu</span>':e.flow==='CHI'?'<span class="badge red">Chi</span>':'<span class="badge blue">Thu & Chi</span>'}</td><td class="right num">${fmtN(use.length)}</td><td class="right num" style="color:var(--green)">${fmtVND(thu)}</td><td class="right num" style="color:var(--red)">${fmtVND(chi)}</td><td class="right strong num">${fmtVND(thu-chi)}</td></tr>`; });
+  const totalUse=entries.reduce((s,e)=>s+accountingEntryUsage(e.id).length,0), totalThu=entries.reduce((s,e)=>s+accountingEntryUsage(e.id).filter(x=>x.flow==='THU').reduce((a,x)=>a+x.amount,0),0), totalChi=entries.reduce((s,e)=>s+accountingEntryUsage(e.id).filter(x=>x.flow==='CHI').reduce((a,x)=>a+x.amount,0),0);
+  return `<div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Định khoản đang dùng',entries.filter(e=>e.active!==false).length,'fa-book','blue')}${mkpi('Giao dịch đã gắn',totalUse,'fa-link','indigo')}${mkpi('Tổng thu đã gắn',fmtVND(totalThu),'fa-arrow-down','green')}${mkpi('Tổng chi đã gắn',fmtVND(totalChi),'fa-arrow-up','red')}</div><div class="card"><div class="card-head"><div><h3>Tổng hợp định khoản</h3><p>Tổng tiền lấy từ các giao dịch Thu – Chi/Công nợ/Ngân hàng đã chọn định khoản.</p></div></div>${tableShell([{t:'Số định khoản'},{t:'Tên định khoản'},{t:'Áp dụng'},{t:'Số GD',cls:'right'},{t:'Tổng thu',cls:'right'},{t:'Tổng chi',cls:'right'},{t:'Chênh lệch',cls:'right'}],rows,{emptyTitle:'Chưa khai báo định khoản'})}</div>`;
+}
+function accEntryMasterView(){
+  const f=accEntrySubtab(), q=String(f.q||'').toLowerCase().trim(); let list=[...(DB.accountingEntries||[])]; if(q)list=list.filter(e=>[e.number,e.name,e.debitAccount,e.creditAccount,e.description].some(v=>String(v||'').toLowerCase().includes(q))); if(f.flow)list=list.filter(e=>e.flow===f.flow||e.flow==='BOTH');
+  const rows=list.map(e=>{const used=accountingEntryUsage(e.id).length; return `<tr><td><span class="code">${esc(e.number||e.id)}</span></td><td><b>${esc(e.name||'—')}</b><div class="cell-sub">${esc(e.description||'')}</div></td><td>${esc(e.debitAccount||'—')}</td><td>${esc(e.creditAccount||'—')}</td><td>${e.flow==='THU'?'<span class="badge green">Thu</span>':e.flow==='CHI'?'<span class="badge red">Chi</span>':'<span class="badge blue">Thu & Chi</span>'}</td><td>${e.autoUsage?`<span class="chip">${esc(accountingAutoUsageLabel(e.autoUsage))}</span>`:'<span class="muted">Thủ công</span>'}</td><td>${e.active===false?'<span class="badge gray">Ngừng dùng</span>':'<span class="badge green">Đang dùng</span>'}</td><td class="right"><button class="btn btn-sm" data-act="acc-entry-edit" data-id="${esc(e.id)}"><i class="fa-solid fa-pen"></i>Sửa</button> <button class="btn btn-sm" data-act="acc-entry-delete" data-id="${esc(e.id)}" ${used?'disabled title="Đã phát sinh giao dịch"':''}><i class="fa-solid fa-trash"></i>Xóa</button>${used?`<div class="cell-sub">${used} giao dịch · không được xóa</div>`:''}</td></tr>`;});
+  return `<div class="card"><div class="toolbar">${searchBox('acc-entry-ui','Tìm số, tên, tài khoản…')}${selectFilter('acc-entry-ui','flow',[['THU','Thu'],['CHI','Chi'],['BOTH','Thu & Chi']],'Tất cả loại')}<span class="spacer"></span><button class="btn btn-primary" data-act="acc-entry-new"><i class="fa-solid fa-plus"></i>Khai báo định khoản</button></div>${tableShell([{t:'Số định khoản'},{t:'Tên định khoản'},{t:'TK Nợ'},{t:'TK Có'},{t:'Áp dụng'},{t:'Tự động dùng cho'},{t:'Trạng thái'},{t:'',cls:'right'}],rows,{emptyTitle:'Chưa có định khoản'})}</div>`;
+}
+function accEntriesView(){ const f=accEntrySubtab(); if(!accountingEntriesLoaded) accountingEntriesEnsureFresh(false); return `${pageHead('Định khoản','Khai báo master định khoản và tổng hợp số tiền phát sinh theo từng định khoản','')}${accEntriesTabs()}${f.subtab==='master'?accEntryMasterView():accEntrySummaryView()}`; }
+function openAccountingEntryForm(id=''){
+  const e=id?accountingEntryById(id):null; Modal.open({title:e?'Sửa định khoản':'Khai báo định khoản',sub:'Kế toán khai báo định khoản. Nhân viên bán hàng chỉ chọn nghiệp vụ/thanh toán; hệ thống tự áp định khoản đã cấu hình.',size:'md',body:`<div class="form-grid"><div class="field"><label>Số định khoản <span class="req">*</span></label><input class="inp" id="aeNumber" value="${esc(e?.number||'')}" placeholder="VD: DK-001 hoặc 111/511"></div><div class="field"><label>Tên định khoản <span class="req">*</span></label><input class="inp" id="aeName" value="${esc(e?.name||'')}" placeholder="VD: Thu tiền bán hàng"></div><div class="field"><label>Tài khoản Nợ <span class="req">*</span></label><input class="inp" id="aeDebit" value="${esc(e?.debitAccount||'')}" placeholder="VD: 111, 112"></div><div class="field"><label>Tài khoản Có <span class="req">*</span></label><input class="inp" id="aeCredit" value="${esc(e?.creditAccount||'')}" placeholder="VD: 131, 331, 511, 33311"></div><div class="field"><label>Áp dụng <span class="req">*</span></label><select class="inp" id="aeFlow"><option value="THU" ${e?.flow==='THU'?'selected':''}>Thu</option><option value="CHI" ${e?.flow==='CHI'?'selected':''}>Chi</option><option value="BOTH" ${(!e||e?.flow==='BOTH')?'selected':''}>Thu & Chi</option></select></div><div class="field"><label>Trạng thái</label><select class="inp" id="aeActive"><option value="1" ${e?.active!==false?'selected':''}>Đang dùng</option><option value="0" ${e?.active===false?'selected':''}>Ngừng dùng</option></select></div><div class="field" style="grid-column:1/-1"><label>Tự động áp cho nghiệp vụ</label><select class="inp" id="aeAutoUsage">${Object.entries(ACCOUNTING_AUTO_USAGE).map(([k,v])=>`<option value="${esc(k)}" ${String(e?.autoUsage||'')===k?'selected':''}>${esc(v)}</option>`).join('')}</select><div class="cell-sub">Chỉ Kế toán cấu hình. Ví dụ chọn “Nhà hàng · bán hàng thu tiền mặt”; nhân viên cửa hàng sẽ không phải tự chọn định khoản.</div></div><div class="field" style="grid-column:1/-1"><label>Mô tả</label><textarea class="inp" id="aeDescription" rows="2">${esc(e?.description||'')}</textarea></div></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="acc-entry-save" ${e?`data-id="${esc(e.id)}"`:''}><i class="fa-solid fa-floppy-disk"></i>Lưu định khoản</button>`});
+}
+
 function accCashflowInOutView() {
   const f = F('acc-cash', { type: '', from: '', to: '' });
   let rows = accAllCashRows();
@@ -528,11 +602,12 @@ function accCashflowInOutView() {
         ${(f.type || f.from || f.to) ? '<button class="btn btn-sm" data-act="clear-filter" data-key="acc-cash"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>' : ''}
         <span class="spacer"></span><span class="chip">${rows.length} giao dịch</span>
       </div>
-      ${tableShell([{ t: 'Ngày' }, { t: 'Loại' }, { t: 'Diễn giải' }, { t: 'Chứng từ / Nguồn' }, { t: 'Số tiền', cls: 'right' }, { t: '', cls: 'right' }],
+      ${tableShell([{ t: 'Ngày' }, { t: 'Loại' }, { t: 'Diễn giải' }, { t: 'Định khoản' }, { t: 'Chứng từ / Nguồn' }, { t: 'Số tiền', cls: 'right' }, { t: '', cls: 'right' }],
         pg.items.map((r) => `<tr>
           <td class="num">${fmtDate(r.date)}</td>
           <td>${r.type === 'THU' ? '<span class="badge green">Thu</span>' : '<span class="badge red">Chi</span>'}</td>
           <td>${esc(r.note)}</td>
+          <td>${r.accountingEntryId?`<span class="code">${esc(accountingEntryLabel(r.accountingEntryId))}</span>`:'<span class="muted">Chưa gắn</span>'}</td>
           <td class="muted">${esc(r.ref || r.source)}</td>
           <td class="right num strong" style="color:${r.type === 'THU' ? 'var(--green)' : 'var(--red)'}">${r.type === 'THU' ? '+' : '−'}${fmtVND(r.amount)}</td>
           <td class="right">${r.editable ? `<button class="btn btn-icon btn-sm" data-act="acc-cash-delete" data-id="${esc(r.id)}" title="Xóa"><i class="fa-solid fa-trash"></i></button>` : `<span class="cell-sub">Tự động</span>`}</td>
@@ -550,6 +625,7 @@ function openCashTxForm(type) {
         <div class="field"><label>Số tiền <span class="req">*</span></label><input class="inp right num" id="ctxAmount" data-money="1" type="text" inputmode="numeric" min="0" step="1000"></div>
         <div class="field"><label>Hình thức</label><select class="inp" id="ctxMethod" onchange="accountingCashMethodChanged()"><option value="CASH">Tiền mặt</option><option value="BANK_TRANSFER">Chuyển khoản ngân hàng</option></select></div>
         <div class="field" id="ctxBankWrap" style="display:none"><label>Tài khoản ngân hàng</label><select class="inp" id="ctxBank"><option value="">-- Chọn tài khoản --</option>${(DB.bankAccounts||[]).filter(b=>b.active!==false).map(b=>`<option value="${esc(b.id)}">${esc(b.name)} · ${esc(b.accountNumber||'')}</option>`).join('')}</select></div>
+        <div class="field" style="grid-column:1/-1"><label>Định khoản <span class="req">*</span></label><select class="inp" id="ctxAccountingEntry">${accountingEntryOptions(type)}</select></div>
         <div class="field" style="grid-column:1/-1"><label>Khoản mục</label><select class="inp" id="ctxCategory">${DB.accountingSettings.opexCategories.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}</select></div>
         <div class="field" style="grid-column:1/-1"><label>Diễn giải</label><textarea class="inp" id="ctxNote" rows="2" placeholder="Nội dung khoản thu/chi"></textarea></div>
       </div>`,
@@ -626,6 +702,7 @@ function openBankTxForm(bankId) {
         <div class="field"><label>Loại</label><select class="inp" id="bkTxType"><option value="IN">Tiền vào</option><option value="OUT">Tiền ra</option></select></div>
         <div class="field"><label>Ngày</label><input class="inp" id="bkTxDate" type="date" value="${currentDateYMD()}"></div>
         <div class="field" style="grid-column:1/-1"><label>Số tiền <span class="req">*</span></label><input class="inp right num" id="bkTxAmount" data-money="1" type="text" inputmode="numeric" min="0" step="1000"></div>
+        <div class="field" style="grid-column:1/-1"><label>Định khoản <span class="req">*</span></label><select class="inp" id="bkTxAccountingEntry">${accountingEntryOptions('')}</select></div>
         <div class="field" style="grid-column:1/-1"><label>Nội dung</label><input class="inp" id="bkTxNote" placeholder="Nội dung theo sao kê"></div>
       </div>`,
     foot: `<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="acc-bank-tx-save" data-id="${esc(bankId)}"><i class="fa-solid fa-floppy-disk"></i>Lưu</button>`,
@@ -1553,6 +1630,7 @@ function accLedgerView() {
         { t: 'Ngày' },
         { t: 'Loại' },
         { t: 'Diễn giải' },
+        { t: 'Định khoản' },
         { t: 'Chứng từ' },
         { t: 'Nguồn' },
         { t: 'Số tiền', cls: 'right' }
@@ -1572,6 +1650,7 @@ function accLedgerView() {
           <td>
             ${cell2(esc(r.note),esc(r.kind || ''))}
           </td>
+          <td>${r.accountingEntryId ? `<span class="code">${esc(accountingEntryLabel(r.accountingEntryId))}</span>` : '<span class="muted">Chưa gắn</span>'}</td>
           <td>
             ${
               r.ref
@@ -1625,6 +1704,7 @@ Views.accounting = function () {
   if (tab !== 'ap') accHydrateForTab(tab);
   switch (tab) {
     case 'dashboard': return accDashboardView();
+    case 'entries': return accEntriesView();
     case 'cashflow_inout': return accCashflowInOutView();
     case 'banking': return accBankingView();
     case 'ar': return accArView();
@@ -1647,11 +1727,18 @@ Views.accounting.after = function () { if ((State.tab || 'dashboard') === 'dashb
  * Gắn thêm vào Actions toàn cục (đã được app.js khởi tạo trước khi file này
  * chạy — xem hướng dẫn nạp script cuối file). */
 Object.assign(Actions, {
-  'acc-cash-add': (d) => openCashTxForm(d.type),
+  'acc-entry-subtab': (d) => { accEntrySubtab().subtab=d.id==='master'?'master':'summary'; render(); },
+  'acc-entry-new': () => openAccountingEntryForm(),
+  'acc-entry-edit': (d) => openAccountingEntryForm(d.id),
+  'acc-entry-save': async (d={}) => { const number=$('#aeNumber')?.value.trim()||'', name=$('#aeName')?.value.trim()||'', debitAccount=$('#aeDebit')?.value.trim()||'', creditAccount=$('#aeCredit')?.value.trim()||'', flow=$('#aeFlow')?.value||'BOTH', active=$('#aeActive')?.value!=='0', autoUsage=$('#aeAutoUsage')?.value||'', description=$('#aeDescription')?.value.trim()||''; if(!number||!name||!debitAccount||!creditAccount){Toast.err('Thiếu thông tin','Số định khoản, tên, tài khoản Nợ và tài khoản Có là bắt buộc.');return;} const duplicate=(DB.accountingEntries||[]).find(x=>String(x.number||'').toLowerCase()===number.toLowerCase()&&String(x.id)!==String(d.id||'')); if(duplicate){Toast.err('Trùng số định khoản',`Định khoản ${number} đã tồn tại.`);return;} if(autoUsage && active){ const occupied=(DB.accountingEntries||[]).find(x=>x.active!==false&&String(x.autoUsage||'')===autoUsage&&String(x.id)!==String(d.id||'')); if(occupied){Toast.err('Nghiệp vụ đã có định khoản mặc định',`${accountingAutoUsageLabel(autoUsage)} đang dùng ${occupied.number||occupied.id} · ${occupied.name||''}. Hãy sửa hoặc ngừng dùng định khoản đó trước.`);return;} } let row=d.id?accountingEntryById(d.id):null; if(!row){row={id:nextCode('DK-2026-',DB.accountingEntries||[]),createdAt:new Date().toISOString(),createdBy:DB.currentUser?.id||''}; DB.accountingEntries.unshift(row);} Object.assign(row,{number,name,debitAccount,creditAccount,flow,active,autoUsage,description,updatedAt:new Date().toISOString(),updatedBy:DB.currentUser?.id||''}); try{await accountingEntrySaveRecord(row); Modal.close(); render(); Toast.ok('Đã lưu định khoản',`${number} · ${name}`);}catch(err){Toast.err('Không lưu được định khoản',err?.message||'Vui lòng thử lại.');} },
+  'acc-entry-delete': async (d) => { const e=accountingEntryById(d.id); if(!e)return; const used=accountingEntryUsage(e.id); if(used.length){Toast.warn('Không thể xóa',`Định khoản ${e.number||e.id} đã có ${used.length} giao dịch thu/chi ghi nhận.`);return;} if(!confirm(`Xóa định khoản “${e.number||e.id} · ${e.name||''}”?`))return; try{await accountingEntryDeleteRecord(e.id);render();Toast.ok('Đã xóa định khoản');}catch(err){Toast.err('Không xóa được định khoản',err?.message||'Vui lòng thử lại.');} },
+  'acc-cash-add': async (d) => { await accountingEntriesEnsureFresh(false); openCashTxForm(d.type); },
   'acc-cash-save': async (d) => {
     const date = $('#ctxDate')?.value || currentDateYMD();
     const amount = parseMoney($('#ctxAmount')?.value) || 0;
     if (amount <= 0) { Toast.err('Số tiền không hợp lệ', 'Vui lòng nhập số tiền lớn hơn 0.'); return; }
+    const accountingEntryId = $('#ctxAccountingEntry')?.value || '';
+    if (!accountingEntryId) { Toast.err('Chưa chọn định khoản','Mọi khoản thu/chi bắt buộc phải chọn định khoản đã khai báo.'); return; }
     const category = $('#ctxCategory')?.value || '';
     const note = $('#ctxNote')?.value.trim() || category;
     const method = $('#ctxMethod')?.value || 'CASH';
@@ -1660,10 +1747,10 @@ Object.assign(Actions, {
     // Phải có danh sách thật từ server trước khi sinh mã: nếu DB.cashTransactions còn rỗng
     // thì mã SQ-2026-001 sẽ trùng bản ghi đã có trên server và bị ghi đè khi đồng bộ.
     try { if (typeof RestaurantQualityAPI !== 'undefined') await RestaurantQualityAPI.ensureFresh(['cashTransactions','bankAccounts'], {force:false}); } catch(err) {}
-    const row = { id: nextCode('SQ-2026-', DB.cashTransactions), type: d.type, date, amount, category, note, method: method==='BANK_TRANSFER'?'Chuyển khoản':'Tiền mặt', bankId, createdBy: DB.currentUser?.id || '' };
+    const row = { id: nextCode('SQ-2026-', DB.cashTransactions), type: d.type, date, amount, accountingEntryId, category, note, method: method==='BANK_TRANSFER'?'Chuyển khoản':'Tiền mặt', bankId, createdBy: DB.currentUser?.id || '' };
     DB.cashTransactions.unshift(row);
     try {
-      if (bankId) await AccountingBank.record({ bankId, type:d.type==='THU'?'IN':'OUT', date, amount, note, sourceType:'CASH_TX', sourceId:row.id });
+      if (bankId) await AccountingBank.record({ bankId, type:d.type==='THU'?'IN':'OUT', date, amount, note, sourceType:'CASH_TX', sourceId:row.id, accountingEntryId });
       // Trước đây bước này bị thiếu: sổ thu-chi chỉ nằm trong RAM nên mất khi F5.
       if (typeof RestaurantQualityAPI !== 'undefined') await RestaurantQualityAPI.syncRestaurant(['cashTransactions']);
       Modal.close(); render();
@@ -1744,12 +1831,13 @@ Object.assign(Actions, {
       DB.bankAccounts = (DB.bankAccounts || []).filter(x => String(x.id) !== String(b.id)); AccountingBank.hydrate(); render(); Toast.ok('Đã xóa tài khoản ngân hàng');
     } catch(err) { DB.bankAccounts = before; AccountingBank.hydrate(); Toast.err('Không xóa được tài khoản', err?.message || 'Vui lòng thử lại.'); }
   },
-  'acc-bank-tx-add': (d) => openBankTxForm(d.id),
+  'acc-bank-tx-add': async (d) => { await accountingEntriesEnsureFresh(false); openBankTxForm(d.id); },
   'acc-bank-tx-save': async (d) => {
     const amount = parseMoney($('#bkTxAmount')?.value) || 0;
     if (amount <= 0) { Toast.err('Số tiền không hợp lệ', 'Vui lòng nhập số tiền lớn hơn 0.'); return; }
+    const accountingEntryId=$('#bkTxAccountingEntry')?.value||''; if(!accountingEntryId){Toast.err('Chưa chọn định khoản','Giao dịch ngân hàng bắt buộc phải chọn định khoản.');return;}
     try {
-      await AccountingBank.record({ bankId:d.id, type:$('#bkTxType')?.value || 'IN', date:$('#bkTxDate')?.value || currentDateYMD(), amount, note:$('#bkTxNote')?.value.trim() || '', sourceType:'MANUAL_BANK', sourceId:`${d.id}-${Date.now()}` });
+      await AccountingBank.record({ bankId:d.id, type:$('#bkTxType')?.value || 'IN', date:$('#bkTxDate')?.value || currentDateYMD(), amount, note:$('#bkTxNote')?.value.trim() || '', sourceType:'MANUAL_BANK', sourceId:`${d.id}-${Date.now()}`, accountingEntryId });
       Modal.close(); render(); Toast.ok('Đã ghi nhận giao dịch ngân hàng');
     } catch(err) { Toast.err('Không lưu được giao dịch ngân hàng', err?.message || 'Vui lòng thử lại.'); }
   },

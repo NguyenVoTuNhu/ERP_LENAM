@@ -193,6 +193,7 @@ const Auth = {
       ROLE_MAINTENANCE:      { module:'maintenance',    tab:'dashboard' },
       ROLE_LOGISTICS:        { module:'logistics',      tab:'dashboard' },
       ROLE_RESTAURANT:       { module:'restaurant',     tab:'dashboard' },
+      ROLE_RESTAURANT_STAFF: { module:'restaurant',     tab:'dashboard' },
       ROLE_SUBCONTRACT:      { module:'subcontracting', tab:'dashboard' },
       ROLE_RND:              { module:'rnd',            tab:'dashboard' },
     };
@@ -242,6 +243,7 @@ const Auth = {
       'lg-vehicle-type-new':'LOGISTICS_OPERATE','lg-vehicle-type-edit':'LOGISTICS_OPERATE','lg-vehicle-type-save':'LOGISTICS_OPERATE',
       'lg-driver-new':'LOGISTICS_OPERATE','lg-driver-edit':'LOGISTICS_OPERATE','lg-driver-save':'LOGISTICS_OPERATE',
       'lg-maint-new':'LOGISTICS_OPERATE','lg-maint-save':'LOGISTICS_OPERATE','lg-maint-start':'LOGISTICS_OPERATE','lg-maint-finish':'LOGISTICS_OPERATE','lg-maint-finish-save':'LOGISTICS_OPERATE',
+      'acc-entry-new':'ACCOUNTING_OPERATE','acc-entry-edit':'ACCOUNTING_OPERATE','acc-entry-save':'ACCOUNTING_OPERATE','acc-entry-delete':'ACCOUNTING_OPERATE','acc-entry-subtab':'ACCOUNTING_VIEW',
       'new-user':'ADMIN_USER_MANAGE','user-toggle':'ADMIN_USER_MANAGE','user-role':'ADMIN_USER_MANAGE','user-role-save':'ADMIN_USER_MANAGE',
       'new-employee':'HR_OPERATE','employee-edit':'HR_OPERATE','employee-save':'HR_OPERATE','employee-toggle-active':'HR_OPERATE','employee-import':'HR_OPERATE'
     };
@@ -691,7 +693,7 @@ function navWorkCount(key){
     case 'warehouse-stocktake': return navCountWhere(DB?.inventoryCounts, x => ['DRAFT','IN_PROGRESS','PENDING'].includes(S(x.status)));
     case 'warehouse-defects': return navCountWhere(DB?.materialReturnRequests, x => ['WAITING_WAREHOUSE','WAITING_WAREHOUSE_CONFIRMATION','PENDING_WAREHOUSE'].includes(S(x.status))) + navCountWhere(DB?.inventory, x => Number(x.qtyRejected||0)>0);
     case 'warehouse-production-plan': return navCountWhere(DB?.productionPlans, x => ['WAITING_APPROVAL','APPROVED'].includes(S(x.status)));
-    case 'warehouse-store-replenishment': return navCountWhere(DB?.restaurantReplenishmentRequests, x => ['PENDING','WAITING_WAREHOUSE','WAITING_APPROVAL','APPROVED'].includes(S(x.status)));
+    case 'warehouse-store-replenishment': return navCountWhere(DB?.restaurantReplenishmentRequests, x => { const st=(typeof restaurantReplenishmentDerivedStatus==='function'?restaurantReplenishmentDerivedStatus(x):x.status); return ['REQUESTED','PARTIAL_RECEIVED','PENDING','WAITING_WAREHOUSE','WAITING_APPROVAL','APPROVED'].includes(S(st)); });
 
     // Sản xuất
     case 'production-plan': return navCountWhere(DB?.productionPlans, x => ['APPROVED','MATERIAL_ISSUED'].includes(S(x.status)));
@@ -701,7 +703,7 @@ function navWorkCount(key){
     // Nhà hàng / cửa hàng
     case 'restaurant-pos': return navCountWhere(DB?.restaurantPosOrders, x => ['NEW','PENDING_PAYMENT','OPEN'].includes(S(x.status)));
     case 'restaurant-kitchen': return navCountWhere(DB?.restaurantPosOrders, x => ['NEW','PENDING','WAITING_KITCHEN','COOKING'].includes(S(x.kitchenStatus || x.status)));
-    case 'restaurant-replenishment': return navCountWhere(DB?.restaurantReplenishmentRequests, x => ['PENDING','WAITING_APPROVAL','WAITING_WAREHOUSE'].includes(S(x.status)));
+    case 'restaurant-replenishment': return navCountWhere(DB?.restaurantReplenishmentRequests, x => { const st=(typeof restaurantReplenishmentDerivedStatus==='function'?restaurantReplenishmentDerivedStatus(x):x.status); return ['REQUESTED','PARTIAL_RECEIVED','ISSUED','PENDING','WAITING_APPROVAL','WAITING_WAREHOUSE'].includes(S(st)); });
     case 'restaurant-issue': return navCountWhere(DB?.restaurantReplenishmentRequests, x => ['APPROVED','WAITING_ISSUE'].includes(S(x.status)));
 
     // Kế toán / CRM
@@ -826,6 +828,7 @@ const NAV = [
       icon: 'fa-coins',
       children: [
         { id: 'dashboard', label: 'Tổng quan tài chính' },
+        { id: 'entries', label: 'Định khoản' },
         { id: 'general_ledger', label: 'Hạch toán' },
         { id: 'ar', label: 'Công nợ phải thu', count: () => navWorkCount('accounting-ar'), alert: true },
         { id: 'ap', label: 'Công nợ phải chi', count: () => navWorkCount('accounting-ap'), alert: true },
@@ -1026,6 +1029,10 @@ function clearTransientNavigationFilter(module, nextTab = null) {
 
 /** Điều hướng sang module khác */
 function go(module, params = {}) {
+  // Giữ lại module trước khi đổi State. Sidebar dùng go() + history.replaceState(),
+  // KHÔNG phát sinh hashchange. Vì vậy server-first phải được xử lý ngay tại đây,
+  // nếu không HR sẽ render snapshot 86 trước rồi KIO mới đổi thành số thật.
+  const previousModule = State.module;
   const requestedTab = params.tab || null;
   if (typeof Auth !== 'undefined' && Auth.currentAccount() && !Auth.canAccess(module, requestedTab)) {
     Toast.err('Không có quyền truy cập', 'Vai trò hiện tại không được cấp quyền vào chức năng này.');
@@ -1061,6 +1068,32 @@ function go(module, params = {}) {
 
   Pop.close();
   if (window.innerWidth <= 900) closeSidebar();
+
+  // [HR SERVER-FIRST VIA SIDEBAR]
+  // go() dùng history.replaceState nên browser không bắn hashchange. Trước đây
+  // render() chạy ngay với DB.employees từ data.js/cache (86), sau đó
+  // scheduleRouteDataRefresh mới lấy KIO (51) và render lại => nháy 86 -> 51.
+  // Khi đi TỪ module khác VÀO HR, tuyệt đối không first-paint dữ liệu cũ.
+  // Giữ nguyên màn hình hiện tại trong lúc request ngắn, lấy server xong mới render HR.
+  if (module === 'hr' && previousModule !== 'hr' && typeof HRAPI !== 'undefined') {
+    Promise.resolve().then(async () => {
+      try {
+        await HRAPI.bootstrap?.();
+        await HRAPI.ensureFresh?.(['employees'], { force: true });
+      } catch (err) {
+        console.warn('[HR] Không hydrate được nhân sự KIO trước first paint từ sidebar:', err);
+      }
+      if (State.module !== 'hr') return;
+      render();
+      // Không schedule refresh HR lần nữa ngay sau force:true để tránh request/render kép.
+      $('.view')?.scrollTo?.({ top: 0 });
+      window.scrollTo({
+        top: 0,
+        behavior: 'instant' in document.documentElement.style ? 'instant' : 'auto'
+      });
+    });
+    return;
+  }
 
   // [QC FAST CACHE] IQC/FQC dùng cùng cơ chế điều hướng như Kho:
   // render ngay từ snapshot đã hydrate trong phiên; scheduleRouteDataRefresh()

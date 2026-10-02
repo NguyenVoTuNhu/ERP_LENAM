@@ -9,6 +9,24 @@ function inventoryMasterItem(id) {
 function inventoryCanOperate() {
   return typeof Auth === 'undefined' || Auth.hasPermission('INVENTORY_OPERATE');
 }
+
+// Lô hết hạn vẫn được giữ nguyên trong DB để truy vết/audit, nhưng không còn
+// được tính vào tồn khả dụng trên màn Tồn kho chính. Các lô này được hiển thị
+// tại Hàng lỗi với phân loại "Hết hạn". Màn chi tiết master vẫn xem đủ mọi lô.
+function inventoryLotIsExpired(lotOrId) {
+  const lot = typeof lotOrId === 'string' ? Q.lot(lotOrId) : lotOrId;
+  const expiry = String(lot?.expiryDate || '').slice(0, 10);
+  if (!expiry) return false;
+  const base = String(DB.today || new Date().toISOString().slice(0, 10)).slice(0, 10);
+  return expiry < base;
+}
+
+function inventoryLotStateHtml(lotOrId) {
+  const lot = typeof lotOrId === 'string' ? Q.lot(lotOrId) : lotOrId;
+  if (inventoryLotIsExpired(lot)) return '<span class="badge red"><i class="fa-solid fa-calendar-xmark"></i> Hết hạn</span>';
+  if (String(lot?.qcStatus || '').toUpperCase() === 'FAILED') return '<span class="badge red">QC không đạt</span>';
+  return '<span class="badge green">Còn hiệu lực</span>';
+}
 function inventoryItemCategory(item, type) {
   if (!item) return '';
   if (type === 'RAW_MATERIAL') return item.group || item.category || '';
@@ -65,7 +83,7 @@ function openMaterialModal(id) {
         ${infoItem('Dùng cho', usedIn.length ? usedIn.map((p) => esc(p.name)).join(', ') : '<span class="muted">Chưa gắn định mức</span>')}
       </div>
       <div class="form-sec-title"><i class="fa-solid fa-location-dot"></i>Vị trí tồn thực tế</div>
-      ${tableShell([{t:'Kho'},{t:'Vị trí'},{t:'Lô'},{t:'Số lượng',cls:'right'}], stockRows.map(r=>`<tr><td>${esc(Q.warehouseName(r.warehouseId))}</td><td>${esc(Q.locationName(r.locationId)||'—')}</td><td><span class="code">${esc(Q.lot(r.lotId)?.lotNumber||r.lotId||'—')}</span></td><td class="right num">${fmtN(Number(r.qtyOnHand||0))} ${esc(r.unit||m.unit)}</td></tr>`), {emptyTitle:'Chưa có tồn kho',emptyDesc:'Vị trí chỉ được xác định khi hàng được nhập kho.'})}
+      ${tableShell([{t:'Kho'},{t:'Vị trí'},{t:'Lô'},{t:'HSD'},{t:'Trạng thái'},{t:'Số lượng',cls:'right'}], stockRows.map(r=>{const lot=Q.lot(r.lotId);return `<tr><td>${esc(Q.warehouseName(r.warehouseId))}</td><td>${esc(Q.locationName(r.locationId)||'—')}</td><td><span class="code">${esc(lot?.lotNumber||r.lotId||'—')}</span></td><td>${lot?.expiryDate?fmtDate(lot.expiryDate):'—'}</td><td>${inventoryLotStateHtml(lot)}</td><td class="right num">${fmtN(Number(r.qtyOnHand||0))} ${esc(r.unit||m.unit)}</td></tr>`}), {emptyTitle:'Chưa có tồn kho',emptyDesc:'Vị trí chỉ được xác định khi hàng được nhập kho.'})}
       <div class="form-sec-title" style="margin-top:18px"><i class="fa-solid fa-right-left"></i>Lịch sử nhập xuất gần đây</div>
       ${tableShell(
         [{ t: 'Chứng từ' }, { t: 'Loại' }, { t: 'Ngày' }, { t: 'Số lượng', cls: 'right' }, { t: 'Tham chiếu' }],
@@ -190,7 +208,7 @@ function openInventoryMasterDetail(type, id) {
   Modal.open({
     title: esc(item.name || id), sub: `${id} · ${typeLabel} · ${esc(inventoryItemCategory(item,type)||'Chưa phân loại')}`, size:'md',
     body:`<div class="info-grid">${infoItem('Mã hàng',`<span class="code">${esc(id)}</span>`)}${infoItem('Danh mục',esc(inventoryItemCategory(item,type)||'—'))}${infoItem('Đơn vị tính',esc(item.unit||'—'))}${infoItem('Đơn giá',fmtVND(Number(item.price||0)))}${infoItem('Tổng tồn',`<b class="num">${fmtN(qty)} ${esc(item.unit||'')}</b>`)}${type === 'FINISHED_GOODS' ? infoItem('Khối lượng đóng gói', Number(item.packedWeightG||0)>0 || Number(item.packedWeightKg||0)>0 ? `<b class="num">${fmtDec(Number(item.packedWeightG||0) || Number(item.packedWeightKg||0)*1000,2)} g / ${esc(item.unit||'ĐVT')}</b>` : '<span class="muted">Chưa khai báo</span>') + infoItem('Hạn sử dụng mặc định', Number(item.shelfLifeDays||0)>0 ? `<b>${fmtN(Number(item.shelfLifeDays))} ngày</b>` : '<span class="muted">Chưa quy định</span>') : ''}${infoItem('Quy cách',esc(item.spec||'—'))}</div>
-      <div class="form-sec-title"><i class="fa-solid fa-warehouse"></i>Tồn theo kho/lô</div>${tableShell([{t:'Kho'},{t:'Lô'},{t:'Số lượng',cls:'right'}],rows.map(r=>`<tr><td>${esc(Q.warehouseName(r.warehouseId))}</td><td><span class="code">${esc(Q.lot(r.lotId)?.lotNumber||'—')}</span></td><td class="right num">${fmtN(r.qtyOnHand)} ${esc(r.unit||item.unit||'')}</td></tr>`),{emptyTitle:'Chưa phát sinh tồn kho'})}`,
+      <div class="form-sec-title"><i class="fa-solid fa-warehouse"></i>Tồn theo kho/lô</div>${tableShell([{t:'Kho'},{t:'Lô'},{t:'HSD'},{t:'Trạng thái'},{t:'Số lượng',cls:'right'}],rows.map(r=>{const lot=Q.lot(r.lotId);return `<tr><td>${esc(Q.warehouseName(r.warehouseId))}</td><td><span class="code">${esc(lot?.lotNumber||'—')}</span></td><td>${lot?.expiryDate?fmtDate(lot.expiryDate):'—'}</td><td>${inventoryLotStateHtml(lot)}</td><td class="right num">${fmtN(r.qtyOnHand)} ${esc(r.unit||item.unit||'')}</td></tr>`}),{emptyTitle:'Chưa phát sinh tồn kho'})}`,
     foot:`<button class="btn" data-act="modal-close">Đóng</button>${inventoryCanOperate() ? `<button class="btn btn-primary" data-act="inventory-item-edit" data-type="${type}" data-id="${esc(id)}"><i class="fa-solid fa-pen"></i>Sửa</button>` : ''}`
   });
 }
@@ -309,7 +327,7 @@ Views.inventory = function () {
   masterSource.forEach(item => {
     if (f.category && inventoryItemCategory(item, cfg.type) !== f.category) return;
     if (q && ![item.id, item.name, inventoryItemCategory(item, cfg.type), item.unit].some(v => String(v || '').toLowerCase().includes(q))) return;
-    groupMap.set(item.id, { productId: item.id, qtyOnHand: 0, qtyPending: 0, qtyRejected: 0, qtyReserved: 0, rows: [] });
+    groupMap.set(item.id, { productId: item.id, qtyOnHand: 0, qtyPending: 0, qtyRejected: 0, qtyReserved: 0, rows: [], expiredRows: [] });
   });
 
   // Bổ sung các lô/tồn thực tế. Nếu tìm theo lô/PO/kho/kệ thì vẫn đưa đúng mã hàng vào kết quả.
@@ -360,6 +378,13 @@ Views.inventory = function () {
       if (!rowMatchesQ && !masterMatchesQ) return;
 
       const g = groupMap.get(row.productId);
+
+      // Lô hết hạn không còn nằm trong tồn khả dụng/tổng tồn trên danh sách chính.
+      // Không xóa DB: vẫn giữ tại expiredRows để chi tiết master và Hàng lỗi truy vết.
+      if (inventoryLotIsExpired(lot) && Number(row.qtyOnHand || 0) > 0) {
+        g.expiredRows.push(row);
+        return;
+      }
 
       g.qtyOnHand += Number(row.qtyOnHand || 0);
       g.qtyPending += Number(row.qtyPending || 0);
@@ -440,7 +465,7 @@ Views.inventory = function () {
         ? ` · <span class="badge orange"><i class="fa-solid fa-triangle-exclamation"></i> Sắp hết hàng</span>`
         : ` · <span class="badge green"><i class="fa-solid fa-circle-check"></i> Còn hàng</span>`;
     const parent = `<tr class="clickable ${expanded ? 'inventory-group-selected' : ''} ${lowStock ? 'inventory-low-stock' : ''}" data-act="inv-stock-product-toggle" data-productid="${group.productId}" style="${expanded ? 'background:var(--teal-soft);box-shadow:inset 5px 0 0 var(--teal)' : ''}">
-      <td>${cell2(esc(item?.name || group.productId), `${esc(group.productId)}${stockBadge}${Number(group.qtyPending||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--orange)"><i class="fa-solid fa-flask-vial"></i> Đang chờ kiểm tra chất lượng</div>` : ''}${Number(group.qtyRejected||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--red)"><i class="fa-solid fa-triangle-exclamation"></i> Có ${fmtN(group.qtyRejected)} ${esc(item?.unit || '')} không đạt QC · chờ xuất trả NCC</div>` : ''}${stockTab!=='finished' && Number(group.qtyReserved||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--blue)">${reservationLinks(group.productId, '', item?.unit || '') || `<i class="fa-solid fa-cart-flatbed"></i> ${fmtN(group.qtyReserved)} ${esc(item?.unit || '')} đang chờ xác nhận xuất bán`}</div>` : ''}`)}</td>
+      <td>${cell2(esc(item?.name || group.productId), `${esc(group.productId)}${stockBadge}${group.expiredRows?.length ? `<div class="cell-sub" style="margin-top:4px;color:var(--red)"><i class="fa-solid fa-calendar-xmark"></i> ${fmtN(group.expiredRows.length)} lô hết hạn đã ẩn khỏi tồn khả dụng · xem đầy đủ trong Chi tiết/Hàng lỗi</div>` : ''}${Number(group.qtyPending||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--orange)"><i class="fa-solid fa-flask-vial"></i> Đang chờ kiểm tra chất lượng</div>` : ''}${Number(group.qtyRejected||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--red)"><i class="fa-solid fa-triangle-exclamation"></i> Có ${fmtN(group.qtyRejected)} ${esc(item?.unit || '')} không đạt QC · chờ xuất trả NCC</div>` : ''}${stockTab!=='finished' && Number(group.qtyReserved||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--blue)">${reservationLinks(group.productId, '', item?.unit || '') || `<i class="fa-solid fa-cart-flatbed"></i> ${fmtN(group.qtyReserved)} ${esc(item?.unit || '')} đang chờ xác nhận xuất bán`}</div>` : ''}`)}</td>
       <td class="right strong num">${fmtN(group.qtyOnHand)} ${esc(item?.unit || lotRows[0]?.unit || '')}${Number(group.qtyPending||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--orange)">Chờ QC: ${fmtN(group.qtyPending)} ${esc(item?.unit || lotRows[0]?.unit || '')} · chưa tính vào tồn</div>` : ''}${stockTab!=='finished' && Number(group.qtyReserved||0)>0 ? `<div class="cell-sub" style="margin-top:4px;color:var(--blue)">${reservationLinks(group.productId, '', item?.unit || lotRows[0]?.unit || '') || `Giữ chỗ bán: ${fmtN(group.qtyReserved)} ${esc(item?.unit || lotRows[0]?.unit || '')} · chưa trừ tồn thật`}</div>` : ''}${minimumStock > 0 ? `<div class="cell-sub">Tối thiểu: ${fmtN(minimumStock)}</div>` : ''}</td>
       <td class="center"><span class="chip"><i class="fa-solid fa-layer-group"></i> ${lotRows.length} lô</span></td>
       <td>${esc([...new Set(lotRows.map(r=>inventoryWarehouseLabel(r.warehouseId)).filter(Boolean))].join(', '))}</td>
@@ -2103,7 +2128,8 @@ Views['inv-defects'] = function () {
       <td>${fmtDate(String(r.lastUpdated||'').slice(0,10))}</td><td class="right">${rowActions([{act:'inv-exception-detail',data:`data-product="${esc(r.productId)}" data-lotid="${esc(r.lotId||'')}" data-warehouse="${esc(r.warehouseId)}"`,icon:'fa-eye',title:'Xem chi tiết'}])}</td>
     </tr>`;
   });
-  const defectQty=(DB.inventory||[]).filter(r=>defectWhIds.has(r.warehouseId)).reduce((s,r)=>s+Number(r.qtyOnHand||0),0);
+  const defectQty=(DB.inventory||[]).filter(r=>defectWhIds.has(r.warehouseId)&&!inventoryLotIsExpired(Q.lot(r.lotId))).reduce((s,r)=>s+Number(r.qtyOnHand||0),0);
+  const expiredQty=expiredRows.reduce((s,e)=>s+Number(e.inventory?.qtyOnHand||0),0);
   const returnQty=(DB.inventory||[]).filter(r=>returnWhIds.has(r.warehouseId)).reduce((s,r)=>s+Number(r.qtyOnHand||0),0);
   const activeQty = subtab==='returned' ? returnQty : defectQty;
   const activeCount = rowsData.length;
@@ -2229,11 +2255,13 @@ Views['warehouse-production-requests'] = function () {
 };
 
 Views['warehouse-store-replenishment'] = function () {
-  const f=F('warehouse-store-replenishment',{q:'',status:'REQUESTED',storeId:''});
+  const f=F('warehouse-store-replenishment',{q:'',status:'ACTION',storeId:''});
   const q=String(f.q||'').trim().toLowerCase();
   const stores=(DB.stores||[]).filter(x=>x.status!=='inactive');
   let list=[...(DB.storeReplenishmentRequests||[])].filter(r=>{
-    if(f.status&&r.status!==f.status)return false;
+    const derived=typeof restaurantReplenishmentDerivedStatus==='function'?restaurantReplenishmentDerivedStatus(r):r.status;
+    if(f.status==='ACTION'&&!['REQUESTED','PARTIAL_RECEIVED'].includes(derived))return false;
+    if(f.status&&f.status!=='ACTION'&&derived!==f.status)return false;
     if(f.storeId&&r.storeId!==f.storeId)return false;
     const st=(typeof restaurantStore==='function'?restaurantStore(r.storeId):stores.find(x=>x.id===r.storeId));
     const items=typeof restaurantRequestItems==='function'?restaurantRequestItems(r):(r.items||[]);
@@ -2242,27 +2270,31 @@ Views['warehouse-store-replenishment'] = function () {
   }).sort((a,b)=>String(b.createdAt||b.date||'').localeCompare(String(a.createdAt||a.date||''))||String(b.id||'').localeCompare(String(a.id||'')));
   const rows=list.map(r=>{
     const store=typeof restaurantStore==='function'?restaurantStore(r.storeId):stores.find(x=>x.id===r.storeId);
+    const progress=typeof restaurantReplenishmentProgress==='function'?restaurantReplenishmentProgress(r):null;
+    const derived=progress?.status||r.status;
     const items=typeof restaurantRequestItems==='function'?restaurantRequestItems(r):(r.items||[]);
     const itemText=items.slice(0,2).map(it=>esc(Q.product(it.productId)?.name||it.productId)).join('<br>')+(items.length>2?`<div class="cell-sub">+${items.length-2} mặt hàng</div>`:'');
-    const qtyText=items.slice(0,2).map(it=>`${fmtDec(Number(it.quantity||0),3)} ${esc(Q.product(it.productId)?.unit||'')}`).join('<br>');
+    const qtyText=(progress?.items||items.map(it=>({productId:it.productId,requestedQty:Number(it.quantity||0),remainingToIssue:Number(it.quantity||0)}))).slice(0,2).map(it=>{const unit=Q.product(it.productId)?.unit||'';return `${fmtDec(Number(it.requestedQty??it.quantity??0),3)} ${esc(unit)}${Number(it.remainingToIssue||0)>1e-6?`<div class="cell-sub">Còn thiếu ${fmtDec(it.remainingToIssue,3)} ${esc(unit)}</div>`:''}`}).join('<br>');
     const acts=[{act:'restaurant-replenishment-view',data:`data-id="${esc(r.id)}"`,icon:'fa-eye',title:'Xem yêu cầu'}];
-    if(r.status==='REQUESTED')acts.push({act:'restaurant-replenishment-fulfill',data:`data-id="${esc(r.id)}"`,icon:'fa-check',title:'Kho duyệt và xuất hàng'});
-    return `<tr><td><span class="code">${esc(r.id)}</span><div class="cell-sub">${fmtDate(r.date)}</div></td><td>${esc(store?.name||r.storeId)}</td><td>${itemText||'—'}</td><td class="right num">${qtyText||'—'}</td><td>${typeof restaurantReplenishmentStatus==='function'?restaurantReplenishmentStatus(r.status):esc(r.status)}</td><td>${r.transferId?`<span class="code">${esc(r.transferId)}</span>`:'—'}</td><td class="right">${rowActions(acts)}</td></tr>`;
+    if(['REQUESTED','PARTIAL_RECEIVED'].includes(derived))acts.push({act:'restaurant-replenishment-fulfill',data:`data-id="${esc(r.id)}"`,icon:'fa-check',title:derived==='PARTIAL_RECEIVED'?'Xuất tiếp phần còn thiếu':'Kho duyệt và xuất hàng'});
+    const issueRefs=progress?.batches?.map(b=>b.goodsIssueId).filter(Boolean).join(', ')||r.goodsIssueId||r.transferId||'';
+    return `<tr><td><span class="code">${esc(r.id)}</span><div class="cell-sub">${fmtDate(r.date)}</div></td><td>${esc(store?.name||r.storeId)}</td><td>${itemText||'—'}</td><td class="right num">${qtyText||'—'}</td><td>${typeof restaurantReplenishmentStatus==='function'?restaurantReplenishmentStatus(derived):esc(derived)}</td><td>${issueRefs?`<span class="code">${esc(issueRefs)}</span>`:'—'}</td><td class="right">${rowActions(acts)}</td></tr>`;
   }).join('');
   const all=DB.storeReplenishmentRequests||[];
+  const statuses=all.map(r=>typeof restaurantReplenishmentDerivedStatus==='function'?restaurantReplenishmentDerivedStatus(r):r.status);
   return `${pageHead('Duyệt bổ sung hàng cửa hàng','Kho là bộ phận duyệt yêu cầu bổ sung và thực hiện xuất thành phẩm cho cửa hàng','')}
     <div class="grid g-auto-sm" style="margin-bottom:14px">
-      ${mkpi('Chờ kho duyệt',all.filter(r=>r.status==='REQUESTED').length,'fa-hourglass-half','orange')}
-      ${mkpi('Kho đã xuất',all.filter(r=>r.status==='ISSUED').length,'fa-truck-ramp-box','blue')}
-      ${mkpi('Cửa hàng đã nhận',all.filter(r=>r.status==='RECEIVED').length,'fa-circle-check','green')}
+      ${mkpi('Cần Kho xử lý',statuses.filter(x=>['REQUESTED','PARTIAL_RECEIVED'].includes(x)).length,'fa-hourglass-half','orange')}
+      ${mkpi('Chờ cửa hàng nhận',statuses.filter(x=>x==='ISSUED').length,'fa-truck-ramp-box','blue')}
+      ${mkpi('Đã nhận đủ',statuses.filter(x=>x==='RECEIVED').length,'fa-circle-check','green')}
     </div>
     <div class="card"><div class="toolbar">
       ${searchBox('warehouse-store-replenishment','Tìm mã yêu cầu, cửa hàng, thành phẩm…')}
       ${selectFilter('warehouse-store-replenishment','storeId',stores.map(x=>[x.id,x.name]),'Tất cả cửa hàng')}
-      ${selectFilter('warehouse-store-replenishment','status',[['REQUESTED','Chờ kho duyệt'],['ISSUED','Kho đã xuất'],['RECEIVED','Cửa hàng đã nhận']],'Tất cả trạng thái')}
+      ${selectFilter('warehouse-store-replenishment','status',[['ACTION','Cần Kho xử lý'],['REQUESTED','Chờ kho duyệt'],['PARTIAL_RECEIVED','Đã nhận một phần · còn thiếu'],['ISSUED','Kho đã xuất · chờ nhận'],['RECEIVED','Cửa hàng đã nhận đủ']],'Tất cả trạng thái')}
       ${(f.q||f.storeId||f.status)?'<button class="btn btn-sm" data-act="clear-filter" data-key="warehouse-store-replenishment"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>':''}
       <span class="spacer"></span><span class="chip">${fmtN(list.length)} yêu cầu</span>
-    </div>${tableShell([{t:'Yêu cầu'},{t:'Cửa hàng'},{t:'Thành phẩm'},{t:'SL yêu cầu',cls:'right'},{t:'Trạng thái'},{t:'Phiếu xuất'},{t:'Thao tác',cls:'right'}],rows,{emptyTitle:'Không có yêu cầu bổ sung phù hợp'})}</div>`;
+    </div>${tableShell([{t:'Yêu cầu'},{t:'Cửa hàng'},{t:'Thành phẩm'},{t:'SL yêu cầu / còn thiếu',cls:'right'},{t:'Trạng thái'},{t:'Phiếu xuất'},{t:'Thao tác',cls:'right'}],rows,{emptyTitle:'Không có yêu cầu bổ sung phù hợp'})}</div>`;
 };
 
 const _warehouseViewBeforeProductionFlow = Views.warehouse;
@@ -2364,8 +2396,15 @@ Views['inv-defects'] = function () {
   const defectWhIds = new Set((DB.warehouses||[]).filter(w=>w.type==='DEFECTIVE').map(w=>w.id));
   const returnWhIds = new Set((DB.warehouses||[]).filter(w=>w.type==='RETURNED').map(w=>w.id));
 
+  // Lô hết hạn được tự động phân loại vào Hàng lỗi nhưng KHÔNG di chuyển/xóa
+  // balance gốc trong DB. Như vậy giữ nguyên truy vết kho/lô, đồng thời loại khỏi
+  // tồn khả dụng và luôn xuất hiện ở đây với phân loại "Hết hạn".
+  const expiredRows=(DB.inventory||[])
+    .filter(r=>Number(r.qtyOnHand||0)>0 && !returnWhIds.has(r.warehouseId) && inventoryLotIsExpired(Q.lot(r.lotId)))
+    .map(r=>({kind:'expired',date:String(Q.lot(r.lotId)?.expiryDate||r.lastUpdated||''),inventory:r}));
+
   const defectRows=(DB.inventory||[])
-    .filter(r=>defectWhIds.has(r.warehouseId)&&Number(r.qtyOnHand||0)>0)
+    .filter(r=>defectWhIds.has(r.warehouseId)&&Number(r.qtyOnHand||0)>0&&!inventoryLotIsExpired(Q.lot(r.lotId)))
     .map(r=>({kind:'defective',date:String(r.lastUpdated||''),inventory:r}));
 
   // Hàng khách trả: tồn vật lý trong kho RETURNED.
@@ -2385,7 +2424,7 @@ Views['inv-defects'] = function () {
     if(!supplierReqIds.has(h.id)) supplierReturnRows.push({kind:'supplier_return_history',date:String(h.date||''),history:h});
   });
 
-  let rowsData=subtab==='returned'?[...supplierReturnRows,...customerReturnRows]:defectRows;
+  let rowsData=subtab==='returned'?[...supplierReturnRows,...customerReturnRows]:[...expiredRows,...defectRows];
 
   if(q) rowsData=rowsData.filter(entry=>{
     if(entry.kind==='supplier_return'||entry.kind==='supplier_return_history'){
@@ -2425,14 +2464,17 @@ Views['inv-defects'] = function () {
     const r=entry.inventory||{};
     const p=Q.product(r.productId)||Q.material(r.productId), lot=Q.lot(r.lotId), wh=(DB.warehouses||[]).find(w=>w.id===r.warehouseId), loc=(DB.warehouseLocations||[]).find(l=>l.id===r.locationId);
     const isReturned=entry.kind==='customer_return';
+    const isExpired=entry.kind==='expired';
     const ref=isReturned?(r.sourceId||lot?.salesOrderId||'—'):(r.productionOrderId||r.sourceId||lot?.productionOrderId||'—');
     const refAct=ref&&ref!=='—'?(isReturned?'open-order':'open-production-order'):'';
     const refHtml=refAct?`<button type="button" class="ref-link compact" data-act="${refAct}" data-id="${esc(ref)}" title="Mở ${isReturned?'đơn hàng':'lệnh sản xuất'} ${esc(ref)}"><span class="code">${esc(ref)}</span><i class="fa-solid fa-arrow-up-right-from-square"></i></button>`:'<span class="muted">—</span>';
-    const typeBadge=isReturned?'<span class="badge orange">Khách trả</span>':'<span class="badge red">Hàng lỗi</span>';
+    const typeBadge=isReturned?'<span class="badge orange">Khách trả</span>':isExpired?'<span class="badge red"><i class="fa-solid fa-calendar-xmark"></i> Hết hạn</span>':'<span class="badge red">Hàng lỗi</span>';
+    const stateHtml=isReturned?'<span class="badge blue">Đang lưu kho</span>':isExpired?'<span class="badge orange">Chờ xử lý</span>':'<span class="badge red">Cách ly</span>';
+    const recordedDate=isExpired?(lot?.expiryDate||String(r.lastUpdated||'').slice(0,10)):String(r.lastUpdated||'').slice(0,10);
     return `<tr class="clickable" data-act="inv-exception-detail" data-product="${esc(r.productId)}" data-lotid="${esc(r.lotId||'')}" data-warehouse="${esc(r.warehouseId)}">
-      <td>${cell2(`<span class="code">${esc(r.productId)}</span>`,esc(p?.name||r.productId))}</td><td>${typeBadge}</td><td><span class="code">${esc(lot?.lotNumber||'—')}</span></td>
+      <td>${cell2(`<span class="code">${esc(r.productId)}</span>`,esc(p?.name||r.productId))}</td><td>${typeBadge}</td><td><span class="code">${esc(lot?.lotNumber||'—')}</span>${isExpired&&lot?.expiryDate?`<div class="cell-sub" style="color:var(--red)">HSD ${fmtDate(lot.expiryDate)}</div>`:''}</td>
       <td>${esc(wh?.name||'—')}<div class="cell-sub">${esc(loc?.name||'')}</div></td><td class="right strong num">${fmtN(r.qtyOnHand||0)} ${esc(r.unit||p?.unit||'')}</td>
-      <td>${refHtml}</td><td>${isReturned?'<span class="badge blue">Đang lưu kho</span>':'<span class="badge red">Cách ly</span>'}</td><td>${fmtDate(String(r.lastUpdated||'').slice(0,10))}</td></tr>`;
+      <td>${refHtml}</td><td>${stateHtml}</td><td>${fmtDate(recordedDate)}</td></tr>`;
   }).join('');
 
   const defectQty=(DB.inventory||[]).filter(r=>defectWhIds.has(r.warehouseId)).reduce((s,r)=>s+Number(r.qtyOnHand||0),0);
@@ -2443,12 +2485,160 @@ Views['inv-defects'] = function () {
 
   const kpis=subtab==='returned'
     ? `${mkpi('Khách trả đang lưu kho',fmtN(customerReturnQty),'fa-box-open','orange')}${mkpi('SL trả NCC',fmtN(supplierReturnQty),'fa-truck-arrow-right','purple')}${mkpi('Chờ xuất trả NCC',fmtN(pendingSupplierReturns),'fa-clock','blue')}`
-    : `${mkpi('Hàng lỗi',fmtN(defectQty),'fa-triangle-exclamation','red')}${mkpi('Lô hàng lỗi',fmtN(rowsData.length),'fa-boxes-stacked','blue')}`;
+    : `${mkpi('Hàng lỗi / QC',fmtN(defectQty),'fa-triangle-exclamation','red')}${mkpi('Hết hạn',fmtN(expiredQty),'fa-calendar-xmark','orange')}${mkpi('Lô cần xử lý',fmtN(rowsData.length),'fa-boxes-stacked','blue')}`;
 
-  return `${pageHead('Hàng lỗi & hàng trả về','Theo dõi hàng cách ly, hàng khách trả và nguyên liệu QC không đạt cần/đã xuất trả nhà cung cấp.')}
+  return `${pageHead('Hàng lỗi & hàng trả về','Theo dõi hàng cách ly, lô hết hạn, hàng khách trả và nguyên liệu QC không đạt cần/đã xuất trả nhà cung cấp.')}
     ${tabs}
     <div class="grid g-auto-sm" style="margin-bottom:14px">${kpis}</div>
     <div class="card"><div class="card-head"><div><h3>${subtab==='returned'?'Hàng trả về':'Hàng lỗi'}</h3><p>${subtab==='returned'?'Yêu cầu trả NCC xuất hiện ngay sau QC không đạt. Thao tác xuất trả vẫn thực hiện tại Kho → Xuất kho.':'Click vào dòng để xem chi tiết hàng lỗi.'}</p></div><div>${searchBox('inv-defects','Tìm mã hàng, lô, PO, YCT, đơn bán…')}</div></div>
       ${tableShell([{t:'Hàng hóa'},{t:'Phân loại'},{t:'Lô'},{t:'Kho / vị trí'},{t:'Số lượng',cls:'right'},{t:subtab==='returned'?'Tham chiếu':'Tham chiếu LSX'},{t:'Trạng thái'},{t:'Ngày ghi nhận'}],rows,{emptyTitle:subtab==='returned'?'Chưa có hàng trả về':'Chưa có thành phẩm lỗi',emptyDesc:subtab==='returned'?'Hàng khách trả và nguyên liệu QC không đạt cần trả NCC sẽ xuất hiện tại đây.':'Sản phẩm QC không đạt sẽ tự chuyển vào đây.'})}
+    </div>`;
+};
+/* ========================================================================== 
+ * FIX 2026-10-01 — Safe renderer for Kho > Hàng lỗi & hàng trả về.
+ * Mục tiêu: route #warehouse/defects luôn render được, không để lỗi dữ liệu
+ * phụ làm render() dừng giữa chừng và giữ lại màn Kiểm kê cũ.
+ * Không thay đổi nghiệp vụ / dữ liệu KIO.
+ * ======================================================================= */
+Views['inv-defects'] = function () {
+  const f = F('inv-defects', { subtab:'defective', q:'' });
+  const subtab = f.subtab === 'returned' ? 'returned' : 'defective';
+  const q = String(f.q || '').toLowerCase().trim();
+  const warehouses = Array.isArray(DB.warehouses) ? DB.warehouses : [];
+  const locations = Array.isArray(DB.warehouseLocations) ? DB.warehouseLocations : [];
+  const inventory = Array.isArray(DB.inventory) ? DB.inventory : [];
+  const lots = Array.isArray(DB.inventoryLots) ? DB.inventoryLots : [];
+  const materials = Array.isArray(DB.materials) ? DB.materials : [];
+  const products = Array.isArray(DB.products) ? DB.products : [];
+  const suppliers = Array.isArray(DB.suppliers) ? DB.suppliers : [];
+  const purchaseOrders = Array.isArray(DB.purchaseOrders) ? DB.purchaseOrders : [];
+  const returnReqs = Array.isArray(DB.materialReturnRequests) ? DB.materialReturnRequests : [];
+  const returnHist = Array.isArray(DB.materialReturnHistory) ? DB.materialReturnHistory : [];
+  const productionOrders = Array.isArray(DB.productionOrders) ? DB.productionOrders : [];
+  const productionOrderIds = new Set(productionOrders.map(x => String(x?.id || x?.code || '')).filter(Boolean));
+
+  const lotOf = (id) => lots.find(x => x.id === id) || null;
+  const itemOf = (id) => products.find(x => x.id === id) || materials.find(x => x.id === id) || null;
+  const whOf = (id) => warehouses.find(x => x.id === id) || null;
+  const locOf = (id) => locations.find(x => x.id === id) || null;
+  const isExpired = (lot) => {
+    const exp = String(lot?.expiryDate || '').slice(0,10);
+    if (!exp) return false;
+    const base = String(DB.today || new Date().toISOString().slice(0,10)).slice(0,10);
+    return exp < base;
+  };
+  const defectWhIds = new Set(warehouses.filter(w => w.type === 'DEFECTIVE').map(w => w.id));
+  const returnWhIds = new Set(warehouses.filter(w => w.type === 'RETURNED').map(w => w.id));
+
+  const expiredEntries = inventory
+    .filter(r => Number(r.qtyOnHand || 0) > 0 && !returnWhIds.has(r.warehouseId) && isExpired(lotOf(r.lotId)))
+    .map(r => ({ kind:'expired', inventory:r, date:String(lotOf(r.lotId)?.expiryDate || r.lastUpdated || '') }));
+  const defectEntries = inventory
+    .filter(r => Number(r.qtyOnHand || 0) > 0 && defectWhIds.has(r.warehouseId) && !isExpired(lotOf(r.lotId)))
+    .map(r => ({ kind:'defective', inventory:r, date:String(r.lastUpdated || '') }));
+  const customerReturnEntries = inventory
+    .filter(r => Number(r.qtyOnHand || 0) > 0 && returnWhIds.has(r.warehouseId))
+    .map(r => ({ kind:'customer_return', inventory:r, date:String(r.lastUpdated || '') }));
+
+  const reqIds = new Set(returnReqs.map(r => r.id));
+  const supplierEntries = [
+    ...returnReqs.map(r => ({ kind:'supplier_return', request:r, date:String(r.completedAt || r.requestedDate || r.date || '') })),
+    ...returnHist.filter(h => !reqIds.has(h.id)).map(h => ({ kind:'supplier_return_history', history:h, date:String(h.date || '') }))
+  ];
+
+  let entries = subtab === 'returned'
+    ? [...supplierEntries, ...customerReturnEntries]
+    : [...expiredEntries, ...defectEntries];
+
+  if (q) {
+    entries = entries.filter(e => {
+      if (e.request || e.history) {
+        const r = e.request || e.history || {};
+        const mat = itemOf(r.materialId);
+        const lot = lotOf(r.lotId);
+        const po = purchaseOrders.find(x => x.id === r.poId);
+        const supplier = suppliers.find(x => x.id === (r.supplierId || po?.supplierId));
+        return [r.id,r.poId,r.receiptId,r.issueId,r.materialId,mat?.name,lot?.lotNumber,r.supplierLot,supplier?.name,r.reason,r.status]
+          .some(v => String(v || '').toLowerCase().includes(q));
+      }
+      const r = e.inventory || {};
+      const item = itemOf(r.productId), lot = lotOf(r.lotId), wh = whOf(r.warehouseId);
+      return [r.productId,item?.name,lot?.lotNumber,r.sourceId,r.productionOrderId,wh?.name]
+        .some(v => String(v || '').toLowerCase().includes(q));
+    });
+  }
+  entries.sort((a,b) => String(b.date || '').localeCompare(String(a.date || '')));
+
+  const rows = entries.map(e => {
+    if (e.request || e.history) {
+      const r = e.request || e.history || {};
+      const item = itemOf(r.materialId), lot = lotOf(r.lotId), po = purchaseOrders.find(x => x.id === r.poId);
+      const supplier = suppliers.find(x => x.id === (r.supplierId || po?.supplierId));
+      const wh = whOf(r.warehouseId), loc = locOf(r.locationId);
+      const done = ['COMPLETED','RETURNED'].includes(String(r.status || '').toUpperCase()) || !!r.issueId;
+      const poHtml = r.poId
+        ? `<button type="button" class="ref-link compact" data-act="open-po" data-id="${esc(r.poId)}"><span class="code">${esc(r.poId)}</span><i class="fa-solid fa-arrow-up-right-from-square"></i></button>`
+        : '<span class="muted">—</span>';
+      return `<tr class="clickable" data-act="inv-supplier-return-detail" data-id="${esc(r.id || '')}">
+        <td>${cell2(`<span class="code">${esc(r.materialId || '—')}</span>`,esc(item?.name || r.materialId || '—'))}</td>
+        <td><span class="badge purple">Trả NCC</span><div class="cell-sub">${esc(supplier?.name || 'Nhà cung cấp')}</div></td>
+        <td><span class="code">${esc(lot?.lotNumber || '—')}</span></td>
+        <td>${esc(wh?.name || '—')}<div class="cell-sub">${esc(loc?.name || '')}</div></td>
+        <td class="right strong num">${fmtN(r.qty || 0)} ${esc(r.unit || item?.unit || '')}</td>
+        <td>${poHtml}<div class="cell-sub">${esc(r.id || '')}</div></td>
+        <td>${done ? '<span class="badge green">Đã xuất trả NCC</span>' : '<span class="badge orange">Chờ kho xác nhận</span>'}</td>
+        <td>${fmtDate(String(r.completedAt || r.requestedDate || r.date || '').slice(0,10))}</td></tr>`;
+    }
+
+    const r = e.inventory || {};
+    const item = itemOf(r.productId), lot = lotOf(r.lotId), wh = whOf(r.warehouseId), loc = locOf(r.locationId);
+    const expired = e.kind === 'expired';
+    const returned = e.kind === 'customer_return';
+    const ref = returned ? (r.sourceId || lot?.salesOrderId || '—') : (r.productionOrderId || r.sourceId || lot?.productionOrderId || '—');
+    const productionRefExists = returned || ref === '—' || productionOrderIds.has(String(ref));
+    const refAct = ref !== '—' && productionRefExists ? (returned ? 'open-order' : 'open-production-order') : '';
+    const refHtml = refAct
+      ? `<button type="button" class="ref-link compact" data-act="${refAct}" data-id="${esc(ref)}"><span class="code">${esc(ref)}</span><i class="fa-solid fa-arrow-up-right-from-square"></i></button>`
+      : ref !== '—'
+        ? `<span class="code">${esc(ref)}</span>${!returned && !productionRefExists ? '<div class="cell-sub" style="color:var(--orange)"><i class="fa-solid fa-triangle-exclamation"></i> LSX không còn trên server</div>' : ''}`
+        : '<span class="muted">—</span>';
+    const typeBadge = returned
+      ? '<span class="badge orange">Khách trả</span>'
+      : expired
+        ? '<span class="badge red"><i class="fa-solid fa-calendar-xmark"></i> Hết hạn</span>'
+        : '<span class="badge red">Hàng lỗi</span>';
+    const statusBadge = returned
+      ? '<span class="badge blue">Đang lưu kho</span>'
+      : expired
+        ? '<span class="badge orange">Chờ xử lý</span>'
+        : '<span class="badge red">Cách ly</span>';
+    return `<tr class="clickable" data-act="inv-exception-detail" data-product="${esc(r.productId)}" data-lotid="${esc(r.lotId || '')}" data-warehouse="${esc(r.warehouseId)}">
+      <td>${cell2(`<span class="code">${esc(r.productId || '—')}</span>`,esc(item?.name || r.productId || '—'))}</td>
+      <td>${typeBadge}</td>
+      <td><span class="code">${esc(lot?.lotNumber || '—')}</span>${expired && lot?.expiryDate ? `<div class="cell-sub" style="color:var(--red)">HSD ${fmtDate(lot.expiryDate)}</div>` : ''}</td>
+      <td>${esc(wh?.name || '—')}<div class="cell-sub">${esc(loc?.name || '')}</div></td>
+      <td class="right strong num">${fmtN(r.qtyOnHand || 0)} ${esc(r.unit || item?.unit || '')}</td>
+      <td>${refHtml}</td><td>${statusBadge}</td>
+      <td>${fmtDate(String(expired ? (lot?.expiryDate || r.lastUpdated || '') : (r.lastUpdated || '')).slice(0,10))}</td></tr>`;
+  }).join('');
+
+  const expiredQty = expiredEntries.reduce((s,e) => s + Number(e.inventory?.qtyOnHand || 0), 0);
+  const defectQty = defectEntries.reduce((s,e) => s + Number(e.inventory?.qtyOnHand || 0), 0);
+  const customerReturnQty = customerReturnEntries.reduce((s,e) => s + Number(e.inventory?.qtyOnHand || 0), 0);
+  const supplierReturnQty = returnReqs.reduce((s,r) => s + Number(r.qty || 0), 0);
+  const pendingSupplierReturns = returnReqs.filter(r => String(r.status || '').toUpperCase() === 'PENDING_WAREHOUSE').length;
+
+  const tabs = `<div class="tabs" style="margin-bottom:14px">
+    <button class="tab ${subtab==='defective'?'active':''}" data-act="inv-exception-tab" data-tab="defective"><i class="fa-solid fa-triangle-exclamation"></i> Hàng lỗi</button>
+    <button class="tab ${subtab==='returned'?'active':''}" data-act="inv-exception-tab" data-tab="returned"><i class="fa-solid fa-rotate-left"></i> Hàng trả về</button>
+  </div>`;
+  const kpis = subtab === 'returned'
+    ? `${mkpi('Khách trả đang lưu kho',fmtN(customerReturnQty),'fa-box-open','orange')}${mkpi('SL trả NCC',fmtN(supplierReturnQty),'fa-truck-arrow-right','purple')}${mkpi('Chờ xuất trả NCC',fmtN(pendingSupplierReturns),'fa-clock','blue')}`
+    : `${mkpi('Hàng lỗi / QC',fmtN(defectQty),'fa-triangle-exclamation','red')}${mkpi('Hết hạn',fmtN(expiredQty),'fa-calendar-xmark','orange')}${mkpi('Lô cần xử lý',fmtN(entries.length),'fa-boxes-stacked','blue')}`;
+
+  return `${pageHead('Hàng lỗi & hàng trả về','Theo dõi hàng cách ly, lô hết hạn, hàng khách trả và nguyên liệu QC không đạt cần/đã xuất trả nhà cung cấp.')}
+    ${tabs}<div class="grid g-auto-sm" style="margin-bottom:14px">${kpis}</div>
+    <div class="card"><div class="card-head"><div><h3>${subtab==='returned'?'Hàng trả về':'Hàng lỗi'}</h3><p>${subtab==='returned'?'Yêu cầu trả NCC và hàng khách trả được theo dõi tại đây.':'Lô hết hạn được phân loại Hết hạn và không tính vào tồn khả dụng.'}</p></div><div>${searchBox('inv-defects','Tìm mã hàng, lô, PO, YCT, đơn bán…')}</div></div>
+      ${tableShell([{t:'Hàng hóa'},{t:'Phân loại'},{t:'Lô'},{t:'Kho / vị trí'},{t:'Số lượng',cls:'right'},{t:subtab==='returned'?'Tham chiếu':'Tham chiếu LSX'},{t:'Trạng thái'},{t:'Ngày ghi nhận'}],rows,{emptyTitle:subtab==='returned'?'Chưa có hàng trả về':'Chưa có hàng lỗi / lô hết hạn'})}
     </div>`;
 };

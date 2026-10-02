@@ -838,3 +838,12 @@ Các bảng mới dùng prefix `lenam_`:
 
 Tạo các bảng bằng file `docs/lenam_restaurant_quality_tables.sql` trước khi sử dụng chức năng.
 Master dùng chung như nguyên liệu, thành phẩm, kho, lô, nhân viên vẫn lấy từ các bảng hiện hữu; module không tạo bản sao master.
+
+
+## 2026-10-02 — CRM sales owner + Dashboard/Audit/Badge
+- Form tạo/sửa đơn bán: Nhân viên sale chỉ lấy nhân sự thuộc phòng `Kinh doanh`; bỏ whitelist NV-005/NV-006 và các phòng ban khác.
+- Dashboard tổng: bộ lọc chọn Ngày / 7 ngày / Tháng / Quý / Năm, hỗ trợ chọn kỳ lịch sử cụ thể.
+- Hoạt động gần đây: bỏ dữ liệu mẫu `DB.activities`, đọc `lenam_audit_logs` thật từ KIO; có màn Xem tất cả + lọc người dùng/phân hệ/từ ngày/đến ngày/tìm kiếm.
+- Dashboard refresh KPI bằng dữ liệu server force=true khi mở Dashboard.
+- Badge sidebar: trước khi hiện số, force refresh các collection tạo việc cần xử lý; tránh dùng cache cũ rồi nhảy số.
+- Không thay đổi chuỗi nghiệp vụ CRM/Kho/Sản xuất/Mua hàng.

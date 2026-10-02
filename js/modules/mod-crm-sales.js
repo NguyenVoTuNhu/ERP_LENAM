@@ -427,7 +427,22 @@ Views.orders = function () {
 
 function openOrderForm(customerId = '', opportunityId = '') {
   const customerOptions = (DB.customers||[]).map(c=>`<option value="${c.id}" ${c.id===customerId?'selected':''}>${esc(c.id+' · '+c.name)}</option>`).join('');
-  const ownerOptions = (DB.employees||[]).filter(e => /kinh doanh|sale|sales/i.test(`${e.dept||''} ${e.position||''}`) || ['NV-001','NV-002','NV-003','NV-004','NV-005','NV-006'].includes(e.id)).map(e=>`<option value="${e.id}">${esc(e.id+' · '+e.name)}</option>`).join('');
+  const salesEmployees = (DB.employees||[])
+    .filter(e => String(e.dept||'').trim().toLowerCase() === 'kinh doanh' && String(e.status||'ns_dang_lam') !== 'ns_nghi_viec');
+  // Tài khoản nhân sự mới có thể đăng nhập trước khi DB.employees refresh xong.
+  // Vì vậy phải lấy empId/department từ actor đang đăng nhập làm nguồn chính,
+  // không phụ thuộc việc hồ sơ nhân sự đã kịp xuất hiện trong salesEmployees hay chưa.
+  const authUser = (typeof SystemAPI !== 'undefined' && typeof SystemAPI.currentUser === 'function') ? SystemAPI.currentUser() : null;
+  const loggedEmpId = String(authUser?.empId || DB.currentUser?.id || '').trim();
+  const loggedDept = String(authUser?.dept || DB.currentUser?.dept || '').trim().toLowerCase();
+  const loggedRole = String(authUser?.roleId || DB.currentUser?.roleId || '').trim();
+  const isLoggedSales = !!loggedEmpId && (loggedDept === 'kinh doanh' || loggedRole === 'ROLE_SALES' || loggedRole === 'ROLE_SALES_MANAGER');
+  const currentSalesId = isLoggedSales ? loggedEmpId : '';
+  const loggedEmployee = salesEmployees.find(e=>String(e.id)===currentSalesId);
+  const loggedSalesName = loggedEmployee?.name || authUser?.fullName || authUser?.name || DB.currentUser?.name || currentSalesId;
+  const ownerOptions = currentSalesId
+    ? `<option value="${esc(currentSalesId)}" selected>${esc(currentSalesId+' · '+loggedSalesName)}</option>`
+    : salesEmployees.map(e=>`<option value="${e.id}">${esc(e.id+' · '+e.name)}</option>`).join('');
   // Cho phép chọn toàn bộ thành phẩm trong master, kể cả đang hết/thiếu tồn.
   // Tạo đơn chỉ ghi nhận nhu cầu bán; sau khi duyệt, Kho sẽ kiểm tra tồn và lập
   // Kế hoạch sản xuất cho phần thiếu theo luồng Đơn bán → Kho → Sản xuất.
@@ -446,7 +461,7 @@ function openOrderForm(customerId = '', opportunityId = '') {
     body:`<form id="crmOrderForm" novalidate>
       <div class="grid g-2">
         <div class="field"><label>Khách hàng <b>*</b></label><select class="inp" id="crmOrderCustomer"><option value="">-- Chọn khách hàng --</option>${customerOptions}</select></div>
-        <div class="field"><label>Nhân viên sale</label><select class="inp" id="crmOrderOwner"><option value="${esc(DB.currentUser?.id||'NV-001')}">${esc(Q.employeeName(DB.currentUser?.id)||'Người hiện tại')}</option>${ownerOptions}</select></div>
+        <div class="field"><label>Nhân viên sale</label><select class="inp" id="crmOrderOwner" ${currentSalesId?'disabled':''}>${ownerOptions}</select>${currentSalesId?`<input type="hidden" id="crmOrderOwnerLocked" value="${esc(currentSalesId)}">`:''}<div class="cell-sub">${currentSalesId?'Tự động lấy nhân viên Kinh doanh đang đăng nhập và không cho chọn người khác.':'Chỉ hiển thị nhân sự thuộc phòng Kinh doanh.'}</div></div>
         <div class="field"><label>Ngày đặt hàng <b>*</b></label><input class="inp" type="date" id="crmOrderDate" value="${currentDateYMD()}" min="${currentDateYMD()}"></div>
         <div class="field"><label>Ngày giao dự kiến <b>*</b></label><input class="inp" type="date" id="crmOrderDue" value="${currentDateYMD()}" min="${currentDateYMD()}"></div>
         <div class="field"><label>Hạn thanh toán</label><input class="inp" type="date" id="crmPaymentDue" value="${currentDateYMD()}" min="${currentDateYMD()}"><div class="cell-sub">Dùng để cảnh báo công nợ quá hạn.</div></div>
@@ -634,7 +649,9 @@ function crmOrderLineHTML(options, first=false) {
 function openOrderEditForm(id) {
   const o = Q.order(id); if (!o) return;
   const customerOptions = (DB.customers||[]).map(c=>`<option value="${c.id}" ${c.id===o.customerId?'selected':''}>${esc(c.id+' · '+c.name)}</option>`).join('');
-  const ownerOptions = (DB.employees||[]).filter(e => /kinh doanh|sale|sales/i.test(`${e.dept||''} ${e.position||''}`) || ['NV-001','NV-002','NV-003','NV-004','NV-005','NV-006'].includes(e.id)).map(e=>`<option value="${e.id}" ${e.id===o.ownerId?'selected':''}>${esc(e.id+' · '+e.name)}</option>`).join('');
+  const ownerOptions = (DB.employees||[])
+    .filter(e => String(e.dept||'').trim().toLowerCase() === 'kinh doanh' && String(e.status||'ns_dang_lam') !== 'ns_nghi_viec')
+    .map(e=>`<option value="${e.id}" ${e.id===o.ownerId?'selected':''}>${esc(e.id+' · '+e.name)}</option>`).join('');
   const products = (DB.products||[]);
   const productOptions = products.map(p=>{
     const available = Number(SalesCRM.finishedAvailable(p.id) || 0);
@@ -1115,6 +1132,7 @@ function openCustomerPaymentModal(orderId) {
       <div class="field"><label>Ngày thanh toán</label><input class="inp" type="date" id="crmPayDate" value="${typeof currentDateYMD==='function'?currentDateYMD():new Date().toISOString().slice(0,10)}"></div>
       <div class="field"><label>Phương thức</label><select class="inp" id="crmPayMethod"><option value="BANK_TRANSFER">Chuyển khoản ngân hàng</option><option value="CASH">Tiền mặt</option></select></div>
       <div class="field"><label>Người thực hiện</label><select class="inp" id="crmPayPayer"><option value="">-- Chọn người thực hiện --</option>${people}</select></div>
+      <div class="field" style="grid-column:1/-1"><label>Định khoản <span class="req">*</span></label><select class="inp" id="crmPayAccountingEntry">${typeof accountingEntryOptions==='function'?accountingEntryOptions('THU'):''}</select></div>
     </div>
     <div id="crmPayBankWrap" class="form-grid">
       <div class="field"><label>Ngân hàng nhận tiền</label><select class="inp" id="crmPayBank"><option value="">-- Chọn ngân hàng --</option>${banks}</select></div>

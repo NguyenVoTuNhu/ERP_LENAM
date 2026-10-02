@@ -4,28 +4,66 @@
  * ==========================================================================*/
 
 const DASHBOARD_PERIODS = {
-  today: 'Hôm nay',
-  w7: '7 ngày qua',
-  month: 'Tháng này',
-  quarter: 'Quý này',
+  day: 'Ngày',
+  w7: '7 ngày',
+  month: 'Tháng',
+  quarter: 'Quý',
+  year: 'Năm',
 };
 
 function dashboardDate(v){
   const s=String(v||'').slice(0,10);
   return /^\d{4}-\d{2}-\d{2}$/.test(s)?s:'';
 }
-function dashboardToday(){ return dashboardDate(DB.today)||new Date().toISOString().slice(0,10); }
+function dashboardToday(){
+  if(typeof currentDateYMD==='function') return currentDateYMD();
+  return dashboardDate(DB.today)||new Date().toISOString().slice(0,10);
+}
 function dashboardAddDays(iso,n){ const d=new Date(`${iso}T00:00:00`); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); }
-function dashboardPeriodRange(key){
-  const end=dashboardToday(); const d=new Date(`${end}T00:00:00`);
-  if(key==='today') return {start:end,end,label:'Hôm nay'};
-  if(key==='w7') return {start:dashboardAddDays(end,-6),end,label:'7 ngày qua'};
-  if(key==='quarter'){
-    const q=Math.floor(d.getMonth()/3)*3; const start=`${d.getFullYear()}-${String(q+1).padStart(2,'0')}-01`;
-    return {start,end,label:'Quý này'};
+function dashboardMonthEnd(ym){ const [y,m]=String(ym||'').split('-').map(Number); if(!y||!m)return dashboardToday(); return new Date(y,m,0).toISOString().slice(0,10); }
+function dashboardPeriodRange(f){
+  const today=dashboardToday();
+  const currentMonth=today.slice(0,7);
+  const currentYear=Number(today.slice(0,4));
+  const currentQuarter=Math.floor((Number(today.slice(5,7))-1)/3)+1;
+  const mode=f?.period||'month';
+  if(mode==='day'){
+    const d=dashboardDate(f?.date)||today;
+    return {start:d,end:d,label:`ngày ${fmtDate(d)}`};
   }
-  const start=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`;
-  return {start,end,label:'Tháng này'};
+  if(mode==='w7'){
+    const end=dashboardDate(f?.w7End)||today;
+    const start=dashboardAddDays(end,-6);
+    return {start,end,label:`7 ngày ${fmtDate(start)} – ${fmtDate(end)}`};
+  }
+  if(mode==='quarter'){
+    const year=Number(f?.year)||currentYear;
+    const q=Math.min(4,Math.max(1,Number(f?.quarterValue)||currentQuarter));
+    const sm=(q-1)*3+1;
+    const em=sm+2;
+    const start=`${year}-${String(sm).padStart(2,'0')}-01`;
+    const end=dashboardMonthEnd(`${year}-${String(em).padStart(2,'0')}`);
+    return {start,end,label:`Quý ${['I','II','III','IV'][q-1]}/${year}`};
+  }
+  if(mode==='year'){
+    const year=Number(f?.year)||currentYear;
+    return {start:`${year}-01-01`,end:`${year}-12-31`,label:`năm ${year}`};
+  }
+  const ym=/^\d{4}-\d{2}$/.test(String(f?.month||''))?String(f.month):currentMonth;
+  return {start:`${ym}-01`,end:dashboardMonthEnd(ym),label:`tháng ${Number(ym.slice(5,7))}/${ym.slice(0,4)}`};
+}
+function dashboardPeriodControls(f){
+  const today=dashboardToday();
+  const year=Number(f.year)||Number(today.slice(0,4));
+  const curQ=Math.floor((Number(today.slice(5,7))-1)/3)+1;
+  const years=[]; for(let y=Number(today.slice(0,4))+1;y>=2024;y--) years.push(y);
+  let picker='';
+  if((f.period||'month')==='day') picker=`<input class="inp" type="date" data-f="dashboard.date" data-allow-past="1" value="${esc(dashboardDate(f.date)||today)}">`;
+  else if(f.period==='w7') picker=`<input class="inp" type="date" data-f="dashboard.w7End" data-allow-past="1" value="${esc(dashboardDate(f.w7End)||today)}" title="Chọn ngày kết thúc của khoảng 7 ngày">`;
+  else if(f.period==='quarter') picker=`<select class="inp" data-f="dashboard.quarterValue">${[1,2,3,4].map(q=>`<option value="${q}" ${Number(f.quarterValue||curQ)===q?'selected':''}>Quý ${['I','II','III','IV'][q-1]}</option>`).join('')}</select><select class="inp" data-f="dashboard.year">${years.map(y=>`<option value="${y}" ${year===y?'selected':''}>${y}</option>`).join('')}</select>`;
+  else if(f.period==='year') picker=`<select class="inp" data-f="dashboard.year">${years.map(y=>`<option value="${y}" ${year===y?'selected':''}>${y}</option>`).join('')}</select>`;
+  else picker=`<input class="inp" type="month" data-f="dashboard.month" value="${esc(/^\d{4}-\d{2}$/.test(String(f.month||''))?f.month:today.slice(0,7))}">`;
+  return `<select class="inp" data-f="dashboard.period" style="min-width:120px">${Object.entries(DASHBOARD_PERIODS).map(([k,v])=>`<option value="${k}" ${(f.period||'month')===k?'selected':''}>${v}</option>`).join('')}</select>${picker}`;
 }
 function dashboardInRange(date,range){ const d=dashboardDate(date); return !!d && d>=range.start && d<=range.end; }
 function dashboardSum(arr,fn){ return (arr||[]).reduce((s,x)=>s+Number(fn(x)||0),0); }
@@ -53,8 +91,8 @@ function dashboardLastMonths(count=6){
   for(let i=count-1;i>=0;i--){ const x=new Date(d.getFullYear(),d.getMonth()-i,1); out.push(`${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,'0')}`); }
   return out;
 }
-function dashboardMetrics(periodKey){
-  const range=dashboardPeriodRange(periodKey);
+function dashboardMetrics(filters){
+  const range=dashboardPeriodRange(filters);
   const sales=(DB.orders||[]).filter(o=>dashboardInRange(o.date,range)&&o.status!=='dh_da_huy');
   const recognized=sales.filter(o=>['dh_hoan_thanh','dh_da_giao'].includes(o.status));
   const rest=(DB.posOrders||[]).filter(o=>dashboardInRange(o.date||o.createdAt,range));
@@ -72,8 +110,55 @@ function dashboardMetrics(periodKey){
   return {range,sales,recognized,rest,restPaid,revenue,salesRevenue,restaurantRevenue,activeProduction,qcWaiting,lowStock,late,pendingPR,poInbound,restaurantOpen};
 }
 
+
+function dashboardAuditDate(a){ return dashboardDate(String(a?.createdAt||'').replace(' ','T')); }
+function dashboardAuditTime(v){
+  const s=String(v||'').trim(); if(!s)return '—';
+  const m=s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+  return m?`${m[3]}/${m[2]}/${m[1]} ${m[4]}:${m[5]}${m[6]?`:${m[6]}`:''}`:s;
+}
+function dashboardAuditTone(module){
+  const m=String(module||'').toUpperCase();
+  if(m==='PURCHASE')return 'orange'; if(m==='INVENTORY'||m==='WAREHOUSE')return 'teal'; if(m==='CRM')return 'blue';
+  if(m==='PRODUCTION')return 'indigo'; if(m==='QUALITY')return 'red'; if(m==='ACCOUNTING')return 'green'; if(m==='AUTH'||m==='SYSTEM')return 'slate';
+  return 'blue';
+}
+function dashboardAuditIcon(module){
+  const m=String(module||'').toUpperCase();
+  return ({PURCHASE:'fa-cart-shopping',INVENTORY:'fa-warehouse',WAREHOUSE:'fa-warehouse',CRM:'fa-handshake',PRODUCTION:'fa-industry',QUALITY:'fa-flask',ACCOUNTING:'fa-calculator',AUTH:'fa-right-to-bracket',SYSTEM:'fa-shield-halved'})[m]||'fa-clock-rotate-left';
+}
+function dashboardAuditRows(filters={}){
+  const q=String(filters.q||'').trim().toLowerCase(), module=String(filters.module||''), userId=String(filters.userId||'');
+  const from=dashboardDate(filters.from), to=dashboardDate(filters.to);
+  return [...(DB.auditLogs||[])].filter(a=>{
+    const d=dashboardAuditDate(a);
+    if(from && (!d || d<from))return false; if(to && (!d || d>to))return false;
+    if(module && String(a.module||'')!==module)return false;
+    if(userId && String(a.userId||a.employeeId||'')!==userId && String(a.employeeId||'')!==userId)return false;
+    if(q){ const hay=`${a.fullName||''} ${a.username||''} ${a.description||''} ${a.entityId||''} ${a.action||''} ${a.module||''}`.toLowerCase(); if(!hay.includes(q))return false; }
+    return true;
+  }).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
+}
+function dashboardOpenAuditModal(filters={}){
+  const rows=dashboardAuditRows(filters);
+  const modules=[...new Set((DB.auditLogs||[]).map(a=>String(a.module||'')).filter(Boolean))].sort();
+  const users=[...new Map((DB.auditLogs||[]).map(a=>[String(a.userId||a.employeeId||a.username||''),{id:String(a.userId||a.employeeId||a.username||''),name:a.fullName||a.username||'—'}])).values()].filter(x=>x.id).sort((a,b)=>a.name.localeCompare(b.name,'vi'));
+  const bodyRows=rows.map(a=>`<tr><td class="num">${esc(dashboardAuditTime(a.createdAt))}</td><td>${cell2(esc(a.fullName||a.username||'Hệ thống'),esc(a.department||a.roleName||''))}</td><td><span class="badge ${dashboardAuditTone(a.module)}">${esc(a.module||'SYSTEM')}</span></td><td>${cell2(esc(a.description||a.action||'—'),a.entityId?`<span class="code">${esc(a.entityId)}</span>`:'')}</td></tr>`).join('');
+  Modal.open({title:'Dấu vết hoạt động hệ thống',sub:`${fmtN(rows.length)} bản ghi thao tác từ KIO · xem được hoạt động của tất cả tài khoản ERP`,size:'xl',body:`
+    <div class="filters" style="margin-bottom:12px;grid-template-columns:minmax(220px,1fr) 180px 220px 160px 160px auto">
+      <input class="inp" id="dashAuditQ" value="${esc(filters.q||'')}" placeholder="Tìm người dùng, chứng từ, thao tác...">
+      <select class="inp" id="dashAuditModule"><option value="">Tất cả phân hệ</option>${modules.map(m=>`<option value="${esc(m)}" ${filters.module===m?'selected':''}>${esc(m)}</option>`).join('')}</select>
+      <select class="inp" id="dashAuditUser"><option value="">Tất cả nhân viên</option>${users.map(u=>`<option value="${esc(u.id)}" ${filters.userId===u.id?'selected':''}>${esc(u.name)}</option>`).join('')}</select>
+      <input class="inp" id="dashAuditFrom" type="date" data-allow-past="1" value="${esc(filters.from||'')}">
+      <input class="inp" id="dashAuditTo" type="date" data-allow-past="1" value="${esc(filters.to||'')}">
+      <button class="btn" data-act="dashboard-activity-apply"><i class="fa-solid fa-filter"></i>Lọc</button>
+    </div>
+    ${tableShell([{t:'Thời gian',w:'165px'},{t:'Nhân viên',w:'220px'},{t:'Phân hệ',w:'135px'},{t:'Dấu vết thao tác'}],bodyRows,{emptyTitle:'Không có hoạt động phù hợp bộ lọc'})}
+  `,foot:`<button class="btn" data-act="dashboard-activity-reset"><i class="fa-solid fa-rotate-left"></i>Xóa lọc</button><button class="btn btn-primary" data-act="modal-close">Đóng</button>`});
+}
+
 Views.dashboard=function(){
-  const f=F('dashboard',{period:'month'}); const M=dashboardMetrics(f.period||'month');
+  const f=F('dashboard',{period:'month',date:dashboardToday(),w7End:dashboardToday(),month:dashboardToday().slice(0,7),quarterValue:String(Math.floor((Number(dashboardToday().slice(5,7))-1)/3)+1),year:dashboardToday().slice(0,4)}); const M=dashboardMetrics(f);
   const inventoryValue=dashboardInventoryValue(), receivable=dashboardReceivable(), payable=dashboardPayable();
   const orderStatuses=['dh_cho_xu_ly','dh_cho_san_xuat','dh_dang_san_xuat','dh_hoan_thanh','dh_da_giao','dh_da_huy'];
   const orderCounts=orderStatuses.map(s=>(DB.orders||[]).filter(o=>o.status===s).length);
@@ -95,7 +180,7 @@ Views.dashboard=function(){
   const recentRows=recent.map(o=>`<tr class="clickable" data-act="open-order" data-id="${esc(o.id)}"><td><span class="code">${esc(o.id)}</span></td><td>${esc(Q.customerName(o.customerId)||o.customerId)}</td><td class="hide-sm">${esc((o.items||[])[0]?.name||'—')}${(o.items||[]).length>1?`<div class="cell-sub">+ ${(o.items||[]).length-1} sản phẩm khác</div>`:''}</td><td class="right num">${fmtVND(o.total||0)}</td><td>${badge(o.status)}</td></tr>`).join('');
 
   return `${pageHead('Tổng quan doanh nghiệp','Theo dõi nhanh các chỉ số quan trọng của bán hàng, sản xuất, kho, mua hàng và tài chính',`
-    <select class="inp" data-f="dashboard.period" style="min-width:150px">${Object.entries(DASHBOARD_PERIODS).map(([k,v])=>`<option value="${k}" ${f.period===k?'selected':''}>${v}</option>`).join('')}</select>
+    ${dashboardPeriodControls(f)}
     <button class="btn" data-act="export-dashboard"><i class="fa-solid fa-file-arrow-down"></i>Xuất báo cáo</button>`)}
 
   <div class="grid g-auto" style="margin-bottom:14px">
@@ -127,7 +212,7 @@ Views.dashboard=function(){
 
   <div class="grid g-31">
     <div class="card"><div class="card-head"><div><h3>Đơn bán gần đây</h3><p>6 đơn CRM mới nhất</p></div><div class="right"><button class="btn btn-sm" data-act="go" data-id="crm" data-tab="orders">Xem tất cả <i class="fa-solid fa-arrow-right"></i></button></div></div>${tableShell([{t:'Mã đơn'},{t:'Khách hàng'},{t:'Sản phẩm',cls:'hide-sm'},{t:'Giá trị',cls:'right'},{t:'Trạng thái'}],recentRows,{emptyTitle:'Chưa có đơn bán'})}</div>
-    <div class="card"><div class="card-head"><div><h3>Hoạt động gần đây</h3><p>Nhật ký thao tác mới nhất trên hệ thống</p></div></div><div class="card-body"><div class="tline">${(DB.activities||[]).slice(0,7).map(a=>`<div class="tline-item done"><span class="tline-dot t-${a.tone||'blue'}" style="background:var(--surface);border-color:var(--${a.tone||'blue'})"><i class="fa-solid ${a.icon||'fa-circle'}" style="color:var(--${a.tone||'blue'})"></i></span><div class="tline-title">${esc(a.user||'Hệ thống')} <span style="font-weight:400;color:var(--text-2)">${esc(a.action||'')}</span> <span style="color:var(--primary)">${esc(a.target||'')}</span></div><div class="tline-sub">${esc(a.extra||'')} ${a.time?`· ${esc(a.time)}`:''}</div></div>`).join('')||'<div class="empty"><p>Chưa có hoạt động gần đây.</p></div>'}</div></div></div>
+    <div class="card"><div class="card-head"><div><h3>Hoạt động gần đây</h3><p>Dấu vết thao tác thật từ nhật ký hệ thống</p></div><div class="right"><button class="btn btn-sm" data-act="dashboard-activity-all">Xem tất cả <i class="fa-solid fa-arrow-right"></i></button></div></div><div class="card-body"><div class="tline">${dashboardAuditRows().slice(0,7).map(a=>{const tone=dashboardAuditTone(a.module);return `<div class="tline-item done clickable" data-act="dashboard-activity-all"><span class="tline-dot t-${tone}" style="background:var(--surface);border-color:var(--${tone})"><i class="fa-solid ${dashboardAuditIcon(a.module)}" style="color:var(--${tone})"></i></span><div class="tline-title">${esc(a.fullName||a.username||'Hệ thống')} <span style="font-weight:400;color:var(--text-2)">${esc(a.description||a.action||'')}</span></div><div class="tline-sub">${a.entityId?`<span class="code">${esc(a.entityId)}</span> · `:''}${esc(a.module||'SYSTEM')} · ${esc(dashboardAuditTime(a.createdAt))}</div></div>`;}).join('')||'<div class="empty"><p>Chưa có dấu vết hoạt động trên server.</p></div>'}</div></div></div>
   </div>`;
 };
 

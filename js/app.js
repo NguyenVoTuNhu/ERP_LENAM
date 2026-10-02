@@ -719,41 +719,6 @@ const Actions = {
   'modal-close': () => Modal.close(),
   'drawer-close': () => Drawer.close(),
 
-  /* --- Dữ liệu test Nhà hàng & Cửa hàng --- */
-  'restaurant-test-preview': async () => {
-    try {
-      if (typeof RestaurantSalesTestData === 'undefined') throw new Error('Chưa tải bộ dữ liệu test Nhà hàng.');
-      const data = await RestaurantSalesTestData.load();
-      const rows = [
-        ['Chi nhánh', data.stores?.length || 0],
-        ['Món / Recipe', data.recipes?.length || 0],
-        ['Đơn hàng POS / Tablet / QR', data.orders?.length || 0],
-        ['Tồn kho cửa hàng', data.storeStocks?.length || 0],
-        ['Giao dịch xuất kho', data.storeStockTransactions?.length || 0],
-        ['Yêu cầu bổ sung', data.replenishments?.length || 0],
-      ].map(([name,count]) => `<tr><td>${esc(name)}</td><td class="right num"><b>${fmtN(count)}</b></td></tr>`).join('');
-      const sampleOrders=(data.orders||[]).slice(0,8).map(o=>`<tr><td><span class="code">${esc(o.id)}</span></td><td>${esc(o.channel||'POS')}</td><td>${esc(o.storeId||'')}</td><td>${(o.items||[]).map(i=>`${esc(i.name||i.recipeId)} × ${fmtN(i.quantity||i.qty||0)}`).join('<br>')}</td><td class="right num">${fmtVND((o.items||[]).reduce((t,i)=>t+Number(i.qty||0)*Number(i.price||0),0))}</td><td>${badge(o.status||'OPEN')}</td></tr>`).join('');
-      Modal.open({title:'Dữ liệu test Nhà hàng & Cửa hàng',sub:'Bộ dữ liệu mô phỏng thực tế. Chưa ghi lên server cho đến khi bấm “Nạp dữ liệu test”.',size:'xl',body:`<div class="alert info" style="margin-bottom:14px"><i class="fa-solid fa-circle-info"></i><span>Dữ liệu test dùng mã riêng có chữ <b>TEST</b> và được merge theo ID, không xóa dữ liệu Restaurant đang có.</span></div><div class="grid g-2"><div class="card">${tableShell([{t:'Nhóm dữ liệu'},{t:'Số lượng',cls:'right'}],rows,{emptyTitle:'Không có dữ liệu'})}</div><div class="card">${tableShell([{t:'Đơn'},{t:'Kênh'},{t:'Chi nhánh'},{t:'Món'},{t:'Tổng',cls:'right'},{t:'Trạng thái'}],sampleOrders,{emptyTitle:'Không có đơn mẫu'})}</div></div>`,foot:`<button class="btn" data-act="modal-close">Đóng</button><button class="btn btn-primary" data-act="restaurant-test-seed"><i class="fa-solid fa-database"></i>Nạp dữ liệu test lên server</button>`});
-    } catch (err) { Toast.err('Không đọc được dữ liệu test', err?.message || String(err)); }
-  },
-  'restaurant-test-seed': async () => {
-    try {
-      if (typeof RestaurantSalesTestData === 'undefined') throw new Error('Chưa tải bộ dữ liệu test Nhà hàng.');
-      const btn=document.querySelector('[data-act="restaurant-test-seed"]');
-      if(btn){btn.disabled=true;btn.innerHTML='<i class="fa-solid fa-spinner fa-spin"></i>Đang nạp...';}
-      const data = await RestaurantSalesTestData.seedToServer();
-      Modal.close();
-      // Sau khi SERVER đã được xác minh có dữ liệu TEST, mở thẳng danh sách đơn
-      // để người dùng thấy record ngay thay vì quay lại dashboard KPI.
-      State.module='restaurant'; State.tab='orders'; State.params={tab:'orders'};
-      // Reset filter để chắc chắn record TEST không bị ẩn bởi bộ lọc cũ.
-      State.filters['restaurant-orders'] = { q:'', storeId:'', channel:'', status:'', date:'' };
-      State.page['restaurant-orders'] = 1;
-      render();
-      Toast.ok('Đã ghi và đọc lại dữ liệu từ server', `${data.stores.length} chi nhánh · ${data.recipes.length} món · ${data.orders.length} đơn hàng`);
-    } catch (err) { Toast.err('Nạp dữ liệu test thất bại', err?.message || String(err)); }
-  },
-
   /* --- Kho --- */
 
   /* --- Khách hàng --- */
@@ -860,7 +825,7 @@ const Actions = {
   'crm-go-transactions': () => go('crm', { tab: 'transactions' }),
   'crm-go-orders': () => go('crm', { tab: 'orders' }),
   'crm-go-debts': () => go('crm', { tab: 'debts' }),
-  'crm-customer-pay-modal': (d) => openCustomerPaymentModal(d.id),
+  'crm-customer-pay-modal': async (d) => { if(typeof accountingEntriesEnsureFresh==='function') await accountingEntriesEnsureFresh(false); openCustomerPaymentModal(d.id); },
   'crm-customer-pay-save': async (d, el) => {
     DB.customerPayments = DB.customerPayments || [];
     const o = Q.order(d.orderid); if (!o) return;
@@ -870,11 +835,13 @@ const Actions = {
     const payerId = $('#crmPayPayer')?.value || '';
     const payer = (DB.employees || []).find(e => String(e.id) === String(payerId));
     const payerName = payer?.name || payer?.fullName || ((String(payerId)===String(DB.currentUser?.userId||DB.currentUser?.id)) ? ((String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||'')) : Q.employeeName(payerId));
+    const accountingEntryId = $('#crmPayAccountingEntry')?.value || '';
     const bankId = method === 'BANK_TRANSFER' ? ($('#crmPayBank')?.value || '') : '';
     const bank = (DB.bankAccounts || []).find(b => String(b.id) === String(bankId));
     const date = $('#crmPayDate')?.value || (typeof currentDateYMD==='function'?currentDateYMD():new Date().toISOString().slice(0,10));
     if (amount <= 0) { Toast.err('Số tiền không hợp lệ','Vui lòng nhập số tiền lớn hơn 0.'); return; }
     if (amount > remain) { Toast.err('Vượt quá công nợ',`Số tiền thu ${fmtVND(amount)} lớn hơn số còn phải thu ${fmtVND(remain)}.`); return; }
+    if (!accountingEntryId) { Toast.err('Chưa chọn định khoản','Thu tiền khách hàng bắt buộc phải chọn định khoản.'); return; }
     if (!payerId) { Toast.err('Chưa chọn người thực hiện','Vui lòng chọn người ghi nhận/thu khoản thanh toán này.'); return; }
     if (method === 'BANK_TRANSFER' && !bankId) { Toast.err('Chưa chọn ngân hàng','Vui lòng chọn tài khoản ngân hàng nhận tiền.'); return; }
 
@@ -883,7 +850,7 @@ const Actions = {
       id, orderId:o.id, customerId:o.customerId, date, amount,
       method: method === 'BANK_TRANSFER' ? 'Chuyển khoản' : 'Tiền mặt',
       bankId, bankName: bank?.name || bank?.bankName || '', bankAccount: bank?.accountNumber || '',
-      payerId, payerName,
+      payerId, payerName, accountingEntryId,
       reference: $('#crmPayRef')?.value.trim() || '', note: $('#crmPayNote')?.value.trim() || '',
       createdBy: DB.currentUser?.id || '', createdByName: DB.currentUser?.name || '', createdAt: new Date().toISOString()
     };
@@ -905,7 +872,7 @@ const Actions = {
         await CRMAPI.syncCollections(['customerPayments','orders']);
       }
       if (bankId && typeof AccountingBank !== 'undefined') {
-        await AccountingBank.record({ bankId, type:'IN', date, amount, note:`Thu công nợ ${o.id} · ${Q.customerName(o.customerId)}`, sourceType:'CUSTOMER_PAYMENT', sourceId:id, createdBy:payment.createdBy });
+        await AccountingBank.record({ bankId, type:'IN', date, amount, note:`Thu công nợ ${o.id} · ${Q.customerName(o.customerId)}`, sourceType:'CUSTOMER_PAYMENT', sourceId:id, createdBy:payment.createdBy, accountingEntryId });
       }
       // KIO đã thành công: chỉ cập nhật cache local, không schedule ghi lần 2.
       SalesCRM.saveLocal(['customerPayments','orders'], { sync:false });
@@ -980,7 +947,7 @@ const Actions = {
     const date=$('#crmOrderDate')?.value||'';
     const dueDate=$('#crmOrderDue')?.value||'';
     const paymentDueDate=$('#crmPaymentDue')?.value||dueDate;
-    const ownerId=$('#crmOrderOwner')?.value||DB.currentUser?.id||'';
+    const ownerId=$('#crmOrderOwnerLocked')?.value||$('#crmOrderOwner')?.value||DB.currentUser?.id||'';
     if(!customerId){Toast.err('Chưa chọn khách hàng','Vui lòng chọn khách hàng mua thành phẩm.');return;}
     const deliveryParts=typeof crmReadDeliveryAddressForm==='function'?crmReadDeliveryAddressForm():{address:$('#crmDeliveryAddressDetail')?.value.trim()||'',province:'',district:'',ward:'',addressDetail:$('#crmDeliveryAddressDetail')?.value.trim()||''};
     const deliveryAddress=deliveryParts.address;
@@ -2728,13 +2695,19 @@ const Actions = {
     const row=(DB.inventory||[]).find(r=>r.productId===d.product && String(r.lotId||'')===String(d.lotid||'') && r.warehouseId===d.warehouse); if(!row)return;
     const p=Q.product(row.productId)||Q.material(row.productId), lot=Q.lot(row.lotId), wh=(DB.warehouses||[]).find(w=>w.id===row.warehouseId), loc=(DB.warehouseLocations||[]).find(l=>l.id===row.locationId);
     const isReturn=wh?.type==='RETURNED';
+    const isExpired=typeof inventoryLotIsExpired==='function' && inventoryLotIsExpired(lot);
     const tx=(DB.inventoryTransactions||[]).filter(t=>t.productId===row.productId&&t.lotId===row.lotId&&t.warehouseId===row.warehouseId).sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
     const primaryRef = isReturn ? (row.sourceId||lot?.salesOrderId||'') : (row.productionOrderId||lot?.productionOrderId||'');
-    const primaryRefHtml = primaryRef ? `<button type="button" class="ref-link" data-act="${isReturn?'open-order':'open-production-order'}" data-id="${esc(primaryRef)}"><i class="fa-solid fa-arrow-up-right-from-square"></i><span class="code">${esc(primaryRef)}</span></button>` : '<span class="muted">—</span>';
+    const productionRefExists = isReturn || !primaryRef || (DB.productionOrders||[]).some(po => String(po?.id||po?.code||'') === String(primaryRef));
+    const primaryRefHtml = primaryRef
+      ? (productionRefExists
+        ? `<button type="button" class="ref-link" data-act="${isReturn?'open-order':'open-production-order'}" data-id="${esc(primaryRef)}"><i class="fa-solid fa-arrow-up-right-from-square"></i><span class="code">${esc(primaryRef)}</span></button>`
+        : `<span class="code">${esc(primaryRef)}</span><div class="cell-sub" style="color:var(--orange);margin-top:4px"><i class="fa-solid fa-triangle-exclamation"></i> Chứng từ LSX không còn trên server</div>`)
+      : '<span class="muted">—</span>';
     const qcRef = !isReturn ? (row.sourceId||'') : '';
-    Modal.open({title:isReturn?'Chi tiết hàng trả về':'Chi tiết hàng lỗi',sub:`${esc(row.productId)} · ${esc(p?.name||row.productId)}`,size:'lg',body:`
-      <div class="exception-detail-head ${isReturn?'returned':'defective'}"><div class="exception-detail-icon"><i class="fa-solid ${isReturn?'fa-rotate-left':'fa-triangle-exclamation'}"></i></div><div><b>${esc(p?.name||row.productId)}</b><span>${isReturn?'Hàng khách trả về':'Thành phẩm QC không đạt'}</span></div><div class="exception-detail-qty"><b>${fmtN(row.qtyOnHand||0)}</b><span>${esc(row.unit||p?.unit||'')}</span></div></div>
-      <div class="info-grid">${infoItem('Mã hàng',`<span class="code">${esc(row.productId)}</span>`)}${infoItem('Kho',esc(wh?.name||'—'))}${infoItem('Vị trí',esc(loc?.name||'—'))}${infoItem('Lô',`<span class="code">${esc(lot?.lotNumber||'—')}</span>`)}${infoItem(isReturn?'Đơn hàng tham chiếu':'Lệnh sản xuất tham chiếu',primaryRefHtml)}${!isReturn&&qcRef?infoItem('Phiếu QC',`<span class="code">${esc(qcRef)}</span>`):''}${infoItem('Ngày ghi nhận',fmtDate(String(row.lastUpdated||'').slice(0,10)))}</div>
+    Modal.open({title:isReturn?'Chi tiết hàng trả về':isExpired?'Chi tiết lô hết hạn':'Chi tiết hàng lỗi',sub:`${esc(row.productId)} · ${esc(p?.name||row.productId)}`,size:'lg',body:`
+      <div class="exception-detail-head ${isReturn?'returned':'defective'}"><div class="exception-detail-icon"><i class="fa-solid ${isReturn?'fa-rotate-left':isExpired?'fa-calendar-xmark':'fa-triangle-exclamation'}"></i></div><div><b>${esc(p?.name||row.productId)}</b><span>${isReturn?'Hàng khách trả về':isExpired?'Phân loại: Hết hạn · Chờ xử lý':'Thành phẩm QC không đạt'}</span></div><div class="exception-detail-qty"><b>${fmtN(row.qtyOnHand||0)}</b><span>${esc(row.unit||p?.unit||'')}</span></div></div>
+      <div class="info-grid">${infoItem('Mã hàng',`<span class="code">${esc(row.productId)}</span>`)}${infoItem('Kho',esc(wh?.name||'—'))}${infoItem('Vị trí',esc(loc?.name||'—'))}${infoItem('Lô',`<span class="code">${esc(lot?.lotNumber||'—')}</span>`)}${isExpired?infoItem('Hạn sử dụng',`<span class="badge red">${lot?.expiryDate?fmtDate(lot.expiryDate):'—'} · Hết hạn</span>`):''}${infoItem(isReturn?'Đơn hàng tham chiếu':'Lệnh sản xuất tham chiếu',primaryRefHtml)}${!isReturn&&!isExpired&&qcRef?infoItem('Phiếu QC',`<span class="code">${esc(qcRef)}</span>`):''}${infoItem('Ngày ghi nhận',fmtDate(String(row.lastUpdated||'').slice(0,10)))}</div>
       <div class="form-sec-title" style="margin-top:16px">Lịch sử giao dịch</div>${tableShell([{t:'Giao dịch'},{t:'Ngày'},{t:'Loại'},{t:'Số lượng',cls:'right'},{t:'Tham chiếu'}],tx.map(t=>{const ref=t.refId||'';const act=ref?(isReturn?'open-order':(String(ref).startsWith('LSX-')?'open-production-order':'')):'';const refHtml=act?`<button type="button" class="ref-link compact" data-act="${act}" data-id="${esc(ref)}"><span class="code">${esc(ref)}</span><i class="fa-solid fa-arrow-up-right-from-square"></i></button>`:`<span class="code">${esc(ref||'—')}</span>`;return `<tr><td><span class="code">${esc(t.id)}</span></td><td>${fmtDate(t.date)}</td><td>${esc(t.type||'')}</td><td class="right num">${fmtN(t.qty||0)} ${esc(row.unit||'')}</td><td>${refHtml}</td></tr>`}).join(''),{emptyTitle:'Chưa có giao dịch'})}`,foot:'<button class="btn" data-act="modal-close">Đóng</button>'});
   },
   'inv-supplier-return-detail': (d) => {
@@ -2844,7 +2817,7 @@ const Actions = {
   },
   'supplier-detail': (d) => { State.supplierTab='overview'; switchTo(() => openSupplierDrawer(d.id), { keepDrawer: true }); },
   'supplier-tab': (d) => { State.supplierTab=d.tab; const supplier=Q.supplier(d.id); if(supplier) Drawer.setBody(supplierDrawerBody(supplier)); },
-  'supplier-refund-modal': (d) => switchTo(() => openSupplierRefundModal(d.id)),
+  'supplier-refund-modal': async (d) => { if(typeof accountingEntriesEnsureFresh==='function') await accountingEntriesEnsureFresh(false); switchTo(() => openSupplierRefundModal(d.id)); },
   'supplier-refund-save': (d) => saveSupplierRefund(d.id),
   'supplier-save': (d) => {
     const name = $('#supName')?.value.trim();
@@ -2931,7 +2904,7 @@ const Actions = {
     } catch (err) {
       console.warn('[Restaurant] Không hydrate đủ dữ liệu bổ sung cửa hàng từ server:', err);
     }
-    openRestaurantReplenishmentForm({storeId:d.store||'',productId:d.product||'',quantity:Number(d.qty||0)||1});
+    const requestedStore=(restaurantIsStoreStaff&&restaurantIsStoreStaff())?restaurantBoundStoreId():(d.store||''); openRestaurantReplenishmentForm({storeId:requestedStore,productId:d.product||'',quantity:Number(d.qty||0)||1});
   },
   'restaurant-replenishment-add-line': () => {
     const wrap=document.getElementById('rrLines'); if(!wrap)return;
@@ -2946,6 +2919,7 @@ const Actions = {
   'restaurant-replenishment-save': async () => {
     DB.storeReplenishmentRequests=DB.storeReplenishmentRequests||[];
     const storeId=$('#rrStore')?.value||'', store=restaurantStore(storeId);
+    if(typeof restaurantCanAccessStore==='function'&&!restaurantCanAccessStore(storeId)){Toast.err('Không có quyền','Tài khoản này chỉ thao tác trên cửa hàng được phân công.');return;}
     if(!store){Toast.err('Dữ liệu chưa hợp lệ','Vui lòng chọn cửa hàng.');return;}
     const sourceWarehouseId=store.sourceWarehouseId||'', sourceWh=Q.warehouse(sourceWarehouseId);
     if(!sourceWh||sourceWh.type!=='FINISHED_GOODS'){Toast.err('Chi nhánh chưa liên kết Kho thành phẩm','Hãy cập nhật chi nhánh và chọn Kho Thành phẩm - Thủ Đức/Bình Dương/Đồng Nai.');return;}
@@ -2963,68 +2937,88 @@ const Actions = {
     await restaurantPersist(['replenishments']); Modal.close(); go('restaurant',{tab:'replenishment'}); Toast.ok('Đã gửi yêu cầu bổ sung',`${id} · ${items.length} thành phẩm`);
   },
   'restaurant-replenishment-view': (d) => {
-    const r=restaurantReplenishment(d.id); if(!r)return; const store=restaurantStore(r.storeId), sourceWh=Q.warehouse(r.sourceWarehouseId||store?.sourceWarehouseId), items=restaurantRequestItems(r);
-    const rows=items.map(it=>{const item=restaurantItem(it.productId);const issued=(r.issuedLines||[]).filter(x=>x.productId===it.productId).reduce((sum,x)=>sum+Number(x.qty||0),0);return `<tr><td><span class="code">${esc(it.productId)}</span><div class="cell-sub">${esc(item?.name||it.productId)}</div></td><td class="right num">${fmtDec(it.quantity,3)} ${esc(item?.unit||'')}</td><td class="right num">${issued?fmtDec(issued,3):'—'} ${esc(item?.unit||'')}</td></tr>`}).join('');
-    Modal.open({title:`Yêu cầu bổ sung · ${esc(r.id)}`,size:'lg',body:`<div class="detail-grid"><div><span>Cửa hàng</span><b>${esc(store?.name||r.storeId)}</b></div><div><span>Ngày yêu cầu</span><b>${fmtDate(r.date)}</b></div><div><span>Kho thành phẩm nguồn</span><b>${esc(sourceWh?.name||'—')}</b></div><div><span>Số mặt hàng</span><b>${items.length}</b></div><div><span>Trạng thái</span><b>${restaurantReplenishmentStatus(r.status)}</b></div><div><span>Phiếu xuất kho</span><b>${r.goodsIssueId?esc(r.goodsIssueId):'—'}</b></div><div><span>Mã điều phối</span><b>${r.transferId?esc(r.transferId):'—'}</b></div><div><span>Người tạo yêu cầu</span><b>${esc(Q.employeeName(r.createdBy)||r.createdBy||'—')}</b></div><div><span>Kho xuất bởi</span><b>${esc(Q.employeeName(r.issuedBy)||r.issuedBy||'—')}</b></div><div><span>Cửa hàng nhận bởi</span><b>${esc(Q.employeeName(r.receivedBy)||r.receivedBy||'—')}</b></div></div><div class="form-sec-title" style="margin-top:12px">Chi tiết hàng yêu cầu</div>${tableShell([{t:'Thành phẩm'},{t:'SL yêu cầu',cls:'right'},{t:'SL kho đã xuất',cls:'right'}],rows,{emptyTitle:'Phiếu chưa có dòng hàng'})}<div class="field" style="margin-top:12px"><label>Ghi chú</label><div class="inp" style="height:auto;min-height:42px">${esc(r.note||'—')}</div></div>`,foot:`<button class="btn" data-act="modal-close">Đóng</button>${r.status==='ISSUED'?`<button class="btn btn-primary" data-act="restaurant-replenishment-receive" data-id="${esc(r.id)}"><i class="fa-solid fa-box-open"></i>Cửa hàng nhập hàng</button>`:''}`});
+    const r=restaurantReplenishment(d.id); if(!r)return;
+    const store=restaurantStore(r.storeId), sourceWh=Q.warehouse(r.sourceWarehouseId||store?.sourceWarehouseId), progress=restaurantReplenishmentProgress(r);
+    const rows=progress.items.map(x=>{const item=restaurantItem(x.productId);return `<tr><td><span class="code">${esc(x.productId)}</span><div class="cell-sub">${esc(item?.name||x.productId)}</div></td><td class="right num">${fmtDec(x.requestedQty,3)} ${esc(item?.unit||'')}</td><td class="right num">${fmtDec(x.issuedQty,3)} ${esc(item?.unit||'')}</td><td class="right num">${fmtDec(x.receivedQty,3)} ${esc(item?.unit||'')}</td><td class="right num strong">${fmtDec(x.remainingToReceive,3)} ${esc(item?.unit||'')}</td></tr>`}).join('');
+    const issueRefs=progress.batches.map(b=>b.goodsIssueId).filter(Boolean).join(', '), transferRefs=progress.batches.map(b=>b.transferId).filter(Boolean).join(', ');
+    Modal.open({title:`Yêu cầu bổ sung · ${esc(r.id)}`,size:'lg',body:`<div class="detail-grid"><div><span>Cửa hàng</span><b>${esc(store?.name||r.storeId)}</b></div><div><span>Ngày yêu cầu</span><b>${fmtDate(r.date)}</b></div><div><span>Kho thành phẩm nguồn</span><b>${esc(sourceWh?.name||'—')}</b></div><div><span>Số mặt hàng</span><b>${progress.items.length}</b></div><div><span>Trạng thái</span><b>${restaurantReplenishmentStatus(progress.status)}</b></div><div><span>Phiếu xuất kho</span><b>${esc(issueRefs||r.goodsIssueId||'—')}</b></div><div><span>Mã điều phối</span><b>${esc(transferRefs||r.transferId||'—')}</b></div><div><span>Người tạo yêu cầu</span><b>${esc(Q.employeeName(r.createdBy)||r.createdBy||'—')}</b></div><div><span>Kho xuất gần nhất bởi</span><b>${esc(Q.employeeName(r.issuedBy)||r.issuedBy||'—')}</b></div><div><span>Cửa hàng nhận gần nhất bởi</span><b>${esc(Q.employeeName(r.receivedBy)||r.receivedBy||'—')}</b></div></div><div class="form-sec-title" style="margin-top:12px">Tiến độ hàng yêu cầu</div>${tableShell([{t:'Thành phẩm'},{t:'SL yêu cầu',cls:'right'},{t:'Đã xuất',cls:'right'},{t:'Đã nhận',cls:'right'},{t:'Còn thiếu',cls:'right'}],rows,{emptyTitle:'Phiếu chưa có dòng hàng'})}<div class="field" style="margin-top:12px"><label>Ghi chú</label><div class="inp" style="height:auto;min-height:42px">${esc(r.note||'—')}</div></div>`,foot:`<button class="btn" data-act="modal-close">Đóng</button>${progress.status==='ISSUED'?`<button class="btn btn-primary" data-act="restaurant-replenishment-receive" data-id="${esc(r.id)}"><i class="fa-solid fa-box-open"></i>Cửa hàng nhập đợt hàng này</button>`:''}`});
   },
   'restaurant-replenishment-fulfill': (d) => {
     if(State.module!=='warehouse'){ Toast.warn('Kho thực hiện duyệt xuất','Vui lòng xử lý yêu cầu này tại Kho → Duyệt bổ sung cửa hàng.'); go('warehouse',{tab:'store_replenishment'}); return; }
     openRestaurantReplenishmentFulfill(d.id);
   },
   'restaurant-replenishment-fulfill-save': async (d) => {
-    const req=restaurantReplenishment(d.id); if(!req||req.status!=='REQUESTED')return;
+    const req=restaurantReplenishment(d.id); if(!req)return;
+    const beforeProgress=restaurantReplenishmentProgress(req);
+    if(!['REQUESTED','PARTIAL_RECEIVED'].includes(beforeProgress.status))return;
     const store=restaurantStore(req.storeId), fromWarehouseId=store?.sourceWarehouseId||req.sourceWarehouseId||'', sourceWh=Q.warehouse(fromWarehouseId);
     if(!store||!sourceWh||sourceWh.type!=='FINISHED_GOODS'){Toast.err('Dữ liệu chưa hợp lệ','Chi nhánh phải liên kết Kho thành phẩm.');return;}
+    const remainingMap=new Map(beforeProgress.items.filter(x=>x.remainingToIssue>1e-6).map(x=>[x.productId,x.remainingToIssue]));
     const approved=[...document.querySelectorAll('.rr-approved-qty')].map(el=>({productId:el.dataset.product||'',quantity:Number(el.value||0)}));
     if(!approved.length||approved.some(x=>!x.productId||x.quantity<=0)){Toast.err('Số lượng xuất chưa hợp lệ','Mỗi thành phẩm phải có số lượng xuất lớn hơn 0.');return;}
-    // Kiểm tra đủ tồn toàn bộ trước khi trừ bất kỳ dòng nào để tránh xuất dở phiếu.
-    for(const it of approved){const total=(DB.inventory||[]).filter(r=>r.warehouseId===fromWarehouseId&&r.productId===it.productId).reduce((sum,r)=>sum+Number(r.qtyAvailable??r.qtyOnHand??0),0);if(total+1e-9<it.quantity){Toast.err('Không đủ tồn Kho thành phẩm',`${Q.product(it.productId)?.name||it.productId}: khả dụng ${fmtDec(total,3)}, cần ${fmtDec(it.quantity,3)}.`);return;}}
-    const transferId=nextCode('XCH-2026-',DB.stockTransfers||[]), issuedLines=[];
+    if(approved.length!==remainingMap.size){Toast.err('Chưa đủ dòng cần xuất','Phải xử lý đầy đủ các thành phẩm còn thiếu trong yêu cầu.');return;}
     for(const it of approved){
-      let remaining=it.quantity; const item=Q.product(it.productId);
-      const sourceRows=(DB.inventory||[]).filter(r=>r.warehouseId===fromWarehouseId&&r.productId===it.productId&&Number(r.qtyAvailable??r.qtyOnHand??0)>0&&inventoryRowIsUsableForIssue(r)).sort(sortIssueRowsFefoFifo);
-      for(const source of sourceRows){if(remaining<=0)break;const take=Math.min(remaining,Number(source.qtyAvailable??source.qtyOnHand??0));const out=InventoryService.apply({productId:it.productId,warehouseId:fromWarehouseId,locationId:source.locationId,lotId:source.lotId,quantity:take,type:'TRANSFER_OUT',refType:'STORE_REPLENISHMENT',refId:transferId,note:`Kho xuất cho cửa hàng theo ${req.id}`,updateMaterial:false});if(!out.ok){Toast.err('Không thể xuất Kho thành phẩm',out.message);return;}issuedLines.push({productId:it.productId,lotId:source.lotId||'',qty:take,unit:source.unit||item?.unit||'',sourceLocationId:source.locationId||''});remaining-=take;}
+      const need=Number(remainingMap.get(it.productId)||0);
+      if(need<=0||Math.abs(it.quantity-need)>1e-6){Toast.err('Số lượng xuất không đúng phần còn thiếu',`${Q.product(it.productId)?.name||it.productId}: còn thiếu ${fmtDec(need,3)}, cần xác nhận đúng số lượng này.`);return;}
     }
-    // Ghi phiếu xuất kho thật để lịch sử xuất/sử dụng của lô và màn Xuất kho có thể truy vết.
-    // Trước đây bước này chỉ trừ inventory nên số tồn đúng nhưng không có chứng từ goodsIssues.
+    // Chỉ cho hoàn tất một đợt xuất nếu Kho có đủ TOÀN BỘ phần còn thiếu hiện tại.
+    const allocationPlan=[];
+    for(const it of approved){
+      const item=Q.product(it.productId);
+      const sourceRows=(DB.inventory||[]).filter(r=>r.warehouseId===fromWarehouseId&&r.productId===it.productId&&Number(r.qtyAvailable??r.qtyOnHand??0)>0&&inventoryRowIsUsableForIssue(r)).sort(sortIssueRowsFefoFifo);
+      const usableTotal=sourceRows.reduce((sum,r)=>sum+Number(r.qtyAvailable??r.qtyOnHand??0),0);
+      if(usableTotal+1e-9<it.quantity){Toast.err('Không đủ tồn hợp lệ để xuất',`${item?.name||it.productId}: lô hợp lệ ${fmtDec(usableTotal,3)}, còn thiếu cần xuất ${fmtDec(it.quantity,3)}. Không trừ tồn và không tạo phiếu.`);return;}
+      let remaining=it.quantity; const allocations=[];
+      for(const source of sourceRows){if(remaining<=1e-9)break;const take=Math.min(remaining,Number(source.qtyAvailable??source.qtyOnHand??0));if(take>0){allocations.push({source,take});remaining-=take;}}
+      if(remaining>1e-9){Toast.err('Không thể phân bổ đủ lô',`${item?.name||it.productId}: còn thiếu ${fmtDec(remaining,3)}. Phiếu chưa bị trừ tồn.`);return;}
+      allocationPlan.push({it,item,allocations});
+    }
+    const transferId=nextCode('XCH-2026-',DB.stockTransfers||[]), issuedLines=[];
+    for(const plan of allocationPlan){
+      for(const alloc of plan.allocations){
+        const source=alloc.source, take=alloc.take;
+        const out=InventoryService.apply({productId:plan.it.productId,warehouseId:fromWarehouseId,locationId:source.locationId,lotId:source.lotId,quantity:take,type:'TRANSFER_OUT',refType:'STORE_REPLENISHMENT',refId:transferId,note:`Kho xuất cho cửa hàng theo ${req.id}`,updateMaterial:false});
+        if(!out.ok){Toast.err('Không thể xuất Kho thành phẩm',out.message);return;}
+        issuedLines.push({productId:plan.it.productId,lotId:source.lotId||'',qty:take,unit:source.unit||plan.item?.unit||'',sourceLocationId:source.locationId||''});
+      }
+    }
+    for(const it of approved){const issued=issuedLines.filter(x=>x.productId===it.productId).reduce((sum,x)=>sum+Number(x.qty||0),0);if(Math.abs(issued-it.quantity)>1e-6){Toast.err('Sai lệch số lượng xuất',`${Q.product(it.productId)?.name||it.productId}: xác nhận ${fmtDec(it.quantity,3)} nhưng chứng từ mới có ${fmtDec(issued,3)}.`);return;}}
     DB.goodsIssues=DB.goodsIssues||[];
     const goodsIssueId=nextCode('PX-2026-',DB.goodsIssues);
-    DB.goodsIssues.unshift({
-      id:goodsIssueId,
-      type:'TRANSFER_OUT',
-      warehouseId:fromWarehouseId,
-      refDoc:req.id,
-      replenishmentId:req.id,
-      transferId,
-      storeId:req.storeId,
-      date:restaurantToday(),
-      status:'COMPLETED',
-      createdBy:DB.currentUser?.id||'',
-      note:`Xuất hàng cho ${store.name||req.storeId} theo yêu cầu ${req.id}`,
-      items:issuedLines.map(line=>({productId:line.productId,lotId:line.lotId||'',qty:Number(line.qty||0),unit:line.unit||'',locationId:line.sourceLocationId||''}))
-    });
-    req.status='ISSUED'; req.approvedItems=approved; req.sourceWarehouseId=fromWarehouseId; req.transferId=transferId; req.goodsIssueId=goodsIssueId; req.issuedLines=issuedLines; req.issuedAt=new Date().toISOString(); req.issuedBy=DB.currentUser?.id||'';
+    DB.goodsIssues.unshift({id:goodsIssueId,type:'TRANSFER_OUT',warehouseId:fromWarehouseId,refDoc:req.id,replenishmentId:req.id,transferId,storeId:req.storeId,date:restaurantToday(),status:'COMPLETED',createdBy:DB.currentUser?.id||'',note:`Xuất hàng cho ${store.name||req.storeId} theo yêu cầu ${req.id}`,items:issuedLines.map(line=>({productId:line.productId,lotId:line.lotId||'',qty:Number(line.qty||0),unit:line.unit||'',locationId:line.sourceLocationId||''}))});
+    // Materialize lịch sử legacy rồi thêm đợt xuất mới. Không ghi đè 600 cũ của các request đã xử lý một phần.
+    const history=restaurantReplenishmentIssueBatches(req).map(b=>({...b,issuedLines:(b.issuedLines||[]).map(x=>({...x}))}));
+    history.push({id:goodsIssueId,goodsIssueId,transferId,issuedLines:issuedLines.map(x=>({...x})),issuedAt:new Date().toISOString(),issuedBy:DB.currentUser?.id||'',receivedAt:'',receivedBy:''});
+    req.issueBatches=history; req.status='ISSUED'; req.approvedItems=approved; req.sourceWarehouseId=fromWarehouseId; req.transferId=transferId; req.goodsIssueId=goodsIssueId; req.issuedLines=issuedLines; req.issuedAt=new Date().toISOString(); req.issuedBy=DB.currentUser?.id||'';
+    req.goodsIssueIds=history.map(x=>x.goodsIssueId).filter(Boolean); req.transferIds=history.map(x=>x.transferId).filter(Boolean);
     if(typeof InventoryAPI!=='undefined'&&InventoryAPI.scheduleCollections) InventoryAPI.scheduleCollections(['inventory','inventoryTransactions','goodsIssues'],120);
-    await restaurantPersist(['replenishments']); Modal.close(); go('warehouse',{tab:'store_replenishment'}); Toast.ok('Kho đã xuất hàng',`${goodsIssueId} · ${transferId} · ${approved.length} thành phẩm · chờ cửa hàng nhận`);
+    await restaurantPersist(['replenishments']); Modal.close(); go('warehouse',{tab:'store_replenishment'}); Toast.ok('Kho đã xuất phần còn thiếu',`${goodsIssueId} · ${transferId} · chờ cửa hàng nhận đợt này`);
   },
   'restaurant-replenishment-receive': (d) => {
-    const req=restaurantReplenishment(d.id); if(!req||req.status!=='ISSUED')return; const store=restaurantStore(req.storeId);
-    const grouped={}; for(const line of req.issuedLines||[]){grouped[line.productId]=(grouped[line.productId]||0)+Number(line.qty||0);}
+    const req=restaurantReplenishment(d.id); if(!req)return; const progress=restaurantReplenishmentProgress(req); if(progress.status!=='ISSUED')return; const store=restaurantStore(req.storeId);
+    const pending=[...progress.batches].reverse().find(b=>!b.receivedAt&&(b.issuedLines||[]).length); if(!pending)return;
+    const grouped={}; for(const line of pending.issuedLines||[]){grouped[line.productId]=(grouped[line.productId]||0)+Number(line.qty||0);}
     const rows=Object.entries(grouped).map(([productId,qty])=>{const item=restaurantItem(productId);return `<tr><td><span class="code">${esc(productId)}</span><div class="cell-sub">${esc(item?.name||productId)}</div></td><td class="right num">${fmtDec(qty,3)} ${esc(item?.unit||'')}</td></tr>`}).join('');
-    Modal.open({title:`Cửa hàng nhập hàng · ${esc(req.id)}`,sub:`${esc(store?.name||req.storeId)} · ${Object.keys(grouped).length} thành phẩm`,size:'lg',body:`<div class="detail-grid"><div><span>Phiếu xuất kho</span><b>${esc(req.transferId||'—')}</b></div><div><span>Kho nguồn</span><b>${esc(Q.warehouseName(req.sourceWarehouseId)||'—')}</b></div><div><span>Trạng thái</span><b>Chờ cửa hàng xác nhận nhập</b></div></div><div class="form-sec-title" style="margin-top:14px">Hàng cửa hàng sẽ nhận</div>${tableShell([{t:'Thành phẩm'},{t:'Số lượng nhận',cls:'right'}],rows,{emptyTitle:'Không có hàng đã xuất'})}<div class="note-box"><b>Sau khi xác nhận</b><div class="cell-sub">Các thành phẩm trên mới được ghi vào Tồn kho cửa hàng. Trước bước này cửa hàng chưa sở hữu số hàng này.</div></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="restaurant-replenishment-receive-confirm" data-id="${esc(req.id)}"><i class="fa-solid fa-box-open"></i>Xác nhận nhập cửa hàng</button>`});
+    Modal.open({title:`Cửa hàng nhập hàng · ${esc(req.id)}`,sub:`${esc(store?.name||req.storeId)} · đợt ${esc(pending.goodsIssueId||pending.transferId||'xuất mới')}`,size:'lg',body:`<div class="detail-grid"><div><span>Phiếu xuất kho</span><b>${esc(pending.goodsIssueId||'—')}</b></div><div><span>Mã điều phối</span><b>${esc(pending.transferId||'—')}</b></div><div><span>Kho nguồn</span><b>${esc(Q.warehouseName(req.sourceWarehouseId)||'—')}</b></div><div><span>Trạng thái</span><b>Chờ cửa hàng xác nhận nhập đợt này</b></div></div><div class="form-sec-title" style="margin-top:14px">Hàng cửa hàng sẽ nhận</div>${tableShell([{t:'Thành phẩm'},{t:'Số lượng nhận',cls:'right'}],rows,{emptyTitle:'Không có hàng đã xuất'})}<div class="note-box"><b>Sau khi xác nhận</b><div class="cell-sub">Chỉ đợt hàng này được cộng vào tồn cửa hàng. Nếu yêu cầu vẫn còn thiếu, phiếu sẽ chuyển sang “Đã nhận một phần” để Kho xuất tiếp phần còn lại.</div></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="restaurant-replenishment-receive-confirm" data-id="${esc(req.id)}"><i class="fa-solid fa-box-open"></i>Xác nhận nhập đợt này</button>`});
   },
   'restaurant-replenishment-receive-confirm': async (d) => {
-    const req=restaurantReplenishment(d.id); if(!req||req.status!=='ISSUED')return; const store=restaurantStore(req.storeId); if(!store)return;
+    const req=restaurantReplenishment(d.id); if(!req)return; const progressBefore=restaurantReplenishmentProgress(req); if(progressBefore.status!=='ISSUED')return; const store=restaurantStore(req.storeId); if(!store)return;
+    // Materialize cả batch legacy nếu có, rồi xác định đúng đợt chưa nhận gần nhất.
+    req.issueBatches=restaurantReplenishmentIssueBatches(req).map(b=>({...b,issuedLines:(b.issuedLines||[]).map(x=>({...x}))}));
+    let pendingIndex=-1; for(let i=req.issueBatches.length-1;i>=0;i--){if(!req.issueBatches[i].receivedAt&&(req.issueBatches[i].issuedLines||[]).length){pendingIndex=i;break;}}
+    if(pendingIndex<0)return; const pending=req.issueBatches[pendingIndex];
     DB.restaurantStoreStocks=DB.restaurantStoreStocks||[]; DB.restaurantStoreStockTransactions=DB.restaurantStoreStockTransactions||[];
-    for(const line of req.issuedLines||[]){
+    for(const line of pending.issuedLines||[]){
       const productId=line.productId; const item=Q.product(productId)||restaurantItem(productId); const key=`${req.storeId}|${productId}|${line.lotId||''}`;
       let stock=(DB.restaurantStoreStocks||[]).find(x=>`${x.storeId}|${x.productId}|${x.lotId||''}`===key);
       if(!stock){stock={id:`RSS-${req.storeId}-${productId}-${line.lotId||'NOLOT'}`.replace(/[^A-Za-z0-9_-]/g,'-'),storeId:req.storeId,sourceWarehouseId:req.sourceWarehouseId,productId,lotId:line.lotId||'',unit:line.unit||item?.unit||'',qtyOnHand:0,qtyAvailable:0,createdAt:new Date().toISOString()};DB.restaurantStoreStocks.unshift(stock);}
       const before=Number(stock.qtyOnHand||0), add=Number(line.qty||0); stock.qtyOnHand=before+add; stock.qtyAvailable=Number(stock.qtyAvailable||0)+add; stock.updatedAt=new Date().toISOString();
-      DB.restaurantStoreStockTransactions.unshift({id:`RSTX-${Date.now()}-${Math.random().toString(36).slice(2,7)}`,storeId:req.storeId,sourceWarehouseId:req.sourceWarehouseId,productId,lotId:line.lotId||'',type:'RECEIPT',qty:add,qtyBefore:before,qtyAfter:stock.qtyOnHand,refType:'STORE_REPLENISHMENT',refId:req.id,date:restaurantToday(),createdAt:new Date().toISOString()});
+      DB.restaurantStoreStockTransactions.unshift({id:`RSTX-${Date.now()}-${Math.random().toString(36).slice(2,7)}`,storeId:req.storeId,sourceWarehouseId:req.sourceWarehouseId,productId,lotId:line.lotId||'',type:'RECEIPT',qty:add,qtyBefore:before,qtyAfter:stock.qtyOnHand,refType:'STORE_REPLENISHMENT',refId:req.id,goodsIssueId:pending.goodsIssueId||'',date:restaurantToday(),createdAt:new Date().toISOString()});
     }
-    req.status='RECEIVED'; req.receivedAt=new Date().toISOString(); req.receivedBy=DB.currentUser?.id||'';
-    await restaurantPersist(['replenishments','storeStocks','storeStockTransactions']); Modal.close(); go('restaurant',{tab:'store_stock'}); Toast.ok('Cửa hàng đã nhập hàng',`${req.id} · tồn điểm bán đã được cập nhật`);
+    pending.receivedAt=new Date().toISOString(); pending.receivedBy=DB.currentUser?.id||''; req.issueBatches[pendingIndex]=pending; req.receivedAt=pending.receivedAt; req.receivedBy=pending.receivedBy;
+    const afterProgress=restaurantReplenishmentProgress(req); req.status=afterProgress.remainingToReceiveTotal<=1e-6?'RECEIVED':'PARTIAL_RECEIVED';
+    await restaurantPersist(['replenishments','storeStocks','storeStockTransactions']); Modal.close();
+    if(req.status==='RECEIVED'){go('restaurant',{tab:'store_stock'});Toast.ok('Cửa hàng đã nhập đủ hàng',`${req.id} · yêu cầu đã hoàn tất`);}else{go('restaurant',{tab:'replenishment'});Toast.ok('Đã nhận một phần',`${req.id} · còn thiếu ${fmtDec(afterProgress.remainingToReceiveTotal,3)} đơn vị để Kho xuất tiếp`);}
   },
   'restaurant-pos-add': (d) => restaurantPosAdd(d.id),
   'restaurant-pos-inc': (d) => restaurantPosChange(d.id, 1),
@@ -3066,6 +3060,7 @@ const Actions = {
   },
   'restaurant-pos-save': async () => {
     const store = restaurantStore($('#posStore')?.value);
+    if(store&&typeof restaurantCanAccessStore==='function'&&!restaurantCanAccessStore(store.id)){Toast.err('Không có quyền','Tài khoản này chỉ bán hàng tại cửa hàng được phân công.');return;}
     const channel = $('#posChannel')?.value || 'POS';
     if(!store){Toast.err('Chưa chọn cửa hàng','Vui lòng chọn cửa hàng trước khi tạo đơn.');return;}
     let items=[];
@@ -3111,13 +3106,19 @@ const Actions = {
   },
   'restaurant-order-view': (d) => openRestaurantOrderDetail(d.id),
   'restaurant-order-pay': async (d) => {
+    if(typeof accountingEntriesEnsureFresh==='function') await accountingEntriesEnsureFresh(false);
     const order = (DB.posOrders || []).find(x => x.id === d.id); if (!order || !['READY','SERVED'].includes(order.status)) return;
     if(typeof RestaurantQualityAPI!=='undefined') await RestaurantQualityAPI.ensureFresh(['stores','bankAccounts'],{force:false});
-    Modal.open({title:`Thanh toán đơn · ${esc(order.id)}`,sub:`${esc(restaurantStore(order.storeId)?.name||order.storeId)} · ${fmtVND(restaurantOrderTotal(order))}`,size:'md',body:`<div class="field"><label>Phương thức thanh toán *</label><select class="inp" id="restaurantOrderPayment" onchange="restaurantPaymentMethodChanged('${esc(order.id)}')"><option value="Tiền mặt">Tiền mặt</option><option value="Chuyển khoản">Chuyển khoản</option></select></div><div id="restaurantBankPaymentArea"></div><div class="note-box"><b>Thanh toán nhà hàng</b><div class="cell-sub">Tiền mặt ghi nhận trực tiếp. Nếu chuyển khoản, hệ thống sẽ hiển thị tài khoản Công ty hoặc tài khoản phù hợp của chi nhánh này.</div></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="restaurant-order-pay-confirm" data-id="${esc(order.id)}"><i class="fa-solid fa-credit-card"></i>Xác nhận thanh toán</button>`});
+    const defaultEntry=typeof accountingResolveRestaurantEntry==='function'?accountingResolveRestaurantEntry('Tiền mặt'):null;
+    Modal.open({title:`Thanh toán đơn · ${esc(order.id)}`,sub:`${esc(restaurantStore(order.storeId)?.name||order.storeId)} · ${fmtVND(restaurantOrderTotal(order))}`,size:'md',body:`<div class="field"><label>Phương thức thanh toán *</label><select class="inp" id="restaurantOrderPayment" onchange="restaurantPaymentMethodChanged('${esc(order.id)}')"><option value="Tiền mặt">Tiền mặt</option><option value="Chuyển khoản">Chuyển khoản</option></select></div><input type="hidden" id="restaurantOrderAccountingEntry" value="${esc(defaultEntry?.id||'')}"><div class="field" style="margin-top:12px"><label>Định khoản kế toán</label><div class="inp" id="restaurantOrderAccountingEntryDisplay" style="background:var(--surface-2)">${defaultEntry?esc((defaultEntry.number||defaultEntry.id)+' · '+defaultEntry.name):'Chưa cấu hình định khoản bán hàng tiền mặt'}</div><div class="cell-sub">Tự động theo phương thức thanh toán do Kế toán cấu hình; nhân viên cửa hàng không được chọn thủ công.</div></div><div id="restaurantBankPaymentArea"></div><div class="note-box"><b>Thanh toán nhà hàng</b><div class="cell-sub">Nhân viên chỉ chọn phương thức thanh toán. Định khoản được hệ thống áp tự động để tránh chọn sai.</div></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="restaurant-order-pay-confirm" data-id="${esc(order.id)}"><i class="fa-solid fa-credit-card"></i>Xác nhận thanh toán</button>`});
+    restaurantPaymentMethodChanged(order.id);
   },
   'restaurant-order-pay-confirm': async (d) => {
     const order=(DB.posOrders||[]).find(x=>x.id===d.id); if(!order||!['READY','SERVED'].includes(order.status))return;
     const payment=$('#restaurantOrderPayment')?.value||'Tiền mặt';
+    const resolvedEntry=typeof accountingResolveRestaurantEntry==='function'?accountingResolveRestaurantEntry(payment):null;
+    const accountingEntryId=resolvedEntry?.id||'';
+    if(!accountingEntryId){Toast.err('Chưa cấu hình định khoản',`Kế toán chưa khai báo định khoản tự động cho bán hàng nhà hàng bằng ${payment}. Vào Kế toán – Tài chính → Định khoản → Khai báo định khoản để cấu hình.`);return;}
     if(!['Tiền mặt','Chuyển khoản'].includes(payment)){Toast.err('Phương thức thanh toán không hợp lệ','Nhà hàng chỉ nhận Tiền mặt hoặc Chuyển khoản.');return;}
     if(payment==='Chuyển khoản'){
       const account=restaurantBankAccount($('#restaurantOrderBankAccount')?.value);
@@ -3127,11 +3128,11 @@ const Actions = {
       order.bankAccountId=account.id;
       order.bankAccountSnapshot={bankName:account.bankName||'',accountNumber:account.accountNumber||'',accountName:account.accountName||'',scopeType:account.scopeType||'',storeId:account.storeId||''};
     }else{ delete order.bankAccountId; delete order.bankAccountSnapshot; }
-    order.payment=payment; order.status='PAID'; order.paidAt=new Date().toISOString(); order.updatedAt=new Date().toISOString();
+    order.payment=payment; order.accountingEntryId=accountingEntryId; order.status='PAID'; order.paidAt=new Date().toISOString(); order.updatedAt=new Date().toISOString();
     if(payment==='Chuyển khoản' && order.bankAccountId){
       const amount=Math.round(Number(restaurantOrderTotal(order)||0));
       if(typeof AccountingBank!=='undefined' && AccountingBank?.record){
-        await AccountingBank.record({bankId:order.bankAccountId,type:'IN',date:String(order.paidAt).slice(0,10),amount,note:`Thanh toán đơn nhà hàng ${order.id} · ${restaurantStore(order.storeId)?.name||order.storeId}`,sourceType:'RESTAURANT_ORDER',sourceId:order.id,createdBy:DB.currentUser?.id||''});
+        await AccountingBank.record({bankId:order.bankAccountId,type:'IN',date:String(order.paidAt).slice(0,10),amount,note:`Thanh toán đơn nhà hàng ${order.id} · ${restaurantStore(order.storeId)?.name||order.storeId}`,sourceType:'RESTAURANT_ORDER',sourceId:order.id,createdBy:DB.currentUser?.id||'',accountingEntryId});
       }else{
         const bank=restaurantBankAccount(order.bankAccountId);
         if(bank){ bank.transactions=Array.isArray(bank.transactions)?bank.transactions:[]; if(!bank.transactions.some(t=>String(t.sourceType||'')==='RESTAURANT_ORDER'&&String(t.sourceId||'')===String(order.id))) bank.transactions.unshift({id:`BTX-REST-${Date.now()}`,type:'IN',date:String(order.paidAt).slice(0,10),amount,note:`Thanh toán đơn nhà hàng ${order.id}`,sourceType:'RESTAURANT_ORDER',sourceId:order.id,createdBy:DB.currentUser?.id||'',createdAt:new Date().toISOString()}); if(typeof RestaurantQualityAPI!=='undefined') await RestaurantQualityAPI.syncRestaurant(['bankAccounts']); }
@@ -4977,7 +4978,7 @@ const Actions = {
     f.debtQ = ''; f.debtSupplier = ''; f.debtStatus = ''; f.debtDateFrom = ''; f.debtDateTo = '';
     State.page.purchases = 1; render();
   },
-  'supplier-pay-modal': (d) => openPaymentModal(d.id),
+  'supplier-pay-modal': async (d) => { if(typeof accountingEntriesEnsureFresh==='function') await accountingEntriesEnsureFresh(false); openPaymentModal(d.id); },
   'supplier-pay-save': async (d) => {
     const po = Q.purchaseOrder(d.poid);
     if (!po) return;
@@ -4989,9 +4990,11 @@ const Actions = {
     const payerId = $('#payPayer')?.value || '';
     const payer = (DB.employees || []).find(e => String(e.id) === String(payerId));
     const payerName = payer?.name || payer?.fullName || ((String(payerId)===String(DB.currentUser?.userId||DB.currentUser?.id)) ? ((String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||'')) : Q.employeeName(payerId));
+    const accountingEntryId = $('#payAccountingEntry')?.value || '';
     const method = $('#payMethod')?.value || 'BANK_TRANSFER';
     const bankId = method === 'BANK_TRANSFER' ? ($('#payBank')?.value || '') : '';
     const bank = (DB.bankAccounts || []).find(b => String(b.id) === String(bankId));
+    if (!accountingEntryId) { Toast.err('Chưa chọn định khoản', 'Thanh toán nhà cung cấp bắt buộc phải chọn định khoản.'); return; }
     if (!payerId) { Toast.err('Chưa chọn người thực hiện', 'Vui lòng chọn người thực hiện thanh toán.'); return; }
     if (method === 'BANK_TRANSFER' && !bankId) { Toast.err('Chưa chọn ngân hàng', 'Vui lòng chọn tài khoản ngân hàng dùng để thanh toán.'); return; }
     if (method === 'BANK_TRANSFER' && typeof AccFin !== 'undefined' && AccFin.bankBalance(bankId) < amount) { Toast.err('Số dư ngân hàng không đủ', `Số dư hiện tại ${fmtVND(AccFin.bankBalance(bankId))}, cần thanh toán ${fmtVND(amount)}.`); return; }
@@ -5000,7 +5003,7 @@ const Actions = {
     const payment = {
       id, poId: po.id, supplierId: po.supplierId, date: $('#payDate')?.value || (typeof currentDateYMD==='function'?currentDateYMD():DB.today), amount,
       method: method === 'BANK_TRANSFER' ? 'Chuyển khoản' : 'Tiền mặt', bankId, bankName: bank?.name || bank?.bankName || '', bankAccount: bank?.accountNumber || '',
-      payerId, payerName, bankRef: $('#payRef')?.value || '', note: $('#payNote')?.value || '', createdBy: DB.currentUser?.userId || DB.currentUser?.id || '', createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''), createdAt: new Date().toISOString(),
+      payerId, payerName, accountingEntryId, bankRef: $('#payRef')?.value || '', note: $('#payNote')?.value || '', createdBy: DB.currentUser?.userId || DB.currentUser?.id || '', createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''), createdAt: new Date().toISOString(),
     };
     po.paid = Math.round(oldPaid + amount);
     DB.supplierPayments.unshift(payment);
@@ -5009,7 +5012,7 @@ const Actions = {
       if (typeof PurchaseAPI !== 'undefined') await PurchaseAPI.syncCollections(['supplierPayments','purchaseOrders']);
       // Chuyển khoản NCC là tiền RA khỏi đúng tài khoản đã chọn.
       if (bankId && typeof AccountingBank !== 'undefined') {
-        await AccountingBank.record({ bankId, type:'OUT', date:payment.date, amount, note:`Thanh toán NCC ${po.id} · ${Q.supplierName(po.supplierId)}`, sourceType:'SUPPLIER_PAYMENT', sourceId:id, createdBy:payment.createdBy });
+        await AccountingBank.record({ bankId, type:'OUT', date:payment.date, amount, note:`Thanh toán NCC ${po.id} · ${Q.supplierName(po.supplierId)}`, sourceType:'SUPPLIER_PAYMENT', sourceId:id, createdBy:payment.createdBy, accountingEntryId });
       }
       Modal.close(); if(State.module==='accounting') go('accounting',{tab:'ap'}); else go('purchases',{tab:'debts'}); render();
       Toast.ok('Ghi nhận thanh toán thành công', `${id} — ${fmtVND(amount)}`);
@@ -5027,6 +5030,7 @@ const Actions = {
   'new-employee': () => switchTo(() => openEmployeeForm()),
   'employee-edit': (d) => switchTo(() => openEmployeeForm(d.id)),
   'employee-save': () => saveEmployeeForm(),
+  'employee-admin-reset-password': (d) => adminResetEmployeePassword(d.id),
   'employee-toggle-active': (d) => toggleEmployeeActive(d.id),
   'employee-import': () => openEmployeeImportModal(),
   'hr-download-template': () => Exporter.csv('Mau-import-nhan-su.csv',
@@ -5105,11 +5109,26 @@ const Actions = {
   'import-run': (d) => { Modal.close(); Toast.info('Đang xử lý file…', `Đọc dữ liệu ${d.what}`); setTimeout(() => Toast.ok('Import hoàn tất', `Đã nhập thành công dữ liệu ${d.what} vào hệ thống.`), 1300); },
   'download-template': (d) => Exporter.csv(`Mau-import-${d.what.replace(/\s/g, '-')}.csv`, ['Mã', 'Tên', 'Ghi chú'], [['(ví dụ)', '(ví dụ)', '']]),
 
-  'export-dashboard': () => Exporter.csv('Bao-cao-tong-quan.csv',
-    ['Chỉ tiêu', 'Giá trị', 'Thay đổi'],
-    [['Doanh thu tháng', fmtVND(DB.kpi.revenueMonth), '+12,5%'], ['Đơn hàng', DB.kpi.ordersYtd, '+8,4%'],
-     ['Lệnh sản xuất', DB.kpi.poYtd, '+6,2%'], ['Đang sản xuất', DB.kpi.inProduction, ''],
-     ['Giá trị tồn kho', fmtVND(DB.kpi.inventoryValue), '-3,1%'], ['Công nợ phải thu', fmtVND(DB.kpi.receivable), '+4,5%']]),
+  'export-dashboard': () => {
+    const f=F('dashboard',{period:'month'}); const M=typeof dashboardMetrics==='function'?dashboardMetrics(f):null;
+    const inventoryValue=typeof dashboardInventoryValue==='function'?dashboardInventoryValue():0;
+    const receivable=typeof dashboardReceivable==='function'?dashboardReceivable():0;
+    const payable=typeof dashboardPayable==='function'?dashboardPayable():0;
+    return Exporter.csv('Bao-cao-tong-quan.csv',
+      ['Chỉ tiêu','Giá trị','Khoảng dữ liệu'],
+      [['Doanh thu',M?M.revenue:0,M?.range?.label||''],['Đơn bán phát sinh',M?(M.sales.length+M.rest.length):0,M?.range?.label||''],
+       ['Lệnh SX đang mở',M?M.activeProduction.length:0,'Hiện tại'],['Giá trị tồn NVL',inventoryValue,'Hiện tại'],
+       ['Công nợ phải thu',receivable,'Hiện tại'],['Công nợ phải trả',payable,'Hiện tại']]);
+  },
+  'dashboard-activity-all': async () => {
+    if(typeof SystemAPI!=='undefined' && typeof SystemAPI.refreshAuditLogs==='function') await SystemAPI.refreshAuditLogs({force:true});
+    if(typeof dashboardOpenAuditModal==='function') dashboardOpenAuditModal({});
+  },
+  'dashboard-activity-apply': () => {
+    if(typeof dashboardOpenAuditModal!=='function') return;
+    dashboardOpenAuditModal({q:$('#dashAuditQ')?.value||'',module:$('#dashAuditModule')?.value||'',userId:$('#dashAuditUser')?.value||'',from:$('#dashAuditFrom')?.value||'',to:$('#dashAuditTo')?.value||''});
+  },
+  'dashboard-activity-reset': () => { if(typeof dashboardOpenAuditModal==='function') dashboardOpenAuditModal({}); },
   'export-customers': () => Exporter.csv('Danh-sach-khach-hang.csv',
     ['Mã KH', 'Tên khách hàng', 'Người liên hệ', 'Điện thoại', 'Email', 'Tỉnh/TP', 'Nhóm', 'Số đơn', 'Doanh số', 'Trạng thái'],
     filterCustomers().map((c) => [c.id, c.name, c.contact, c.phone, c.email, c.province, c.group, Q.ordersOf(c.id).length, Q.revenueOf(c.id), statusLabel(c.status)])),
@@ -5633,6 +5652,12 @@ document.addEventListener('focusin', e => { if (e.target?.matches?.('[data-money
 document.addEventListener('input', (e) => {
   const el = e.target;
 
+  // Mọi ô số điện thoại trên form: chỉ cho nhập chữ số và tối đa 10 số.
+  if (el instanceof HTMLInputElement) {
+    const meta=[el.id,el.name,el.placeholder,el.getAttribute('aria-label'),el.closest('.field')?.querySelector('label')?.textContent].filter(Boolean).join(' ').toLowerCase();
+    if (/(số điện thoại|điện thoại|sđt|phone)/i.test(meta)) { el.value=String(el.value||'').replace(/\D/g,'').slice(0,10); el.inputMode='numeric'; el.maxLength=10; }
+  }
+
   if (el?.matches?.('[data-money="1"]')) {
     const digits = String(el.value || '').replace(/[^0-9]/g, '').replace(/^0+(?=\d)/, '');
     el.value = digits ? Number(digits).toLocaleString('vi-VN') : '';
@@ -5682,6 +5707,12 @@ document.addEventListener('input', (e) => {
   }
   // Tìm kiếm toàn cục
   if (el.id === 'globalSearch') runGlobalSearch(el.value);
+});
+
+document.addEventListener('focusout', (e) => {
+  const el=e.target; if (!(el instanceof HTMLInputElement)) return;
+  const meta=[el.id,el.name,el.placeholder,el.getAttribute('aria-label'),el.closest('.field')?.querySelector('label')?.textContent].filter(Boolean).join(' ').toLowerCase();
+  if (/(số điện thoại|điện thoại|sđt|phone)/i.test(meta) && el.value && !/^\d{10}$/.test(el.value)) Toast.warn('Số điện thoại chưa hợp lệ','Số điện thoại phải gồm đúng 10 chữ số.');
 });
 
 document.addEventListener('change', (e) => {
@@ -6250,6 +6281,8 @@ window.DashboardDataSync = (() => {
         jobs.push(ProductionAPI.ensureFresh?.(['productionOrders'], { force }));
       if (typeof RestaurantQualityAPI !== 'undefined')
         jobs.push(RestaurantQualityAPI.ensureFresh?.(['orders'], { force }));
+      if (typeof SystemAPI !== 'undefined' && typeof SystemAPI.refreshAuditLogs === 'function')
+        jobs.push(SystemAPI.refreshAuditLogs({ force }));
 
       await Promise.allSettled(jobs.filter(Boolean));
       window.SidebarBadges?.markReady?.('purchases');
@@ -7209,6 +7242,13 @@ if (
   // Không render CUSTOMER_ROWS/data.js cũ (ví dụ 25 KH) rồi vài ms sau mới nhảy
   // lên số server thật (ví dụ 26). Khi F5/deep-link vào CRM, hydrate collection
   // của đúng tab từ KIO trước first paint. Không dùng localStorage CRM.
+  if (State.module === 'hr') {
+    // Không render dữ liệu nhân sự demo/cache trước rồi nhảy số sau vài giây.
+    // Route Nhân sự phải hydrate server trước first paint.
+    try { await HRAPI?.bootstrap?.(); await HRAPI?.ensureFresh?.(['employees'], { force:true }); }
+    catch (err) { console.warn('[HR] Không hydrate được nhân sự KIO trước first paint:', err); }
+  }
+
   if (State.module === 'crm') {
     try {
       const crmInitialMap = {
@@ -7310,19 +7350,18 @@ if (
         return;
       }
 
-      // Các role khác giữ nguyên cơ chế hiện tại để không thay đổi nghiệp vụ ngoài phạm vi.
-      if (window.ERPDataWarmup?.start) {
-        await window.ERPDataWarmup.start();
-      } else {
-        const jobs = [];
-        if (typeof PurchaseAPI !== 'undefined') jobs.push(PurchaseAPI.ensureFresh?.(['purchases','supplierQuotations','purchaseOrders','goodsReceipts','supplierPayments','supplierRefunds'], {force:true}));
-        if (typeof InventoryAPI !== 'undefined') jobs.push(InventoryAPI.ensureFresh?.(['goodsIssues','stockTransfers','inventoryCounts','materialReturnRequests','inventoryLots','inventory'], {force:true}));
-        if (typeof ProductionAPI !== 'undefined') jobs.push(ProductionAPI.ensureFresh?.(['productionPlans','productionOrders','productionMaterialRequests','productionFinalInspections'], {force:true}));
-        if (typeof CRMAPI !== 'undefined') jobs.push(CRMAPI.ensureFresh?.(['orders','crmTickets'], {force:true}));
-        if (typeof RestaurantQualityAPI !== 'undefined') jobs.push(RestaurantQualityAPI.ensureFresh?.(['orders','replenishments','coa','capa','recalls'], {force:true}));
-        if (typeof ApprovalsAPI !== 'undefined') jobs.push(ApprovalsAPI.ensureFresh?.(['requests'], {force:true}));
-        await Promise.allSettled(jobs.filter(Boolean));
-      }
+      // Badge phải dựa trên dữ liệu SERVER của chính các collection tạo việc cần xử lý.
+      // Không đánh dấu ready từ cache/global warmup vì sẽ gây hiện số cũ rồi nhảy lại.
+      const jobs = [];
+      if (typeof PurchaseAPI !== 'undefined') jobs.push(PurchaseAPI.ensureFresh?.(['purchases','supplierQuotations','purchaseOrders','goodsReceipts','supplierPayments','supplierRefunds'], {force:true}));
+      if (typeof InventoryAPI !== 'undefined') jobs.push(InventoryAPI.ensureFresh?.(['goodsIssues','stockTransfers','inventoryCounts','materialReturnRequests','inventoryLots','inventory'], {force:true}));
+      if (typeof ProductionAPI !== 'undefined') jobs.push(ProductionAPI.ensureFresh?.(['productionPlans','productionOrders','productionMaterialRequests','productionFinalInspections'], {force:true}));
+      if (typeof CRMAPI !== 'undefined') jobs.push(CRMAPI.ensureFresh?.(['orders','crmTickets','customerPayments'], {force:true}));
+      if (typeof RestaurantQualityAPI !== 'undefined') jobs.push(RestaurantQualityAPI.ensureFresh?.(['orders','replenishments','coa','capa','recalls'], {force:true}));
+      if (typeof ApprovalsAPI !== 'undefined') jobs.push(ApprovalsAPI.ensureFresh?.(['requests'], {force:true}));
+      if (typeof RNDApi !== 'undefined') jobs.push(RNDApi.ensureFresh?.(['rndApprovals'], {force:true}));
+      if (typeof LogisticsFleet !== 'undefined' && typeof LogisticsFleet.ensureFresh === 'function') jobs.push(LogisticsFleet.ensureFresh({force:true}));
+      await Promise.allSettled(jobs.filter(Boolean));
       window.SidebarBadges?.markReady?.('all');
       if (typeof renderNav === 'function') renderNav();
       console.info('[WorkBadges] Badge server-ready; sidebar đã render lại.');
@@ -7356,7 +7395,7 @@ if (
   // refresh theo màn hình đang mở như cũ.
   if (State.module === 'dashboard') {
     // Dashboard hiện ngay từ snapshot; server refresh sau first paint, không chặn login.
-    setTimeout(() => window.DashboardDataSync?.refresh?.({ force:false }), 250);
+    setTimeout(() => window.DashboardDataSync?.refresh?.({ force:true }), 250);
   } else scheduleRouteDataRefresh(State.module, State.tab);
 
   window.addEventListener('hashchange', async () => {
@@ -7367,6 +7406,7 @@ if (
     (Views[route.module] || META[route.module])
   ) {
     if (!Auth.canAccess(route.module, route.tab)) { const first=Auth.firstRoute(); go(first.module,{tab:first.tab}); return; }
+    const previousModule = State.module;
     State.module = route.module;
     State.params = route.tab
       ? { tab: route.tab }
@@ -7376,7 +7416,7 @@ if (
     if (State.module === 'dashboard') {
       window.DashboardDataSync?.hydrate?.().then(() => {
         if (State.module === 'dashboard') render();
-        return window.DashboardDataSync?.refresh?.({ force:false });
+        return window.DashboardDataSync?.refresh?.({ force:true });
       });
     } else {
       // [APPROVAL SERVER-FIRST NAVIGATION]
@@ -7394,6 +7434,22 @@ if (
       if (State.module === 'warehouse' && State.tab === 'inventory' && DB.currentUser?.roleId !== 'ROLE_SUBCONTRACT') {
         try { await WarehouseInventoryPrimaryData.refresh({ force:true }); }
         catch (err) { console.warn('[Warehouse] Refresh Tồn kho khi đổi route thất bại:', err); }
+      }
+
+      // [HR SERVER-FIRST NAVIGATION]
+      // Role HR đăng nhập thẳng vào HR đã được hydrate server trước first paint ở boot().
+      // Nhưng role cấp cao (admin/GĐ/...) vào Dashboard trước, Global Warmup có thể nạp
+      // snapshot HR cũ (ví dụ 86 nhân sự) vào DB. Nếu người dùng click Nhân sự trong
+      // lúc request server chưa hoàn tất, render() cũ sẽ lóe 86 rồi vài giây sau đổi 51.
+      // Khi ĐI VÀO phân hệ HR từ phân hệ khác, chờ đúng lenam_hr_employees trên KIO
+      // trước khi render lần đầu. Chuyển tab nội bộ HR không force lại để tránh request thừa.
+      if (State.module === 'hr' && previousModule !== 'hr') {
+        try {
+          await HRAPI?.bootstrap?.();
+          await HRAPI?.ensureFresh?.(['employees'], { force:true });
+        } catch (err) {
+          console.warn('[HR] Không hydrate được nhân sự KIO trước khi vào phân hệ:', err);
+        }
       }
       render();
       scheduleRouteDataRefresh(State.module, State.tab);

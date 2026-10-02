@@ -307,18 +307,62 @@ function hrSuggestUsername(fullName) {
   return candidate;
 }
 
-/** Gợi ý vai trò mặc định theo phòng ban / chức vụ — người dùng có thể đổi lại */
-function hrSuggestRoleId(dept, position) {
-  if (dept === 'Kinh doanh' && /trưởng phòng/i.test(String(position || ''))) return 'R03';
-  if (HR_DEPT_DEFAULT_ROLE[dept]) return HR_DEPT_DEFAULT_ROLE[dept];
-  return (DB.roles && DB.roles[0] && DB.roles[0].id) || '';
+/** Vai trò được phép theo đúng phòng ban. Không cho gán role chéo phòng ban. */
+const HR_DEPT_ROLE_IDS = {
+  'Ban giám đốc': ['ROLE_DIRECTOR','R02'],
+  'Kinh doanh': ['ROLE_SALES_MANAGER','ROLE_SALES','R03','R04'],
+  'Sản xuất': ['ROLE_PRODUCTION','R05'],
+  'Kho vận': ['ROLE_WAREHOUSE','ROLE_LOGISTICS','R06'],
+  'Mua hàng': ['ROLE_PURCHASE_MANAGER','ROLE_PURCHASE','R07'],
+  'Kế toán': ['ROLE_ACCOUNTING','R08'],
+  'Hành chính - Nhân sự': ['ROLE_HR'],
+  'QC/ATTP': ['ROLE_QC'],
+  'Bảo trì - Vệ sinh': ['ROLE_MAINTENANCE'],
+  'Nhà hàng & Cửa hàng': ['ROLE_RESTAURANT','ROLE_RESTAURANT_STAFF'],
+  'Gia công': ['ROLE_SUBCONTRACT'],
+  'R&D': ['ROLE_RND'],
+  'Hệ thống': ['ROLE_ADMIN','R01'],
+};
+function hrRolesForDept(dept) {
+  const ids = HR_DEPT_ROLE_IDS[String(dept||'')] || [];
+  return (DB.roles || []).filter(r => ids.includes(String(r.id)));
 }
-
-/** Đổi phòng ban / chức vụ trong form NV thì gợi ý lại vai trò, trừ khi người dùng đã tự chọn */
+function hrPositionsForDept(dept) {
+  return [...new Set((DB.employees||[]).filter(e => String(e.dept||'') === String(dept||'') && e.position).map(e => e.position))].sort((a,b)=>String(a).localeCompare(String(b),'vi'));
+}
+function hrSuggestRoleId(dept, position) {
+  const roles = hrRolesForDept(dept);
+  if (dept === 'Kinh doanh' && /trưởng phòng/i.test(String(position || ''))) {
+    const mgr = roles.find(r => ['ROLE_SALES_MANAGER','R03'].includes(String(r.id))); if (mgr) return mgr.id;
+  }
+  if (dept === 'Mua hàng' && /trưởng phòng/i.test(String(position || ''))) {
+    const mgr = roles.find(r => String(r.id)==='ROLE_PURCHASE_MANAGER'); if (mgr) return mgr.id;
+  }
+  return roles[0]?.id || '';
+}
+function hrRefreshPositionAndRoleOptions({keepPosition=true}={}) {
+  const dept = $('#empDept')?.value || '';
+  const posEl = $('#empPosition');
+  const roleEl = $('#empAccountRole');
+  if (posEl) {
+    const oldPos = keepPosition ? posEl.value : '';
+    const positions = hrPositionsForDept(dept);
+    posEl.innerHTML = `<option value="">-- Chọn chức vụ --</option>${positions.map(p=>`<option value="${esc(p)}" ${String(p)===String(oldPos)?'selected':''}>${esc(p)}</option>`).join('')}`;
+    if (!positions.includes(oldPos)) posEl.value = '';
+  }
+  if (roleEl) {
+    const oldRole = roleEl.value;
+    const roles = hrRolesForDept(dept);
+    roleEl.innerHTML = `<option value="">-- Chọn vai trò thuộc phòng ban --</option>${roles.map(r=>`<option value="${esc(r.id)}">${esc(r.name)}</option>`).join('')}`;
+    if (roles.some(r=>String(r.id)===String(oldRole))) roleEl.value=oldRole; else roleEl.value=hrSuggestRoleId(dept,posEl?.value||'');
+    roleEl.dataset.touched='0';
+  }
+}
 function hrSyncSuggestedRole() {
   const roleSelect = $('#empAccountRole');
-  if (!roleSelect || roleSelect.dataset.touched === '1') return;
-  roleSelect.value = hrSuggestRoleId($('#empDept')?.value || '', $('#empPosition')?.value || '');
+  if (!roleSelect) return;
+  const suggested = hrSuggestRoleId($('#empDept')?.value || '', $('#empPosition')?.value || '');
+  if (suggested && hrRolesForDept($('#empDept')?.value||'').some(r=>r.id===suggested)) roleSelect.value = suggested;
 }
 
 /** Gõ họ tên thì tự gợi ý tên đăng nhập, trừ khi người dùng đã tự sửa ô này */
@@ -332,10 +376,11 @@ function hrSyncSuggestedUsername() {
 function openEmployeeForm(id) {
   const editing = id ? Q.employee(id) : null;
   if (id && !editing) { Toast.err('Không tìm thấy nhân sự', id); return; }
-  const positions = [...new Set(DB.employees.map((e) => e.position))].sort();
   const contractTypes = DB.contractTypes || [];
   const today = currentDateYMD();
   const existingAccount = editing ? (DB.users || []).find((u) => u.empId === editing.id) : null;
+  const currentActor = (typeof SystemAPI !== 'undefined' && typeof SystemAPI.currentUser === 'function') ? SystemAPI.currentUser() : null;
+  const canAdminResetPassword = !!editing && !!existingAccount && currentActor?.roleId === 'ROLE_ADMIN';
   const createAccountDefault = !editing; // Mặc định tick khi thêm nhân sự mới
   const suggestedRoleId = hrSuggestRoleId(editing ? editing.dept : '', editing ? editing.position : '');
   const suggestedUsername = editing ? hrSuggestUsername(editing.name) : '';
@@ -355,13 +400,16 @@ function openEmployeeForm(id) {
             <option value="Nữ" ${editing?.gender === 'Nữ' ? 'selected' : ''}>Nữ</option>
           </select></div>
         <div class="field"><label>Phòng ban <span class="req">*</span></label>
-          <select class="inp" id="empDept" onchange="hrSyncSuggestedRole()">
+          <select class="inp" id="empDept" onchange="hrRefreshPositionAndRoleOptions({keepPosition:false})">
             <option value="">-- Chọn phòng ban --</option>
             ${DB.departments.map((d) => `<option value="${esc(d)}" ${editing?.dept === d ? 'selected' : ''}>${esc(d)}</option>`).join('')}
           </select></div>
         <div class="field"><label>Chức vụ <span class="req">*</span></label>
-          <input class="inp" id="empPosition" list="empPositionList" value="${editing ? esc(editing.position) : ''}" placeholder="VD: Công nhân tổ Xay" oninput="hrSyncSuggestedRole()">
-          <datalist id="empPositionList">${positions.map((p) => `<option value="${esc(p)}">`).join('')}</datalist></div>
+          <select class="inp" id="empPosition" onchange="hrSyncSuggestedRole()">
+            <option value="">-- Chọn chức vụ --</option>
+            ${hrPositionsForDept(editing?.dept || '').map((p) => `<option value="${esc(p)}" ${editing?.position===p?'selected':''}>${esc(p)}</option>`).join('')}
+          </select>
+          <div class="cell-sub" style="margin-top:4px">Chỉ hiển thị chức vụ thuộc phòng ban đã chọn.</div></div>
         <div class="field"><label>Loại hợp đồng <span class="req">*</span></label>
           <select class="inp" id="empContractType">
             ${contractTypes.map((c) => `<option value="${esc(c)}" ${editing ? (editing.contractType === c ? 'selected' : '') : (c === contractTypes[0] ? 'selected' : '')}>${esc(c)}</option>`).join('')}
@@ -385,6 +433,18 @@ function openEmployeeForm(id) {
           <i class="fa-solid fa-circle-check" style="color:var(--green)"></i>
           <span>Đã có tài khoản <span class="code">${esc(existingAccount.username)}</span> — vai trò <b>${esc((DB.roles.find((r) => r.id === existingAccount.roleId) || {}).name || '—')}</b>. Đổi vai trò tại menu "Người dùng &amp; phân quyền".</span>
         </div>
+        ${canAdminResetPassword ? `
+          <div class="form-sec-title" style="margin-top:16px"><i class="fa-solid fa-unlock-keyhole"></i>Admin cấp lại mật khẩu</div>
+          <div class="form-grid">
+            <div class="field"><label>Mật khẩu mới <span class="req">*</span></label>
+              <input class="inp" id="empAdminNewPassword" type="password" minlength="6" autocomplete="new-password" placeholder="Tối thiểu 6 ký tự"></div>
+            <div class="field"><label>Nhập lại mật khẩu mới <span class="req">*</span></label>
+              <input class="inp" id="empAdminNewPassword2" type="password" minlength="6" autocomplete="new-password" placeholder="Nhập lại mật khẩu"></div>
+            <div class="field" style="grid-column:1/-1">
+              <div class="cell-sub" style="margin-bottom:8px">Chỉ Quản trị hệ thống được cấp lại mật khẩu. Mật khẩu mới có hiệu lực ngay sau khi xác nhận.</div>
+              <button class="btn btn-warning" type="button" data-act="employee-admin-reset-password" data-id="${esc(editing.id)}"><i class="fa-solid fa-key"></i>Cấp lại mật khẩu</button>
+            </div>
+          </div>` : ''}
       ` : `
         <div class="form-sec-title" style="margin-top:18px"><i class="fa-solid fa-key"></i>Tài khoản đăng nhập</div>
         <div class="field" style="margin-bottom:10px">
@@ -401,9 +461,10 @@ function openEmployeeForm(id) {
             <input class="inp" id="empPassword" type="text" value="123456" placeholder="Mật khẩu ban đầu"></div>
           <div class="field" style="grid-column:1/-1"><label>Vai trò phân quyền <span class="req">*</span></label>
             <select class="inp" id="empAccountRole" onchange="this.dataset.touched='1'">
-              ${(DB.roles || []).map((r) => `<option value="${esc(r.id)}" ${r.id === suggestedRoleId ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}
+              <option value="">-- Chọn vai trò thuộc phòng ban --</option>
+              ${hrRolesForDept(editing?.dept || '').map((r) => `<option value="${esc(r.id)}" ${r.id === suggestedRoleId ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}
             </select>
-            <div class="cell-sub" style="margin-top:4px">Gợi ý tự động theo phòng ban đã chọn — có thể đổi lại nếu cần.</div>
+            <div class="cell-sub" style="margin-top:4px">Chỉ hiển thị vai trò phân quyền thuộc đúng phòng ban đã chọn.</div>
           </div>
         </div>
       `}`,
@@ -419,7 +480,7 @@ async function saveEmployeeForm() {
   const position = $('#empPosition')?.value.trim() || '';
   const contractType = $('#empContractType')?.value || '';
   const status = $('#empStatus')?.value || 'ns_thu_viec';
-  const phone = $('#empPhone')?.value.trim() || '';
+  const phone = String($('#empPhone')?.value || '').replace(/\D/g,'').slice(0,10);
   const email = $('#empEmail')?.value.trim() || '';
   const joinDate = $('#empJoinDate')?.value || currentDateYMD();
   const gender = $('#empGender')?.value || 'Nam';
@@ -429,6 +490,9 @@ async function saveEmployeeForm() {
     Toast.err('Thiếu thông tin', 'Vui lòng nhập đầy đủ họ tên, phòng ban, chức vụ, loại hợp đồng và số điện thoại.');
     return;
   }
+  if (!/^\d{10}$/.test(phone)) { Toast.err('Số điện thoại không hợp lệ','Số điện thoại nhân sự phải gồm đúng 10 chữ số.'); return; }
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { Toast.err('Email không hợp lệ','Vui lòng nhập đúng địa chỉ email cá nhân của nhân sự.'); return; }
+  if (!hrPositionsForDept(dept).includes(position)) { Toast.err('Chức vụ không thuộc phòng ban', 'Vui lòng chọn đúng chức vụ trong danh sách của phòng ban đã chọn.'); return; }
 
   /* Tài khoản đăng nhập đi kèm (chỉ có mặt trên form khi nhân sự chưa có tài khoản) */
   const accountCheckbox = $('#empCreateAccount');
@@ -445,6 +509,7 @@ async function saveEmployeeForm() {
     }
     if (!accPassword) { Toast.err('Thiếu mật khẩu', 'Vui lòng nhập mật khẩu tạm thời cho tài khoản mới.'); return; }
     if (!accRoleId || !(DB.roles || []).some((r) => r.id === accRoleId)) { Toast.err('Chưa chọn vai trò', 'Vui lòng chọn vai trò phân quyền cho tài khoản mới.'); return; }
+    if (!hrRolesForDept(dept).some(r => String(r.id) === String(accRoleId))) { Toast.err('Vai trò không thuộc phòng ban', 'Tài khoản chỉ được chọn vai trò phân quyền thuộc đúng phòng ban của nhân sự.'); return; }
   }
 
   let empRecord;
@@ -470,10 +535,13 @@ async function saveEmployeeForm() {
       : accPassword;
     createdAccount = {
       id: nextCode('U', DB.users, 2), empId, username: accUsername, roleId: accRoleId,
-      passwordHash: accPasswordHash, lastLogin: '', state: 'active', name: empRecord.name, dept: empRecord.dept,
+      passwordHash: accPasswordHash, lastLogin: '', state: 'active', name: empRecord.name, dept: empRecord.dept, email: empRecord.email,
     };
     DB.users.push(createdAccount);
   }
+
+  const linkedAccount=(DB.users||[]).find(u=>String(u.empId||'')===String(empId));
+  if(linkedAccount){ linkedAccount.name=empRecord.name; linkedAccount.fullName=empRecord.name; linkedAccount.dept=empRecord.dept; linkedAccount.email=empRecord.email||''; }
 
   SEARCH_INDEX = null;
   if (typeof HRAPI !== 'undefined') HRAPI.scheduleSync();
@@ -506,6 +574,56 @@ async function saveEmployeeForm() {
   const roleName = createdAccount ? ((DB.roles.find((r) => r.id === createdAccount.roleId) || {}).name || '') : '';
   const accountNote = createdAccount ? ` · Tài khoản ${createdAccount.username} (${roleName})` : '';
   Toast.ok(formId ? 'Đã cập nhật hồ sơ nhân sự' : 'Đã thêm nhân sự mới', `${empId} · ${name}${accountNote}`);
+}
+
+async function adminResetEmployeePassword(empId) {
+  const actor = (typeof SystemAPI !== 'undefined' && typeof SystemAPI.currentUser === 'function') ? SystemAPI.currentUser() : null;
+  if (!actor || actor.roleId !== 'ROLE_ADMIN') {
+    Toast.err('Không có quyền', 'Chỉ Quản trị hệ thống được cấp lại mật khẩu cho nhân viên.');
+    return;
+  }
+
+  const emp = Q.employee(empId);
+  const account = (DB.users || []).find((u) => String(u.empId || '') === String(empId || ''));
+  if (!emp || !account) {
+    Toast.err('Không tìm thấy tài khoản', 'Nhân sự này chưa có tài khoản đăng nhập ERP.');
+    return;
+  }
+
+  const p1 = String($('#empAdminNewPassword')?.value || '');
+  const p2 = String($('#empAdminNewPassword2')?.value || '');
+  if (p1.length < 6) { Toast.err('Mật khẩu chưa hợp lệ', 'Mật khẩu mới phải có ít nhất 6 ký tự.'); return; }
+  if (p1 !== p2) { Toast.err('Mật khẩu chưa khớp', 'Hai lần nhập mật khẩu mới chưa giống nhau.'); return; }
+
+  confirmBox({
+    title: 'Cấp lại mật khẩu?',
+    tone: 'warning',
+    icon: 'fa-key',
+    okText: 'Cấp lại mật khẩu',
+    message: `Tài khoản <b>${esc(account.username)}</b> của <b>${esc(emp.name)}</b> sẽ dùng mật khẩu mới ngay sau khi xác nhận.`,
+    onOk: async () => {
+      try {
+        account.passwordHash = (typeof SystemAPI !== 'undefined' && typeof SystemAPI.hashPassword === 'function')
+          ? await SystemAPI.hashPassword(p1)
+          : p1;
+        account.updatedAt = new Date().toISOString();
+        await SystemAPI.saveUsers();
+        if (typeof SystemAPI.audit === 'function') {
+          await SystemAPI.audit({
+            module: 'SYSTEM', entityType: 'USER', entityId: account.id, action: 'ADMIN_RESET_PASSWORD',
+            description: `${actor.fullName || actor.name || actor.username} cấp lại mật khẩu cho tài khoản ${account.username} · ${emp.id} · ${emp.name}`,
+            newData: { empId: emp.id, username: account.username, resetBy: actor.id || actor.username },
+          });
+        }
+        const a = $('#empAdminNewPassword'); if (a) a.value = '';
+        const b = $('#empAdminNewPassword2'); if (b) b.value = '';
+        Toast.ok('Đã cấp lại mật khẩu', `${emp.name} có thể đăng nhập bằng mật khẩu mới.`);
+      } catch (err) {
+        console.warn('[HR] Cấp lại mật khẩu thất bại:', err);
+        Toast.err('Không cấp lại được mật khẩu', err?.message || 'Không lưu được tài khoản lên server.');
+      }
+    },
+  });
 }
 
 /* -------------------------------------------------- KHÓA / NGỪNG SỬ DỤNG */

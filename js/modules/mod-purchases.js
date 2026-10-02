@@ -2457,6 +2457,7 @@ function openPaymentModal(poId) {
         <div class="field"><label>Hình thức thanh toán</label>
           <select class="inp" id="payMethod"><option value="BANK_TRANSFER">Chuyển khoản ngân hàng</option><option value="CASH">Tiền mặt</option></select></div>
         <div class="field"><label>Người thực hiện</label><select class="inp" id="payPayer"><option value="">-- Chọn người thực hiện --</option>${people}</select></div>
+        <div class="field" style="grid-column:1/-1"><label>Định khoản <span class="req">*</span></label><select class="inp" id="payAccountingEntry">${typeof accountingEntryOptions==='function'?accountingEntryOptions('CHI'):''}</select></div>
       </div>
       <div class="form-grid" id="payBankWrap">
         <div class="field"><label>Tài khoản ngân hàng thanh toán</label><select class="inp" id="payBank"><option value="">-- Chọn ngân hàng --</option>${banks}</select></div>
@@ -2494,6 +2495,7 @@ function openSupplierRefundModal(poId) {
       <div class="field" id="supplierRefundBankField"><label>Tài khoản nhận tiền <span class="req">*</span></label><select class="inp" id="supplierRefundBank"><option value="">-- Chọn tài khoản ngân hàng --</option>${banks}</select></div>
       <div class="field"><label>Mã giao dịch / tham chiếu</label><input class="inp" id="supplierRefundRef" placeholder="VD: FT260917..." /></div>
       <div class="field"><label>Người ghi nhận</label><input class="inp" value="${esc((String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||'Người dùng'))}" disabled></div>
+      <div class="field span-2"><label>Định khoản <span class="req">*</span></label><select class="inp" id="supplierRefundAccountingEntry">${typeof accountingEntryOptions==='function'?accountingEntryOptions('THU'):''}</select></div>
       <div class="field span-2"><label>Ghi chú</label><textarea class="inp" id="supplierRefundNote" rows="2" placeholder="Nội dung NCC hoàn tiền..."></textarea></div>
     </div>`,
     foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="supplier-refund-save" data-id="${esc(po.id)}"><i class="fa-solid fa-floppy-disk"></i>Ghi nhận hoàn tiền</button>`,
@@ -2505,15 +2507,16 @@ function saveSupplierRefund(poId) {
   const po=Q.purchaseOrder(poId); if(!po)return;
   const due=purchaseSupplierRefundDue(po);
   const raw=String($('#supplierRefundAmount')?.value||'').replace(/\./g,'').replace(/,/g,'');
-  const amount=Number(raw||0), method=$('#supplierRefundMethod')?.value||'BANK_TRANSFER', bankId=$('#supplierRefundBank')?.value||'';
+  const amount=Number(raw||0), method=$('#supplierRefundMethod')?.value||'BANK_TRANSFER', bankId=$('#supplierRefundBank')?.value||'', accountingEntryId=$('#supplierRefundAccountingEntry')?.value||'';
   if(!amount||amount<=0){Toast.err('Thiếu số tiền','Vui lòng nhập số tiền NCC hoàn.');return;}
+  if(!accountingEntryId){Toast.err('Chưa chọn định khoản','Khoản NCC hoàn tiền bắt buộc phải chọn định khoản.');return;}
   if(amount>due+0.001){Toast.err('Số tiền vượt khoản phải hoàn',`NCC hiện chỉ còn phải hoàn ${fmtVND(due)}.`);return;}
   if(method==='BANK_TRANSFER'&&!bankId){Toast.err('Chưa chọn tài khoản nhận','Vui lòng chọn tài khoản ngân hàng nhận tiền.');return;}
   const bank=(DB.bankAccounts||[]).find(b=>String(b.id)===String(bankId));
   DB.supplierRefunds=DB.supplierRefunds||[];
   const id=nextCode('HTNCC-2026-',DB.supplierRefunds);
   const isAdmin=String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN';
-  DB.supplierRefunds.unshift({id,poId:po.id,supplierId:po.supplierId,date:$('#supplierRefundDate')?.value||currentDateYMD(),amount,method,bankId,bankName:bank?(bank.bankName||bank.name||''):'',accountNumber:bank?.accountNumber||'',reference:$('#supplierRefundRef')?.value.trim()||'',note:$('#supplierRefundNote')?.value.trim()||'',receivedBy:DB.currentUser?.userId||DB.currentUser?.id||'',receivedByName:isAdmin?'Admin':(DB.currentUser?.name||DB.currentUser?.fullName||''),createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:isAdmin?'Admin':(DB.currentUser?.name||DB.currentUser?.fullName||''),createdAt:new Date().toISOString()});
+  DB.supplierRefunds.unshift({id,poId:po.id,supplierId:po.supplierId,date:$('#supplierRefundDate')?.value||currentDateYMD(),amount,method,accountingEntryId,bankId,bankName:bank?(bank.bankName||bank.name||''):'',accountNumber:bank?.accountNumber||'',reference:$('#supplierRefundRef')?.value.trim()||'',note:$('#supplierRefundNote')?.value.trim()||'',receivedBy:DB.currentUser?.userId||DB.currentUser?.id||'',receivedByName:isAdmin?'Admin':(DB.currentUser?.name||DB.currentUser?.fullName||''),createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:isAdmin?'Admin':(DB.currentUser?.name||DB.currentUser?.fullName||''),createdAt:new Date().toISOString()});
   po.updatedAt=new Date().toISOString(); po.updatedBy=DB.currentUser?.userId||DB.currentUser?.id||'';
   if(typeof SystemAPI!=='undefined')SystemAPI.audit({module:'PURCHASE',entityType:'SUPPLIER_REFUND',entityId:id,action:'CREATE',description:`Ghi nhận ${Q.supplierName(po.supplierId)} hoàn ${fmtVND(amount)} cho ${po.id}`,newData:{poId:po.id,amount}});
   Modal.close(); render(); Toast.ok('Đã ghi nhận NCC hoàn tiền',`${id} · ${fmtVND(amount)} · Còn phải hoàn ${fmtVND(purchaseSupplierRefundDue(po))}`);

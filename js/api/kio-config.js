@@ -92,6 +92,11 @@ const KIO_CONFIG = Object.freeze({
     fixedAssets: 'lenam_restaurant_fixed_assets',
   }),
 
+  // KẾ TOÁN – TÀI CHÍNH — master định khoản do kế toán khai báo.
+  accountingTables: Object.freeze({
+    entries: 'lenam_accounting_entries',
+  }),
+
   // NHÂN SỰ (HR) — persistence thật trên KIO; trước bản này DB.employees chỉ
   // sống trong bộ nhớ nên mọi thay đổi (thêm/sửa/khóa/import NV) mất khi F5.
   hrTables: Object.freeze({
