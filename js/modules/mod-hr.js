@@ -778,6 +778,7 @@ Views.attendance = function () {
   const totalLeave = DB.attendance.reduce((s, a) => s + a.leave, 0);
   const totalLate = DB.attendance.filter((a) => a.late > 0).length;
 
+  const canEditAtt = hrAttEditAllowed();
   const rows = pg.items.map((a) => `
     <tr class="clickable" data-act="open-employee" data-id="${a.empId}">
       <td><span class="code">${a.empId}</span></td>
@@ -789,6 +790,7 @@ Views.attendance = function () {
       <td class="center num hide-sm" style="color:${a.late ? 'var(--red)' : 'var(--text-3)'}">${a.late || '—'}</td>
       <td class="center num hide-sm" style="color:${a.ot ? 'var(--indigo)' : 'var(--text-3)'}">${a.ot || '—'}</td>
       <td style="min-width:120px">${progressBar(a.rate)}</td>
+      <td class="center">${canEditAtt ? `<button class="btn btn-sm" data-act="attendance-edit" data-id="${a.empId}" title="Sửa chấm công"><i class="fa-solid fa-pen"></i></button>` : ''}</td>
     </tr>`);
 
   return `
@@ -817,11 +819,120 @@ Views.attendance = function () {
     ${tableShell(
       [{ t: 'Mã NV', w: '92px' }, { t: 'Họ tên' }, { t: 'Phòng ban', cls: 'hide-sm' }, { t: 'Công chuẩn', cls: 'center' },
        { t: 'Đi làm', cls: 'center' }, { t: 'Nghỉ phép', cls: 'center' }, { t: 'Đi muộn', cls: 'center hide-sm' },
-       { t: 'Tăng ca (h)', cls: 'center hide-sm' }, { t: 'Tỷ lệ', w: '150px' }],
+       { t: 'Tăng ca (h)', cls: 'center hide-sm' }, { t: 'Tỷ lệ', w: '150px' }, { t: '', w: '56px', cls: 'center' }],
       rows, { emptyTitle: 'Không có dữ liệu chấm công' })}
     ${pagiHTML('attendance', pg, 'nhân sự')}
   </div>`;
 };
+
+/* ------------------------------------------------ SỬA BẢNG CÔNG */
+function hrAttEditAllowed() {
+  try {
+    if (typeof Auth === 'undefined' || typeof Auth.currentRole !== 'function') return true;
+    const role = Auth.currentRole();
+    if (!role) return true;
+    const perms = role.permissions || role.perms || [];
+    return perms.includes('*') || perms.includes('HR_OPERATE');
+  } catch (e) { return true; }
+}
+
+function hrAttRate(worked, standard) {
+  return standard > 0 ? Math.round((worked / standard) * 1000) / 10 : 0;
+}
+
+function openAttendanceEdit(empId) {
+  if (!hrAttEditAllowed()) { Toast.err('Không đủ quyền', 'Bạn không có quyền chỉnh sửa chấm công.'); return; }
+  const a = DB.attendance.find((x) => x.empId === empId);
+  if (!a) { Toast.err('Không tìm thấy dữ liệu chấm công', empId); return; }
+  const month = (typeof F === 'function' ? F('attendance', { month: '2026-08' }).month : '') || '';
+
+  Modal.open({
+    title: `Sửa chấm công · ${esc(a.empId)}`,
+    sub: `${esc(a.name)} · ${esc(a.dept)}${month ? ' · ' + esc(fmtMonth(month + '-01')) : ''}`,
+    size: 'md',
+    body: `
+      <input type="hidden" id="attEmpId" value="${esc(a.empId)}">
+      <div class="form-grid">
+        <div class="field"><label>Công chuẩn (ngày) <span class="req">*</span></label>
+          <input class="inp right num" id="attStandard" type="number" min="0" step="0.5" value="${Number(a.standard) || 0}" oninput="hrAttPreview()"></div>
+        <div class="field"><label>Công thực tế (ngày) <span class="req">*</span></label>
+          <input class="inp right num" id="attWorked" type="number" min="0" step="0.5" value="${Number(a.worked) || 0}" oninput="hrAttPreview()"></div>
+        <div class="field"><label>Nghỉ phép (ngày)</label>
+          <input class="inp right num" id="attLeave" type="number" min="0" step="0.5" value="${Number(a.leave) || 0}"></div>
+        <div class="field"><label>Số lần đi muộn</label>
+          <input class="inp right num" id="attLate" type="number" min="0" step="1" value="${Number(a.late) || 0}"></div>
+        <div class="field"><label>Tăng ca (giờ)</label>
+          <input class="inp right num" id="attOt" type="number" min="0" step="0.5" value="${Number(a.ot) || 0}"></div>
+        <div class="field"><label>Tỷ lệ chuyên cần</label>
+          <div class="chip" id="attRatePreview" style="padding:9px 12px;font-weight:700">${hrAttRate(Number(a.worked) || 0, Number(a.standard) || 0)}%</div></div>
+      </div>
+      <div class="cell-sub" style="margin-top:10px">Tỷ lệ chuyên cần được tính tự động = công thực tế ÷ công chuẩn.</div>`,
+    foot: `<button class="btn" data-act="modal-close">Hủy</button>
+           <button class="btn btn-primary" data-act="attendance-save"><i class="fa-solid fa-floppy-disk"></i>Lưu thay đổi</button>`,
+  });
+}
+
+function hrAttPreview() {
+  const el = $('#attRatePreview');
+  if (!el) return;
+  el.textContent = hrAttRate(Number($('#attWorked')?.value) || 0, Number($('#attStandard')?.value) || 0) + '%';
+}
+
+async function saveAttendanceEdit() {
+  if (!hrAttEditAllowed()) { Toast.err('Không đủ quyền', 'Bạn không có quyền chỉnh sửa chấm công.'); return; }
+  const empId = $('#attEmpId')?.value || '';
+  const a = DB.attendance.find((x) => x.empId === empId);
+  if (!a) { Toast.err('Không tìm thấy dữ liệu chấm công', empId); return; }
+
+  const read = (id) => { const v = $('#' + id)?.value; return v === '' || v == null ? NaN : Number(v); };
+  const standard = read('attStandard');
+  const worked = read('attWorked');
+  const leave = read('attLeave');
+  const late = read('attLate');
+  const ot = read('attOt');
+
+  if ([standard, worked, leave, late, ot].some((n) => !Number.isFinite(n) || n < 0)) {
+    Toast.err('Dữ liệu không hợp lệ', 'Vui lòng nhập số không âm cho tất cả các ô.');
+    return;
+  }
+  if (standard <= 0) { Toast.err('Công chuẩn không hợp lệ', 'Công chuẩn phải lớn hơn 0.'); return; }
+  if (worked > standard) { Toast.err('Công thực tế vượt công chuẩn', 'Giờ làm thêm vui lòng nhập vào ô Tăng ca.'); return; }
+
+  const oldData = { standard: a.standard, worked: a.worked, leave: a.leave, late: a.late, ot: a.ot, rate: a.rate };
+  const newData = { standard, worked, leave, late: Math.round(late), ot, rate: hrAttRate(worked, standard) };
+  Object.assign(a, newData);
+
+  SEARCH_INDEX = null;
+  if (typeof HRAPI !== 'undefined') HRAPI.scheduleSync();
+  try {
+    if (typeof SystemAPI !== 'undefined' && typeof SystemAPI.audit === 'function') {
+      await SystemAPI.audit({
+        module: 'HR', entityType: 'ATTENDANCE', entityId: empId, action: 'UPDATE',
+        description: `${DB.currentUser?.name || 'Người dùng'} sửa chấm công ${empId} · ${a.name}`,
+        oldData, newData,
+      });
+    }
+  } catch (err) {
+    console.warn('[HR] Không ghi được nhật ký sửa chấm công:', err);
+  }
+
+  Modal.close();
+  render();
+  Toast.ok('Đã cập nhật chấm công', `${empId} · ${a.name} · Công ${worked}/${standard} (${newData.rate}%)`);
+}
+
+// Đăng ký xử lý nút (capture phase) để không phụ thuộc bộ điều phối action ở file lõi
+if (!window.__hrAttendanceEditBound) {
+  window.__hrAttendanceEditBound = true;
+  document.addEventListener('click', (ev) => {
+    const el = ev.target.closest && ev.target.closest('[data-act="attendance-edit"], [data-act="attendance-save"]');
+    if (!el) return;
+    ev.stopPropagation();
+    ev.preventDefault();
+    if (el.dataset.act === 'attendance-edit') openAttendanceEdit(el.dataset.id);
+    else saveAttendanceEdit();
+  }, true);
+}
 
 /* --------------------------------------------- THÔNG TIN PHÂN QUYỀN CÁ NHÂN */
 Views['my-access'] = function () {

@@ -28,6 +28,12 @@ const ApprovalsAPI = (() => {
   let booted = false;
   let scheduleTimer = null;
   let scheduledKeys = new Set();
+  // [FIX reload mất yêu cầu] Số thay đổi cục bộ CHƯA được xác nhận lưu lên server theo từng key.
+  // Khi đang > 0, dữ liệu đọc từ server (có thể cũ hơn) KHÔNG được ghi đè DB.* tương ứng.
+  const pendingLocal = new Map();
+  const pendingOf = (key) => Number(pendingLocal.get(key) || 0);
+  const pendingInc = (keys) => keys.forEach(k => pendingLocal.set(k, pendingOf(k) + 1));
+  const pendingDec = (keys) => keys.forEach(k => pendingLocal.set(k, Math.max(0, pendingOf(k) - 1)));
 
   function versionOf(key) { return Number(localVersion.get(key) || 0); }
   function markLocalChange(keys) {
@@ -41,8 +47,9 @@ const ApprovalsAPI = (() => {
   function readCache() { return KioDataUtils.readJson(CACHE_KEY); }
   function writeCache() { const snap={}; Object.keys(TABLES).forEach(key => snap[key]=KioDataUtils.clone(DB[dbKey(key)] || [])); KioDataUtils.writeJson(CACHE_KEY, snap); }
 
-  function apply(data) {
+  function apply(data, skipKeys = null) {
     Object.keys(TABLES).forEach(key => {
+      if (skipKeys && skipKeys.has(key)) return;
       if (Array.isArray(data?.[key])) DB[dbKey(key)] = data[key];
     });
   }
@@ -91,6 +98,7 @@ const ApprovalsAPI = (() => {
 
   function syncCollections(keys) {
     const wanted = normalizeKeys(keys);
+    pendingInc(wanted);
     syncChain = syncChain.catch(() => {}).then(async () => {
       for (const key of wanted) {
         await KioStore.syncCollection(TABLES[key], Array.isArray(DB[dbKey(key)]) ? DB[dbKey(key)] : []);
@@ -102,19 +110,23 @@ const ApprovalsAPI = (() => {
       console.error('[ApprovalsAPI] Đồng bộ KIO thất bại:', err);
       if (typeof Toast !== 'undefined') Toast.err('Không lưu được dữ liệu phê duyệt', err.message);
       throw err;
-    });
+    }).finally(() => pendingDec(wanted));
     return syncChain;
   }
 
   function scheduleCollections(keys, delay = 180) {
     markLocalChange(keys);
-    normalizeKeys(keys).forEach(key => scheduledKeys.add(key));
+    normalizeKeys(keys).forEach(key => {
+      if (!scheduledKeys.has(key)) pendingInc([key]);
+      scheduledKeys.add(key);
+    });
     writeCache();
     clearTimeout(scheduleTimer);
     scheduleTimer = setTimeout(() => {
       const wanted = [...scheduledKeys];
       scheduledKeys = new Set();
-      syncCollections(wanted).catch(() => {});
+      syncCollections(wanted).catch(() => {}); // syncCollections đã tự đếm pending trước khi nhả bộ đếm của lịch
+      pendingDec(wanted);
     }, delay);
   }
 
@@ -141,14 +153,17 @@ const ApprovalsAPI = (() => {
     if (!force && (Date.now() - lastRefreshAt) < REFRESH_TTL) return false;
     try {
       const data = await loadServerAndMigrateIfNeeded();
+      // Đọc server mất vài giây; trong lúc đó người dùng có thể vừa tạo/duyệt yêu cầu.
+      // Key nào còn thay đổi chưa lưu thì giữ nguyên dữ liệu cục bộ, không ghi đè bằng bản server cũ.
+      const skip = new Set(Object.keys(TABLES).filter(key => pendingOf(key) > 0));
       const changed = {};
       Object.keys(TABLES).forEach(key => {
-        if (!Array.isArray(data?.[key])) return;
+        if (skip.has(key) || !Array.isArray(data?.[key])) return;
         const before = JSON.stringify(DB[dbKey(key)] || []);
         const after = JSON.stringify(data[key]);
         if (before !== after) changed[key] = data[key];
       });
-      apply(data);
+      apply(data, skip);
       lastRefreshAt = Date.now();
       writeCache();
       return changed;
@@ -163,7 +178,7 @@ const ApprovalsAPI = (() => {
     if (bootPromise) return bootPromise;
     bootPromise = (async () => {
       const cached = readCache();
-      if (cached) apply(cached);
+      if (cached) apply(cached, new Set(Object.keys(TABLES).filter(key => pendingOf(key) > 0)));
       try { await ensureFresh(null, { force: true }); } catch (_) {}
       booted = true;
       return true;
@@ -171,5 +186,12 @@ const ApprovalsAPI = (() => {
     return bootPromise;
   }
 
-  return { bootstrap, ensureFresh, syncCollections, scheduleCollections, appendLogs, deleteKeys };
+  // Đọc lại từ server (bỏ qua cache) để xác nhận một record đã thật sự nằm trong DB.
+  async function existsOnServer(key, id) {
+    if (!TABLES[key]) return false;
+    const rows = await KioStore.listCollection(TABLES[key], { force: true });
+    return rows.some(r => String(r?.id) === String(id));
+  }
+
+  return { bootstrap, ensureFresh, syncCollections, scheduleCollections, appendLogs, deleteKeys, existsOnServer };
 })();
