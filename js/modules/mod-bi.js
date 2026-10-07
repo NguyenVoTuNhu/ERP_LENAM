@@ -351,6 +351,7 @@ function biFinanceView() {
 
   return `
     ${pageHead('Tài chính', 'Doanh thu, lợi nhuận, dòng tiền và công nợ — cập nhật theo dữ liệu hệ thống hiện có', periodToggle)}
+    ${moduleTabs(biTabsConfig(), 'finance')}
     ${kpis}
     <div class="grid g-21" style="margin-bottom:16px">
       <div class="card">
@@ -517,6 +518,7 @@ function biWarehouseView() {
 
   return `
     ${pageHead('Kho', 'Giá trị tồn kho, hàng cận hạn và hàng chậm luân chuyển — cập nhật theo dữ liệu hệ thống hiện có', nearDaysToggle)}
+    ${moduleTabs(biTabsConfig(), 'warehouse')}
     ${kpis}
     <div class="grid g-21" style="margin-bottom:16px">
       <div class="card">
@@ -658,6 +660,7 @@ function biProductionView() {
 
   return `
     ${pageHead('Sản xuất', 'Sản lượng, hao hụt và hiệu suất dây chuyền — cập nhật theo dữ liệu hệ thống hiện có')}
+    ${moduleTabs(biTabsConfig(), 'production')}
     ${kpis}
     <div class="grid g-21" style="margin-bottom:16px">
       <div class="card">
@@ -809,6 +812,7 @@ function biSalesView() {
 
   return `
     ${pageHead('Kinh doanh', 'Top khách hàng, sản phẩm và khu vực — cập nhật theo dữ liệu hệ thống hiện có', periodToggle)}
+    ${moduleTabs(biTabsConfig(), 'sales')}
     ${kpis}
     <div class="grid g-21" style="margin-bottom:16px">
       <div class="card">
@@ -850,7 +854,7 @@ function biSalesView() {
  * -------------------------------------------------------------------------*/
 /** Giá vốn nguyên liệu cho 1 phần món, tính từ recipe.items (BOM của món ăn) */
 function biRecipeUnitCost(recipe) {
-  return (recipe.items || []).reduce((s, it) => { const item=Q.material(it.materialId)||Q.product(it.materialId); return s + Number(it.quantity || 0) * Number(item?.price || item?.cost || 0); }, 0);
+  return (recipe.items || []).reduce((s, it) => s + Number(it.quantity || 0) * Number(Q.material(it.materialId)?.price || 0), 0);
 }
 
 /** Chi phí nhân công ƯỚC TÍNH cho các đơn của 1 cửa hàng: hệ thống demo chưa có
@@ -872,8 +876,7 @@ function biLaborCostEstimate(storeOrders) {
 
 function biRestaurantData() {
   const stores = DB.stores || [];
-  // Doanh thu BI chỉ ghi nhận đơn đã thanh toán thật trên server.
-  const orders = (DB.posOrders || []).filter(o => o.status === 'PAID');
+  const orders = DB.posOrders || [];
 
   const perStore = stores.map((store) => {
     const storeOrders = orders.filter((o) => o.storeId === store.id);
@@ -939,7 +942,7 @@ function biRestaurantView() {
     </div>
     <div class="alert info" style="margin-bottom:16px;font-size:12.3px">
       <i class="fa-solid fa-circle-info"></i>
-      <span>Doanh thu chỉ lấy đơn đã thanh toán trên server. Food Cost tính trực tiếp từ định mức nguyên liệu/thành phẩm và đơn giá hiện tại. Labor Cost hiện chưa có bảng chấm công theo cửa hàng, nên được <b>ước tính</b> bằng lương tháng của nhân viên (÷ 26 ngày công) nhân với số ngày nhân viên đó có phát sinh bán hàng tại cửa hàng — không phải số liệu chấm công thực tế.</span>
+      <span>Food Cost tính trực tiếp từ định mức nguyên liệu (recipe) của từng món. Labor Cost hệ thống demo chưa có bảng chấm công theo cửa hàng, nên được <b>ước tính</b> bằng lương tháng của nhân viên (÷ 26 ngày công) nhân với số ngày nhân viên đó có phát sinh bán hàng tại cửa hàng — không phải số liệu chấm công thực tế.</span>
     </div>`;
 
   const storeRows = d.perStore.map((x) => `
@@ -964,10 +967,11 @@ function biRestaurantView() {
 
   return `
     ${pageHead('Nhà hàng', 'Doanh thu từng cửa hàng, Food Cost, Labor Cost và Prime Cost — cập nhật theo dữ liệu hệ thống hiện có')}
+    ${moduleTabs(biTabsConfig(), 'restaurant')}
     ${kpis}
     <div class="grid g-21" style="margin-bottom:16px">
       <div class="card">
-        <div class="card-head"><div><h3>Doanh thu theo cửa hàng</h3><p>Tổng hợp từ các đơn đã thanh toán trên server</p></div></div>
+        <div class="card-head"><div><h3>Doanh thu theo cửa hàng</h3><p>Tổng hợp từ toàn bộ phiếu bán hàng POS</p></div></div>
         <div class="card-body"><div class="chart-box"><canvas id="biStoreRevenueChart"></canvas></div></div>
       </div>
       <div class="card">
@@ -1081,6 +1085,7 @@ function biHRView() {
 
   return `
     ${pageHead('Nhân sự', 'KPI, năng suất lao động và chi phí nhân sự — cập nhật theo dữ liệu hệ thống hiện có')}
+    ${moduleTabs(biTabsConfig(), 'hr')}
     ${kpis}
     <div class="grid g-21" style="margin-bottom:16px">
       <div class="card">
@@ -1247,5 +1252,79 @@ Views.bi.after = function (params) {
     document.querySelectorAll('[data-bi-po-id]').forEach((row) => {
       row.addEventListener('click', () => switchTo(() => go('production-detail', { id: row.dataset.biPoId })));
     });
+    return;
+  }
+
+  if (tab === 'sales') {
+    const period = State.biSalesPeriod || 'month';
+    const d = biSalesData(period);
+
+    const top5Customers = d.topCustomers.slice(0, 5);
+    Charts.bar(
+      'biTopCustomersChart',
+      top5Customers.map((r) => r.customer?.name || r.customerId),
+      [{ label: 'Doanh thu', data: top5Customers.map((r) => r.revenue), color: 'blue' }],
+      { money: true }
+    );
+
+    const top5Provinces = d.topProvinces.slice(0, 5);
+    const otherProvinceRevenue = biSum(d.topProvinces.slice(5), (r) => r.revenue);
+    const provinceLabels = top5Provinces.map((r) => r.province);
+    const provinceValues = top5Provinces.map((r) => r.revenue);
+    const provinceColorNames = ['blue', 'teal', 'indigo', 'orange', 'green'];
+    if (otherProvinceRevenue > 0) {
+      provinceLabels.push('Khác');
+      provinceValues.push(otherProvinceRevenue);
+      provinceColorNames.push('slate');
+    }
+    Charts.donut('biTopProvinceDonut', provinceLabels, provinceValues, provinceColorNames.slice(0, provinceLabels.length));
+
+    // Toggle Tháng này / Năm nay / Toàn bộ — trước đây thiếu đoạn gắn sự kiện này
+    // nên bấm nút không đổi được kỳ xem của tab Kinh doanh.
+    document.querySelectorAll('[data-bi-sales-period]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        State.biSalesPeriod = btn.dataset.biSalesPeriod;
+        render();
+      });
+    });
+    return;
+  }
+
+  if (tab === 'restaurant') {
+    const d = biRestaurantData();
+
+    Charts.bar(
+      'biStoreRevenueChart',
+      d.perStore.map((x) => x.store.name),
+      [{ label: 'Doanh thu', data: d.perStore.map((x) => x.revenue), color: 'blue' }],
+      { money: true }
+    );
+
+    const remainingProfit = Math.max(0, d.totalRevenue - d.totalFoodCost - d.totalLaborCost);
+    Charts.donut(
+      'biCostBreakdownDonut',
+      ['Food Cost', 'Labor Cost', 'Lợi nhuận còn lại'],
+      [d.totalFoodCost, d.totalLaborCost, remainingProfit],
+      ['orange', 'red', 'green']
+    );
+    return;
+  }
+
+  if (tab === 'hr') {
+    const d = biHRData();
+
+    Charts.bar(
+      'biDeptSalaryChart',
+      d.deptRows.map((x) => x.dept),
+      [{ label: 'Chi phí lương', data: d.deptRows.map((x) => x.salaryCost), color: 'blue' }],
+      { money: true }
+    );
+
+    Charts.donut(
+      'biEmployeeStatusDonut',
+      ['Đang làm việc', 'Nghỉ phép', 'Thử việc', 'Đã nghỉ việc'],
+      [d.activeEmployees.length, d.onLeave.length, d.probation.length, d.resigned.length],
+      ['green', 'orange', 'blue', 'red']
+    );
   }
 };
