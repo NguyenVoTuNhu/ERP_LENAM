@@ -954,6 +954,7 @@ function accTaxView() {
   const materialGroups = [...new Set(DB.materials.map((m) => m.group).filter(Boolean))];
 
   return `${pageHead('Thuế', 'VAT đầu ra tính theo Đơn hàng bán, VAT đầu vào tính theo Đơn đặt hàng mua — không cần khai báo tay', '<button class="btn" data-act="acc-tax-export"><i class="fa-solid fa-file-export"></i>Xuất chi tiết (theo lọc)</button>')}
+    ${accTabsBar('tax')}
     <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('VAT đầu ra (6 tháng)', fmtVND(totalOut), 'fa-arrow-up', 'red')}${mkpi('VAT đầu vào (6 tháng)', fmtVND(totalIn), 'fa-arrow-down', 'green')}${mkpi('Thuế TNDN ước tính tháng này', fmtVND(AccFin.pnlOf(AccFin.currentMonth()).tax), 'fa-landmark', 'indigo')}</div>
 
     <div class="card" style="margin-bottom:14px">
