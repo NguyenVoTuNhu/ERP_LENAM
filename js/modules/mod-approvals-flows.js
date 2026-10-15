@@ -505,6 +505,42 @@
     },
   };
 
+  /* ---- Đề nghị mua hàng (PR): CHỈ cho tạo yêu cầu khi PR đang ở trạng thái "Chờ duyệt" ----
+   * (không đăng ký vào FLOWS vì handler duyệt/từ chối của PR đã có sẵn trong mod-approvals.js) */
+  const PR_PENDING = 'mh_cho_duyet';
+  const PR_FORM = {
+    fields() {
+      const list = (DB.purchases || []).filter((p) => p.status === PR_PENDING && !ApprovalEngine.pendingFor('PR', p.id));
+      if (!list.length) {
+        return `<div class="field" style="grid-column:1/-1"><label>Đề nghị mua hàng *</label><div class="muted" style="padding:10px 12px;border:1px dashed var(--border);border-radius:var(--r)">Không có đề nghị mua hàng nào ở trạng thái "Chờ duyệt" chưa có yêu cầu phê duyệt. Đề nghị mua hàng vừa gửi đã tự có yêu cầu trong tab "Việc cần duyệt".</div><input type="hidden" id="apfPr" value=""></div>`;
+      }
+      return field('Đề nghị mua hàng (chỉ trạng thái "Chờ duyệt") *', `<select class="inp" id="apfPr"><option value="">-- Chọn đề nghị mua hàng --</option>${list.map((p) =>
+        opt(p.id, `${p.id} · ${Q.supplierName?.(p.supplierId) || p.supplierId || ''} · ${fmtVND(approvalPrAmount(p))}`)).join('')}</select>`, true);
+    },
+    collect() {
+      const pr = Q.purchase(val('apfPr'));
+      if (!pr) return { error: 'Vui lòng chọn một đề nghị mua hàng ở trạng thái "Chờ duyệt".' };
+      return { docId: pr.id, amount: approvalPrAmount(pr), title: `Đề nghị mua hàng ${pr.id}`, payload: null };
+    },
+    validate(p) {
+      const pr = Q.purchase(p?.docId);
+      if (!pr) return 'Không tìm thấy đề nghị mua hàng.';
+      if (pr.status !== PR_PENDING) return `${pr.id} đang ở trạng thái "${typeof statusLabel === 'function' ? statusLabel(pr.status) : pr.status}" — chỉ đề nghị mua hàng ở trạng thái "Chờ duyệt" mới được tạo yêu cầu phê duyệt.`;
+      return '';
+    },
+  };
+  const formOf = (type) => FLOWS[type] || (type === 'PR' ? PR_FORM : null);
+
+  // Chốt chặn ở tầng engine: mọi đường tạo yêu cầu PR đều phải đi qua kiểm tra này.
+  const originalCreate = ApprovalEngine.create.bind(ApprovalEngine);
+  ApprovalEngine.create = function (args) {
+    if (args && args.docType === 'PR') {
+      const err = PR_FORM.validate({ docId: args.docId });
+      if (err) { Toast.err('Không thể tạo yêu cầu phê duyệt', err); return null; }
+    }
+    return originalCreate(args);
+  };
+
   /* ---------------------------------------------- chạy áp dụng sau khi duyệt xong */
   async function runApply(req) {
     const f = FLOWS[req.docType]; if (!f || !req.payload) return;
@@ -529,16 +565,78 @@
     });
   });
 
+  /* ------------------------------------------- TỰ ĐỘNG TỪ CHỐI YÊU CẦU QUÁ HẠN */
+  // Hạn xử lý = req.dueAt (tính từ SLA giờ của quy trình lúc tạo yêu cầu).
+  function systemRejectOne(req) {
+    if (!req || req.status !== 'PENDING' || !approvalIsOverdue(req)) return false;
+    const lvl = ApprovalEngine.currentLevelOf(req) || (req.levels || []).find((l) => l.status === 'PENDING');
+    if (!lvl) return false;
+    const now = nowIso();
+    const reason = `Tự động từ chối: quá hạn xử lý (hạn ${fmtDateTimeVN(req.dueAt)}, quá ${approvalOverdueHours(req)} giờ)`;
+    Object.assign(lvl, { status: 'REJECTED', approverId: 'SYSTEM', approverName: 'Hệ thống', time: now, note: reason });
+    req.status = 'REJECTED'; req.completedAt = now; req.autoRejected = true; req.autoRejectReason = reason;
+    // Nhật ký với người thực hiện = Hệ thống (approvalLog() gốc luôn ghi theo người đang đăng nhập).
+    DB.approvalLogs = DB.approvalLogs || [];
+    const entry = { id: nextCode('NKPD-', DB.approvalLogs), requestId: req.id, docType: req.docType, docId: req.docId, level: lvl.level,
+      action: 'REJECT', actorId: 'SYSTEM', actorName: 'Hệ thống', time: now, note: reason, signature: '', roleId: 'SYSTEM', roleName: 'Hệ thống (tự động)', auto: true };
+    DB.approvalLogs.unshift(entry);
+    try { ApprovalsAPI.appendLogs([entry]).catch(() => {}); } catch (_) {}
+    try { SystemAPI?.audit?.({ module: 'APPROVALS', entityType: 'APPROVAL_REQUEST', entityId: req.id, action: 'REJECT', description: `Hệ thống tự động từ chối ${req.docId || req.id}: quá hạn duyệt`, newData: { docType: req.docType, docId: req.docId, level: lvl.level, auto: true } }).catch?.(() => {}); } catch (_) {}
+    try { ApprovalEngine.handlers[req.docType]?.onRejected?.(req); } catch (err) { console.error('[ApprovalFlows] onRejected (tự động) lỗi:', err); }
+    return true;
+  }
+  async function persistExpired(n) {
+    try { await ApprovalsAPI.syncCollections(['requests']); }
+    catch (_) { Toast.err('Chưa lưu được kết quả tự động từ chối', 'Hệ thống sẽ thử lại ở lần kiểm tra kế tiếp.'); }
+    try { render(); } catch (_) {}
+  }
+
+  let expiring = false; let hydrated = false;
+  async function expireOverdue({ refresh = false } = {}) {
+    if (expiring || typeof ApprovalsAPI === 'undefined') return 0;
+    if (!(DB.currentUser?.userId || DB.currentUser?.id)) return 0;          // chưa đăng nhập: không xử lý
+    expiring = true;
+    try {
+      if (!hydrated) { try { await ApprovalsAPI.bootstrap(); hydrated = true; } catch (_) { return 0; } }
+      if (refresh) { try { await ApprovalsAPI.ensureFresh(['requests', 'logs'], { force: false }); } catch (_) {} }
+      const due = (DB.approvalRequests || []).filter(approvalIsOverdue);
+      let n = 0; due.forEach((r) => { if (systemRejectOne(r)) n++; });
+      if (n) {
+        Toast.warn('Yêu cầu quá hạn đã bị tự động từ chối', `${n} yêu cầu`);
+        await persistExpired(n);
+      }
+      return n;
+    } finally { expiring = false; }
+  }
+  window.ApprovalFlows = Object.assign(window.ApprovalFlows || {}, { expireOverdue });
+  setInterval(() => { expireOverdue(); }, 60 * 1000);                          // kiểm tra mỗi phút
+  setTimeout(() => { expireOverdue({ refresh: true }); }, 4000);               // và ngay sau khi tải trang
+  if (typeof Views !== 'undefined' && typeof Views.approvals === 'function') {
+    const originalView = Views.approvals;
+    Views.approvals = function () { const html = originalView.apply(this, arguments); setTimeout(() => { expireOverdue(); }, 0); return html; };
+  }
+
   // Chặn duyệt cấp cuối nếu dữ liệu không còn hợp lệ (hết tồn, vượt dư nợ…) để không tạo request "đã duyệt" mà không áp dụng được.
   const originalApprove = ApprovalEngine.approve.bind(ApprovalEngine);
   ApprovalEngine.approve = function (requestId, opts) {
     const req = (DB.approvalRequests || []).find((r) => r.id === requestId);
+    if (req && approvalIsOverdue(req)) { // quá hạn: không cho duyệt, hệ thống tự từ chối
+      systemRejectOne(req); persistExpired(1);
+      Toast.err('Yêu cầu đã quá hạn', 'Hệ thống đã tự động từ chối yêu cầu này vì quá hạn duyệt.'); return false;
+    }
     const f = req && FLOWS[req.docType];
     if (f && req.status === 'PENDING' && req.payload) {
       const isFinal = !(req.levels || []).some((l) => l.level > req.currentLevel);
       if (isFinal) { const err = f.validate(req.payload, req); if (err) { Toast.err('Không thể duyệt', err); return false; } }
     }
     return originalApprove(requestId, opts);
+  };
+
+  const originalReject = ApprovalEngine.reject.bind(ApprovalEngine);
+  ApprovalEngine.reject = function (requestId, opts) {
+    const req = (DB.approvalRequests || []).find((r) => r.id === requestId);
+    if (req && approvalIsOverdue(req)) { systemRejectOne(req); persistExpired(1); return true; } // kết quả vẫn là "từ chối"
+    return originalReject(requestId, opts);
   };
 
   /* --------------------------------------------------------------- FORM TẠO MỚI */
@@ -548,7 +646,7 @@
 
   function renderFields() {
     const host = document.getElementById('apNewFields'); if (!host) return;
-    const f = FLOWS[val('apNewType')];
+    const f = formOf(val('apNewType'));
     host.innerHTML = f ? f.fields() : GENERIC_FIELDS;
     syncBankVisibility();
   }
@@ -593,7 +691,7 @@
     if (typeof ApprovalsAPI === 'undefined' || typeof ApprovalsAPI.syncCollections !== 'function') {
       Toast.err('Không thể lưu yêu cầu', 'Chưa nạp js/api/approvals-api.js trong index.html nên yêu cầu sẽ mất khi tải lại trang.'); return;
     }
-    const docType = val('apNewType'); const f = FLOWS[docType]; const note = val('apNewNote').trim();
+    const docType = val('apNewType'); const f = formOf(docType); const note = val('apNewNote').trim();
     // Đọc form trước khi await (modal vẫn mở nhưng lấy sớm cho chắc).
     const c = f ? f.collect() : null;
     const generic = f ? null : { docId: val('apNewDocId').trim(), amount: Number(val('apNewAmount') || 0), title: val('apNewTitle').trim() };
@@ -604,7 +702,7 @@
     try { await ApprovalsAPI.bootstrap?.(); await ApprovalsAPI.ensureFresh(['requests', 'logs'], { force: true }); } catch (_) {}
     let { docId = '', amount = 0, title = '' } = c || generic; const payload = c ? c.payload : null;
     if (f) {
-      const err = f.validate(payload); if (err) { Toast.err('Không thể tạo yêu cầu', err); return; }
+      const err = f.validate(payload || { docId }); if (err) { Toast.err('Không thể tạo yêu cầu', err); return; }
       if (docId && (DB.approvalRequests || []).some((r) => r.status === 'PENDING' && r.docType === docType && r.docId === docId)) {
         Toast.err('Đã có yêu cầu đang chờ duyệt', `${docId} đã có yêu cầu ${docType} đang chờ duyệt.`); return;
       }
@@ -649,6 +747,7 @@
   if (typeof originalDetailBody === 'function') {
     window.approvalDetailBody = function (req) {
       let html = originalDetailBody(req);
+      if (req.autoRejected) html += `<div class="alert" style="margin-top:12px;padding:11px 13px;border-radius:var(--r);background:var(--surface-2);border:1px solid var(--red)"><i class="fa-solid fa-clock" style="color:var(--red)"></i> ${esc(req.autoRejectReason || 'Hệ thống tự động từ chối vì quá hạn duyệt.')}</div>`;
       const f = FLOWS[req.docType];
       if (f && req.payload) {
         const rowsHtml = (f.describe(req.payload) || []).map(([k, v]) => `<div class="detail-row"><span class="muted">${esc(k)}</span><strong>${esc(v)}</strong></div>`).join('');
